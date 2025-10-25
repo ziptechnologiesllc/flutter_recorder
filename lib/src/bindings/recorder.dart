@@ -181,6 +181,14 @@ abstract class RecorderImpl {
   @mustBeOverridden
   void setFftSmoothing(double smooth);
 
+  /// Enable or disable low-latency audio monitoring (input passthrough to output).
+  @mustBeOverridden
+  void setMonitoring(bool enabled);
+
+  /// Set monitoring mode: 0=stereo, 1=leftMono, 2=rightMono, 3=mono.
+  @mustBeOverridden
+  void setMonitoringMode(int mode);
+
   /// Conveninet way to get FFT data. Return a 256 float array containing
   /// FFT data in the range [-1.0, 1.0] not clamped.
   ///

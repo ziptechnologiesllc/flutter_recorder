@@ -17,11 +17,12 @@
 #define LOG_TAG "FlutterRecorder"
 #endif
 
-// 1024 means 1/(44100*2)*1024 = 0.0116 ms
-#define BUFFER_SIZE 1024                   // Buffer length in frames
+// 128 frames for ultra-low latency monitoring (~2.67ms @ 48kHz)
+#define BUFFER_SIZE 128                    // Buffer length in frames
 #define STREAM_BUFFER_SIZE (BUFFER_SIZE * 2) // Buffer length in frames
 #define MOVING_AVERAGE_SIZE 4              // Moving average window size
-float capturedBuffer[BUFFER_SIZE * 2];     // Captured audio buffer
+#define VISUALIZATION_BUFFER_SIZE 1024     // Larger buffer for waveform visualization
+float capturedBuffer[VISUALIZATION_BUFFER_SIZE * 2];     // Captured audio buffer for visualization
 std::mutex capturedBufferMutex;           // Mutex for protecting capturedBuffer
 std::atomic<bool> is_silent{true};     // Initial state
 bool delayed_silence_started = false;  // Whether the silence is delayed
@@ -183,6 +184,51 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput, ma_uin
     float *captured = (float *)(pInput); // Assuming float format
     Capture *userData = (Capture *)pDevice->pUserData;
 
+    // NATIVE MONITORING: Direct passthrough input -> output (ZERO LATENCY!)
+    if (userData->monitoringEnabled && pOutput != nullptr && pInput != nullptr)
+    {
+        float* inputFloat = (float*)pInput;
+        float* outputFloat = (float*)pOutput;
+        int channels = userData->deviceConfig.capture.channels;
+
+        if (channels == 2) {
+            // Stereo input - apply monitoring mode
+            switch(userData->monitoringMode) {
+                case 0: // Stereo - normal passthrough at 100%
+                    {
+                        size_t bytesToCopy = frameCount * channels * userData->bytesPerSample;
+                        memcpy(pOutput, pInput, bytesToCopy);
+                    }
+                    break;
+                case 1: // LM - Left channel at 100% to both outputs
+                    for (ma_uint32 i = 0; i < frameCount; i++) {
+                        float leftSample = inputFloat[i * 2];
+                        outputFloat[i * 2] = leftSample;      // Left output
+                        outputFloat[i * 2 + 1] = leftSample;  // Right output
+                    }
+                    break;
+                case 2: // RM - Right channel at 100% to both outputs
+                    for (ma_uint32 i = 0; i < frameCount; i++) {
+                        float rightSample = inputFloat[i * 2 + 1];
+                        outputFloat[i * 2] = rightSample;     // Left output
+                        outputFloat[i * 2 + 1] = rightSample; // Right output
+                    }
+                    break;
+                case 3: // M - Mono mix at 50% per channel to both outputs
+                    for (ma_uint32 i = 0; i < frameCount; i++) {
+                        float monoSample = inputFloat[i * 2] * 0.5f + inputFloat[i * 2 + 1] * 0.5f;
+                        outputFloat[i * 2] = monoSample;      // Left output
+                        outputFloat[i * 2 + 1] = monoSample;  // Right output
+                    }
+                    break;
+            }
+        } else {
+            // Mono input - just pass through
+            size_t bytesToCopy = frameCount * channels * userData->bytesPerSample;
+            memcpy(pOutput, pInput, bytesToCopy);
+        }
+    }
+
     // Apply filters
     if (userData->mFilters->filters.size() > 0)
     {
@@ -282,6 +328,8 @@ Capture::Capture() : isDetectingSilence(false),
                      isRecording(false),
                      isRecordingPaused(false),
                      isStreamingData(false),
+                     monitoringEnabled(false),
+                     monitoringMode(0),
                      mInited(false)
 {
     memset(waveData, 0, sizeof(float) * 256);
@@ -354,7 +402,9 @@ CaptureErrors Capture::init(
     unsigned int sampleRate,
     unsigned int channels)
 {
-    deviceConfig = ma_device_config_init(ma_device_type_capture);
+    // Use duplex mode (capture + playback) to support monitoring
+    // This allows direct audio passthrough from input to output with zero latency
+    deviceConfig = ma_device_config_init(ma_device_type_duplex);
     deviceConfig.periodSizeInFrames = BUFFER_SIZE;
     if (deviceID != -1)
     {
@@ -363,6 +413,7 @@ CaptureErrors Capture::init(
             return captureInitFailed;
         deviceConfig.capture.pDeviceID = &pCaptureInfos[deviceID].id;
     }
+
     ma_format format;
     switch (pcmFormat)
     {
@@ -394,6 +445,11 @@ CaptureErrors Capture::init(
     deviceConfig.sampleRate = sampleRate;
     deviceConfig.dataCallback = data_callback;
     deviceConfig.pUserData = this;
+
+    // Configure playback to match capture settings for monitoring
+    // Playback will use the default output device
+    deviceConfig.playback.format = format;
+    deviceConfig.playback.channels = channels;
 
     result = ma_device_init(NULL, &deviceConfig, &device);
     if (result != MA_SUCCESS)

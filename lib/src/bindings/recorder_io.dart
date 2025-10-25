@@ -372,6 +372,16 @@ class RecorderFfi extends RecorderImpl {
   }
 
   @override
+  void setMonitoring(bool enabled) {
+    _bindings.flutter_recorder_setMonitoring(enabled);
+  }
+
+  @override
+  void setMonitoringMode(int mode) {
+    _bindings.flutter_recorder_setMonitoringMode(mode);
+  }
+
+  @override
   Float32List getFft({bool alwaysReturnData = true}) {
     final ffi.Pointer<ffi.Pointer<ffi.Float>> fft = calloc();
     final isTheSameAsBefore = calloc<ffi.Bool>();

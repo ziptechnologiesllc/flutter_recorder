@@ -99,6 +99,12 @@ public:
     /// true when the capture device is streaming data.
     bool isStreamingData;
 
+    /// true when monitoring (input passthrough to output) is enabled.
+    bool monitoringEnabled;
+
+    /// Monitoring mode: 0=stereo, 1=leftMono, 2=rightMono, 3=mono
+    int monitoringMode;
+
     /// the number of bytes per sample
     int bytesPerSample;
 

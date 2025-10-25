@@ -445,6 +445,37 @@ class FlutterRecorderBindings {
       _flutter_recorder_setFftSmoothingPtr.asFunction<void Function(double)>();
 
   /// //////////////////////
+  /// MONITORING
+  /// //////////////////////
+  void flutter_recorder_setMonitoring(
+    bool enabled,
+  ) {
+    return _flutter_recorder_setMonitoring(
+      enabled,
+    );
+  }
+
+  late final _flutter_recorder_setMonitoringPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Bool)>>(
+          'flutter_recorder_setMonitoring');
+  late final _flutter_recorder_setMonitoring =
+      _flutter_recorder_setMonitoringPtr.asFunction<void Function(bool)>();
+
+  void flutter_recorder_setMonitoringMode(
+    int mode,
+  ) {
+    return _flutter_recorder_setMonitoringMode(
+      mode,
+    );
+  }
+
+  late final _flutter_recorder_setMonitoringModePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int)>>(
+          'flutter_recorder_setMonitoringMode');
+  late final _flutter_recorder_setMonitoringMode =
+      _flutter_recorder_setMonitoringModePtr.asFunction<void Function(int)>();
+
+  /// //////////////////////
   /// FILTERS
   /// //////////////////////
   int flutter_recorder_isFilterActive(

@@ -418,3 +418,17 @@ FFI_PLUGIN_EXPORT float flutter_recorder_getFilterParams(enum RecorderFilterType
 {
     return mFilters.get()->getFilterParams(filterType, attributeId);
 }
+
+/////////////////////////
+/// MONITORING
+/////////////////////////
+
+FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoring(bool enabled)
+{
+    capture.monitoringEnabled = enabled;
+}
+
+FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoringMode(int mode)
+{
+    capture.monitoringMode = mode;
+}

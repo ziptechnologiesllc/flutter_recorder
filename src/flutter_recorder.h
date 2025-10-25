@@ -80,6 +80,12 @@ extern "C"
     FFI_PLUGIN_EXPORT void flutter_recorder_setFftSmoothing(float smooth);
 
     /////////////////////////
+    /// MONITORING
+    /////////////////////////
+    FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoring(bool enabled);
+    FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoringMode(int mode);
+
+    /////////////////////////
     /// FILTERS
     /////////////////////////
     FFI_PLUGIN_EXPORT int flutter_recorder_isFilterActive(enum RecorderFilterType filterType);

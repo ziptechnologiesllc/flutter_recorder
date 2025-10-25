@@ -359,6 +359,22 @@ interface class Recorder {
     _recoreder.impl.setFftSmoothing(smooth);
   }
 
+  /// Enable or disable low-latency audio monitoring (input passthrough to output).
+  /// When enabled, microphone input is directly routed to speakers at the native level.
+  /// WARNING: Can cause feedback! Use headphones or ensure speakers are not near microphone.
+  void setMonitoring(bool enabled) {
+    _recoreder.impl.setMonitoring(enabled);
+  }
+
+  /// Set monitoring mode for stereo inputs.
+  /// - 0: Stereo (normal passthrough)
+  /// - 1: Left Mono (left channel to both outputs)
+  /// - 2: Right Mono (right channel to both outputs)
+  /// - 3: Mono (mix both channels to both outputs)
+  void setMonitoringMode(int mode) {
+    _recoreder.impl.setMonitoringMode(mode);
+  }
+
   /// Conveninet way to get FFT data. Return a 256 float array containing
   /// FFT data in the range [-1.0, 1.0] not clamped.
   ///
