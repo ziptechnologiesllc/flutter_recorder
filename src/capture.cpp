@@ -229,6 +229,31 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput, ma_uin
         }
     }
 
+    // TRANSFORM CAPTURED BUFFER in-place to match monitoring mode
+    // This ensures recordings, visualizations, and filters all use the same transformed audio
+    int channels = userData->deviceConfig.capture.channels;
+    if (channels == 2 && userData->monitoringMode != 0) {
+        switch(userData->monitoringMode) {
+            case 1: // LM - Left to both channels
+                for (ma_uint32 i = 0; i < frameCount; i++) {
+                    captured[i * 2 + 1] = captured[i * 2]; // Copy left to right
+                }
+                break;
+            case 2: // RM - Right to both channels
+                for (ma_uint32 i = 0; i < frameCount; i++) {
+                    captured[i * 2] = captured[i * 2 + 1]; // Copy right to left
+                }
+                break;
+            case 3: // M - Mono mix to both channels
+                for (ma_uint32 i = 0; i < frameCount; i++) {
+                    float monoSample = captured[i * 2] * 0.5f + captured[i * 2 + 1] * 0.5f;
+                    captured[i * 2] = monoSample;
+                    captured[i * 2 + 1] = monoSample;
+                }
+                break;
+        }
+    }
+
     // Apply filters
     if (userData->mFilters->filters.size() > 0)
     {
