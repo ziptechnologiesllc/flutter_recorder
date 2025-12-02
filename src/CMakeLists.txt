@@ -27,6 +27,10 @@ set_target_properties(flutter_recorder PROPERTIES
 
 target_compile_definitions(flutter_recorder PUBLIC DART_SHARED_LIB)
 
+if (WIN32)
+  target_compile_definitions(flutter_recorder PRIVATE _IS_WIN_)
+endif()
+
 if (ANDROID)
   # Support Android 15 16k page size.
   target_link_options(flutter_recorder PRIVATE "-Wl,-z,max-page-size=16384,-O2")

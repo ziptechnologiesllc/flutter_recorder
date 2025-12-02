@@ -355,7 +355,8 @@ Capture::Capture() : isDetectingSilence(false),
                      isStreamingData(false),
                      monitoringEnabled(false),
                      monitoringMode(0),
-                     mInited(false)
+                     mInited(false),
+                     mContextInited(false)
 {
     memset(waveData, 0, sizeof(float) * 256);
 }
@@ -363,6 +364,17 @@ Capture::Capture() : isDetectingSilence(false),
 Capture::~Capture()
 {
     dispose();
+
+#ifdef _IS_WIN_
+    // On Windows, the context was kept alive across init/dispose cycles.
+    // Clean it up now in the destructor.
+    if (mContextInited) {
+        printf("[Capture::~Capture] Windows: Cleaning up context in destructor\n");
+        fflush(stdout);
+        ma_context_uninit(&context);
+        mContextInited = false;
+    }
+#endif
 }
 
 std::vector<CaptureDevice> Capture::listCaptureDevices()
@@ -427,10 +439,81 @@ CaptureErrors Capture::init(
     unsigned int sampleRate,
     unsigned int channels)
 {
+    printf("[Capture::init] Starting init: deviceID=%d, sampleRate=%u, channels=%u, mInited=%d\n",
+           deviceID, sampleRate, channels, mInited);
+    fflush(stdout);
+
+    // Guard against double initialization
+    if (mInited) {
+        printf("[Capture::init] Already initialized, calling dispose first\n");
+        fflush(stdout);
+        dispose();
+    }
+
+    // Only initialize context if not already initialized (avoid WASAPI deadlock on repeated init/uninit)
+    if (!mContextInited)
+    {
+#ifdef _IS_WIN_
+        printf("[Capture::init] Windows: Initializing WASAPI context...\n");
+        fflush(stdout);
+
+        // Windows: Initialize context with WASAPI backend priority for low latency
+        ma_context_config contextConfig = ma_context_config_init();
+        ma_backend backends[] = { ma_backend_wasapi };
+
+        result = ma_context_init(backends, 1, &contextConfig, &context);
+        if (result != MA_SUCCESS)
+        {
+            // Fallback to auto backend selection if WASAPI fails
+            printf("WASAPI context init failed, falling back to auto backend\n");
+            fflush(stdout);
+            result = ma_context_init(NULL, 0, &contextConfig, &context);
+            if (result != MA_SUCCESS)
+            {
+                printf("Failed to initialize audio context.\n");
+                fflush(stdout);
+                return captureInitFailed;
+            }
+        }
+        else
+        {
+            printf("Initialized with WASAPI backend for low-latency audio\n");
+            fflush(stdout);
+        }
+#else
+        // Other platforms: Use auto backend selection
+        result = ma_context_init(NULL, 0, NULL, &context);
+        if (result != MA_SUCCESS)
+        {
+            printf("Failed to initialize audio context.\n");
+            return captureInitFailed;
+        }
+#endif
+        mContextInited = true;
+        printf("[Capture::init] Context initialized, mContextInited=true\n");
+        fflush(stdout);
+    }
+    else
+    {
+        printf("[Capture::init] Reusing existing context (mContextInited=true)\n");
+        fflush(stdout);
+    }
+
     // Use duplex mode (capture + playback) to support monitoring
     // This allows direct audio passthrough from input to output with zero latency
     deviceConfig = ma_device_config_init(ma_device_type_duplex);
     deviceConfig.periodSizeInFrames = BUFFER_SIZE;
+
+#ifdef _IS_WIN_
+    // WASAPI-specific low-latency configuration
+    // noAutoConvertSRC: Use miniaudio's internal resampler instead of Windows Audio Client's
+    // This enables low-latency shared mode even when app sample rate != device sample rate
+    deviceConfig.wasapi.noAutoConvertSRC = MA_TRUE;
+    // deviceConfig.wasapi.shareMode = ma_share_mode_shared; // Removed in newer miniaudio versions (shared is default)
+    printf("WASAPI low-latency config: noAutoConvertSRC=TRUE, buffer=%d frames (%.2fms @ %dHz)\n",
+           BUFFER_SIZE, (BUFFER_SIZE * 1000.0f) / sampleRate, sampleRate);
+#endif
+
     if (deviceID != -1)
     {
         auto devices = listCaptureDevices();
@@ -476,12 +559,21 @@ CaptureErrors Capture::init(
     deviceConfig.playback.format = format;
     deviceConfig.playback.channels = channels;
 
-    result = ma_device_init(NULL, &deviceConfig, &device);
+    printf("[Capture::init] Calling ma_device_init...\n");
+    fflush(stdout);
+
+    result = ma_device_init(&context, &deviceConfig, &device);
     if (result != MA_SUCCESS)
     {
-        printf("Failed to initialize capture device.\n");
+        printf("Failed to initialize capture device. Error: %d\n", result);
+        fflush(stdout);
+        ma_context_uninit(&context);
         return captureInitFailed;
     }
+
+    printf("[Capture::init] Device initialized successfully\n");
+    fflush(stdout);
+
     mInited = true;
     mFilters = filters;
     return captureNoError;
@@ -489,6 +581,15 @@ CaptureErrors Capture::init(
 
 void Capture::dispose()
 {
+    printf("[Capture::dispose] Starting dispose, mInited=%d\n", mInited);
+    fflush(stdout);
+
+    if (!mInited) {
+        printf("[Capture::dispose] Not initialized, skipping dispose\n");
+        fflush(stdout);
+        return;
+    }
+
     mInited = false;
     wav.close();
     if (!circularBuffer)
@@ -497,7 +598,28 @@ void Capture::dispose()
         streamBuffer.reset();
     isRecording = false;
 
+    printf("[Capture::dispose] Calling ma_device_uninit...\n");
+    fflush(stdout);
+
     ma_device_uninit(&device);
+
+#ifdef _IS_WIN_
+    // On Windows/WASAPI, do NOT call ma_context_uninit() here!
+    // Repeatedly calling ma_context_init/uninit causes deadlocks.
+    // The context is kept alive and reused across init/dispose cycles.
+    // It will be cleaned up in the destructor.
+    printf("[Capture::dispose] Windows: context kept alive for reuse\n");
+    fflush(stdout);
+#else
+    // On other platforms, uninit context normally
+    printf("[Capture::dispose] Calling ma_context_uninit...\n");
+    fflush(stdout);
+    ma_context_uninit(&context);
+    mContextInited = false;
+#endif
+
+    printf("[Capture::dispose] Dispose complete\n");
+    fflush(stdout);
 }
 
 bool Capture::isInited()

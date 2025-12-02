@@ -121,6 +121,9 @@ private:
 
     /// true when the capture device is initialized.
     bool mInited;
+
+    /// true when the context has been initialized (keep alive across init/dispose cycles)
+    bool mContextInited;
 };
 
 #endif // CAPTURE_H
