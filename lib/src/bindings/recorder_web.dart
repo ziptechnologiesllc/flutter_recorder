@@ -237,6 +237,16 @@ class RecorderWeb extends RecorderImpl {
   }
 
   @override
+  void setMonitoring(bool enabled) {
+    // Not implemented on Web for now
+  }
+
+  @override
+  void setMonitoringMode(int mode) {
+    // Not implemented on Web for now
+  }
+
+  @override
   Float32List getFft({bool alwaysReturnData = true}) {
     final samplesPtr = wasmMalloc(4);
     final isTheSameAsBeforePtr = wasmMalloc(4);
