@@ -1,9 +1,9 @@
 #ifndef NLMS_FILTER_H
 #define NLMS_FILTER_H
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <algorithm>
 
 /**
  * Static FIR Echo Cancellation Filter
@@ -21,184 +21,171 @@
  */
 class NLMSFilter {
 public:
-    static constexpr int DEFAULT_FILTER_LENGTH = 2048;  // ~43ms @ 48kHz
-    static constexpr float DEFAULT_REGULARIZATION = 1e-4f;  // Unused, kept for compatibility
+  static constexpr int DEFAULT_FILTER_LENGTH = 2048; // ~43ms @ 48kHz
+  static constexpr float DEFAULT_REGULARIZATION = 1e-6f;
 
-    /**
-     * @param filterLength Number of filter taps (L)
-     * @param stepSize Unused - kept for interface compatibility
-     * @param regularization Unused - kept for interface compatibility
-     */
-    NLMSFilter(int filterLength = DEFAULT_FILTER_LENGTH,
-               float stepSize = 1.0f,
-               float regularization = DEFAULT_REGULARIZATION)
-        : mFilterLength(filterLength),
-          mHistoryIndex(0),
-          mErrorEnergy(0.0f),
-          mPrevCoeffEnergy(0.0f),
-          mCoeffChangeRate(0.0f),
-          mSampleCount(0) {
-        // Allocate and zero-initialize buffers
-        mCoeffs = new float[filterLength]();
-        mRefHistory = new float[filterLength]();
+  NLMSFilter(int filterLength = DEFAULT_FILTER_LENGTH, float stepSize = 0.1f,
+             float regularization = DEFAULT_REGULARIZATION)
+      : mFilterLength(filterLength), mHistoryIndex(0), mStepSize(stepSize),
+        mRegularization(regularization), mRefEnergy(0.0f), mErrorEnergy(0.0f),
+        mCoeffEnergy(0.0f), mSampleCount(0) {
+    mCoeffs = new float[filterLength]();
+    // Optimize: Double size for "mirrored" ring buffer to avoid modulo in inner
+    // loops
+    mRefHistory = new float[filterLength * 2]();
+  }
+
+  ~NLMSFilter() {
+    delete[] mCoeffs;
+    delete[] mRefHistory;
+  }
+
+  NLMSFilter(const NLMSFilter &) = delete;
+  NLMSFilter &operator=(const NLMSFilter &) = delete;
+
+  float process(float micSample, float refSample) {
+    // Write sample to both ends of the buffer (mirrored ring buffer)
+    mRefHistory[mHistoryIndex] = refSample;
+    mRefHistory[mHistoryIndex + mFilterLength] = refSample;
+
+    // FIR convolution without modulo
+    // We want x[n], x[n-1], ... x[n-L+1]
+    // In our double buffer, current is at `mHistoryIndex + mFilterLength`
+    // History is contiguous backwards from there.
+    float echoEstimate = 0.0f;
+    int dataPtrBase = mHistoryIndex + mFilterLength;
+
+// Pragma for auto-vectorization hint (widely supported)
+#pragma clang loop vectorize(enable) interleave(enable)
+    for (int i = 0; i < mFilterLength; ++i) {
+      // Read backwards: x[n-i]
+      // echoEstimate += mCoeffs[i] * mRefHistory[idx];
+      // Optimized:
+      echoEstimate += mCoeffs[i] * mRefHistory[dataPtrBase - i];
     }
 
-    ~NLMSFilter() {
-        delete[] mCoeffs;
-        delete[] mRefHistory;
+    // Error calculation
+    float error = micSample - echoEstimate;
+
+    // Track energies
+    updateEnergies(refSample, error);
+
+    // Advance index
+    // Resume code with standard increment:
+    mHistoryIndex = (mHistoryIndex + 1) % mFilterLength;
+    return error;
+  }
+
+  // Adapt coefficients using NLMS (or NPVSS)
+  // Should be called after process()
+  void adapt(float error) {
+    // Standard NLMS update:
+    // h(n+1) = h(n) + mu * e(n) * x(n) / (x'x + epsilon)
+
+    // Calculate variable step size (simplified NPVSS)
+    // For efficiency in this loop, we use a normalized step size
+    // mu_normalized = mu / (energy + regularization)
+    float normalization = mRefEnergy + mRegularization;
+    float currStep = mStepSize / normalization;
+
+    // Stability check: if energy is too low, don't adapt (avoid divergence)
+    if (mRefEnergy < 1e-5f)
+      return;
+
+    // Update coefficients
+    // Current sample x[n] is at `(mHistoryIndex - 1) + mFilterLength`
+
+    int prevIdx = (mHistoryIndex == 0) ? mFilterLength - 1 : mHistoryIndex - 1;
+    int dataPtrBase = prevIdx + mFilterLength;
+
+#pragma clang loop vectorize(enable) interleave(enable)
+    for (int i = 0; i < mFilterLength; ++i) {
+      // mCoeffs[i] += currStep * error * mRefHistory[idx];
+      // Optimized:
+      mCoeffs[i] += currStep * error * mRefHistory[dataPtrBase - i];
     }
+  }
 
-    // Prevent copying (owns raw pointers)
-    NLMSFilter(const NLMSFilter&) = delete;
-    NLMSFilter& operator=(const NLMSFilter&) = delete;
-
-    /**
-     * Process a single sample through the static FIR filter.
-     *
-     * @param micSample Microphone input sample d(n) (contains speech + echo)
-     * @param refSample Reference sample x(n) (speaker output)
-     * @return Echo-cancelled output sample e(n)
-     */
-    float process(float micSample, float refSample) {
-        // Store reference in history (circular buffer)
-        mRefHistory[mHistoryIndex] = refSample;
-
-        // Calculate echo estimate ŷ(n) using FIR filter (convolution)
-        // ŷ(n) = Σ h[i] * x[n-i]
-        float echoEstimate = 0.0f;
-        for (int i = 0; i < mFilterLength; ++i) {
-            int idx = (mHistoryIndex - i + mFilterLength) % mFilterLength;
-            echoEstimate += mCoeffs[i] * mRefHistory[idx];
-        }
-
-        // Error signal e(n) = d(n) - ŷ(n)
-        // This is the echo-cancelled output
-        float error = micSample - echoEstimate;
-
-        // Track error energy for metrics (no adaptation)
-        mErrorEnergy += error * error;
-        mSampleCount++;
-
-        // Advance history index
-        mHistoryIndex = (mHistoryIndex + 1) % mFilterLength;
-
-        return error;
+  void setStepSize(float stepSize) { mStepSize = stepSize; }
+  void setCoefficients(const float *coeffs, int length) {
+    int copyLen = std::min(length, mFilterLength);
+    std::memcpy(mCoeffs, coeffs, copyLen * sizeof(float));
+    if (copyLen < mFilterLength) {
+      std::memset(mCoeffs + copyLen, 0,
+                  (mFilterLength - copyLen) * sizeof(float));
     }
+    mCoeffEnergy = getCoeffEnergy();
+  }
 
-    /**
-     * Process a block of samples (more efficient for batch processing).
-     */
-    void processBlock(float* micSamples, const float* refSamples, size_t sampleCount) {
-        for (size_t i = 0; i < sampleCount; ++i) {
-            micSamples[i] = process(micSamples[i], refSamples[i]);
-        }
-    }
+  int getFilterLength() const { return mFilterLength; }
+  const float *getCoeffs() const { return mCoeffs; }
 
-    /**
-     * Reset filter state (history only - coefficients preserved).
-     */
-    void reset() {
-        std::memset(mRefHistory, 0, mFilterLength * sizeof(float));
-        mHistoryIndex = 0;
-        mErrorEnergy = 0.0f;
-        mSampleCount = 0;
-    }
+  // Simple energy tracker for ref signal
+  void updateEnergies(float refSample, float errorSample) {
+    // Exponential moving average for energy
+    const float alpha = 0.001f;
+    // Estimate energy over the filter length (approx)
+    // For NLMS normalization we ideally want dot(x,x).
+    // For efficiency we can track it iteratively or approximate.
+    // Iterative update of sum-squares is expensive to maintain perfectly due to
+    // drift. We'll use a leaky integrator approach as a proxy for signal power.
+    // Actually for True NLMS we need sum(x[n-i]^2).
+    // Let's implement an efficient sliding window energy if possible,
+    // or just use the leaky integrator * filterLength approximation.
 
-    /**
-     * Set the adaptation step size.
-     * Note: Static FIR doesn't adapt - this is kept for interface compatibility.
-     */
-    void setStepSize(float stepSize) {
-        (void)stepSize;  // Unused
-    }
+    // Leaky integrator energy estimate
+    float refSq = refSample * refSample;
+    mRefEnergy = (1.0f - alpha) * mRefEnergy + alpha * (refSq * mFilterLength);
 
-    /**
-     * Set filter coefficients from calibration impulse response.
-     * This is the primary way to configure the filter.
-     */
-    void setCoefficients(const float* coeffs, int length) {
-        int copyLen = std::min(length, mFilterLength);
-        std::memcpy(mCoeffs, coeffs, copyLen * sizeof(float));
-        if (copyLen < mFilterLength) {
-            std::memset(mCoeffs + copyLen, 0, (mFilterLength - copyLen) * sizeof(float));
-        }
-        mPrevCoeffEnergy = getCoeffEnergy();
-    }
+    mErrorEnergy += errorSample * errorSample;
+    mSampleCount++;
+  }
 
-    /**
-     * Get the current step size.
-     * Static FIR always returns 0 (no adaptation).
-     */
-    float getStepSize() const { return 0.0f; }
+  float getCoeffEnergy() const {
+    float energy = 0.0f;
+    for (int i = 0; i < mFilterLength; ++i)
+      energy += mCoeffs[i] * mCoeffs[i];
+    return energy;
+  }
 
-    /**
-     * Get the filter length.
-     */
-    int getFilterLength() const { return mFilterLength; }
+  // Interface compatibility
+  float getAlpha() const { return mStepSize; }
 
-    /**
-     * Get current filter coefficients (for debugging/visualization).
-     */
-    const float* getCoeffs() const { return mCoeffs; }
+  float getEchoReturnLoss() const {
+    float energy = getCoeffEnergy();
+    if (energy < 1e-10f)
+      return 0.0f;
+    return -10.0f * std::log10(energy);
+  }
 
-    /**
-     * Get estimated echo return loss in dB.
-     */
-    float getEchoReturnLoss() const {
-        float energy = getCoeffEnergy();
-        if (energy < 1e-10f) return 0.0f;
-        return -10.0f * std::log10(energy);
-    }
+  void getConvergenceMetrics(float &coeffEnergy, float &errorEnergyAvg,
+                             float &coeffChangeRate) {
+    coeffEnergy = getCoeffEnergy();
+    errorEnergyAvg = mSampleCount > 0 ? mErrorEnergy / mSampleCount : 0.0f;
+    coeffChangeRate = 0;
+    mErrorEnergy = 0.0f;
+    mSampleCount = 0;
+  }
 
-    /**
-     * Get coefficient energy (sum of squared coefficients).
-     */
-    float getCoeffEnergy() const {
-        float energy = 0.0f;
-        for (int i = 0; i < mFilterLength; ++i) {
-            energy += mCoeffs[i] * mCoeffs[i];
-        }
-        return energy;
-    }
-
-    /**
-     * Get convergence metrics and reset accumulators.
-     */
-    void getConvergenceMetrics(float& coeffEnergy, float& errorEnergyAvg, float& coeffChangeRate) {
-        coeffEnergy = getCoeffEnergy();
-        errorEnergyAvg = mSampleCount > 0 ? mErrorEnergy / mSampleCount : 0.0f;
-        coeffChangeRate = 0.0f;  // Static FIR - no coefficient changes
-        mErrorEnergy = 0.0f;
-        mSampleCount = 0;
-    }
-
-    /**
-     * Check if filter has valid coefficients.
-     */
-    bool isConverged(float threshold = 0.001f) const {
-        (void)threshold;
-        // Static FIR is "converged" if coefficients have been set
-        return getCoeffEnergy() > 1e-6f;
-    }
-
-    /**
-     * Get the current alpha (step-size) for debugging.
-     * Static FIR always returns 0.
-     */
-    float getAlpha() const { return 0.0f; }
+  void reset() {
+    std::memset(mRefHistory, 0, mFilterLength * 2 * sizeof(float));
+    mHistoryIndex = 0;
+    mRefEnergy = 0.0f;
+  }
 
 private:
-    int mFilterLength;
+  int mFilterLength;
+  float *mCoeffs;
+  float *mRefHistory;
+  int mHistoryIndex;
 
-    float* mCoeffs;       // Filter coefficients h(n) - from calibration
-    float* mRefHistory;   // Reference signal history x(n) (circular buffer)
-    int mHistoryIndex;    // Current position in history buffer
+  float mStepSize;
+  float mRegularization;
 
-    // Metrics tracking
-    float mErrorEnergy;
-    float mPrevCoeffEnergy;
-    float mCoeffChangeRate;
-    size_t mSampleCount;
+  float mRefEnergy; // Approximated energy of reference vector
+  float mErrorEnergy;
+  float mCoeffEnergy;
+  size_t mSampleCount;
 };
 
 #endif // NLMS_FILTER_H
