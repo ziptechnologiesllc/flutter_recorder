@@ -3,11 +3,13 @@
 
 import 'dart:ffi' as ffi;
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_recorder/src/audio_data_container.dart';
-import 'package:flutter_recorder/src/bindings/flutter_recorder_bindings_generated.dart';
+import 'package:flutter_recorder/src/bindings/flutter_recorder_bindings_generated.dart'
+    as bindings_gen;
 import 'package:flutter_recorder/src/bindings/recorder.dart';
 import 'package:flutter_recorder/src/enums.dart';
 import 'package:flutter_recorder/src/exceptions/exceptions.dart';
@@ -25,6 +27,17 @@ class RecorderController {
   static RecorderController? _instance;
 
   late final RecorderImpl impl;
+}
+
+// Helper to convert between generated and local CaptureErrors
+CaptureErrors _toLocalCaptureError(bindings_gen.CaptureErrors error) {
+  return CaptureErrors.values.firstWhere((e) => e.value == error.value);
+}
+
+// Helper to convert between local and generated RecorderFilterType
+bindings_gen.RecorderFilterType _toGenFilterType(RecorderFilterType filterType) {
+  return bindings_gen.RecorderFilterType.values
+      .firstWhere((e) => e.value == filterType.value);
 }
 
 @internal
@@ -47,7 +60,8 @@ class RecorderFfi extends RecorderImpl {
   }();
 
   /// The bindings to the native functions in [_dylib].
-  final FlutterRecorderBindings _bindings = FlutterRecorderBindings(_dylib);
+  final bindings_gen.FlutterRecorderBindings _bindings =
+      bindings_gen.FlutterRecorderBindings(_dylib);
 
   SilenceCallback? _silenceCallback;
 
@@ -77,18 +91,19 @@ class RecorderFfi extends RecorderImpl {
     }
   }
 
-  ffi.NativeCallable<dartStreamDataCallback_tFunction>?
+  ffi.NativeCallable<bindings_gen.dartStreamDataCallback_tFunction>?
       nativeStreamDataCallable;
   @override
   Future<void> setDartEventCallbacks() async {
     // Create a NativeCallable for the Dart functions
-    final nativeSilenceChangedCallable =
-        ffi.NativeCallable<dartSilenceChangedCallback_tFunction>.listener(
+    final nativeSilenceChangedCallable = ffi
+        .NativeCallable<bindings_gen.dartSilenceChangedCallback_tFunction>
+        .listener(
       _silenceChangedCallback,
     );
 
-    final nativeStreamDataCallable =
-        ffi.NativeCallable<dartStreamDataCallback_tFunction>.listener(
+    final nativeStreamDataCallable = ffi
+        .NativeCallable<bindings_gen.dartStreamDataCallback_tFunction>.listener(
       _streamDataCallback,
     );
 
@@ -201,8 +216,8 @@ class RecorderFfi extends RecorderImpl {
       sampleRate,
       channels.count,
     );
-    if (error != CaptureErrors.captureNoError) {
-      throw RecorderCppException.fromRecorderError(error);
+    if (error != bindings_gen.CaptureErrors.captureNoError) {
+      throw RecorderCppException.fromRecorderError(_toLocalCaptureError(error));
     }
     super.init(
       deviceID: deviceID,
@@ -232,8 +247,8 @@ class RecorderFfi extends RecorderImpl {
   @override
   void start() {
     final error = _bindings.flutter_recorder_start();
-    if (error != CaptureErrors.captureNoError) {
-      throw RecorderCppException.fromRecorderError(error);
+    if (error != bindings_gen.CaptureErrors.captureNoError) {
+      throw RecorderCppException.fromRecorderError(_toLocalCaptureError(error));
     }
   }
 
@@ -351,8 +366,8 @@ class RecorderFfi extends RecorderImpl {
 
     final error =
         _bindings.flutter_recorder_startRecording(path.toNativeUtf8().cast());
-    if (error != CaptureErrors.captureNoError) {
-      throw RecorderCppException.fromRecorderError(error);
+    if (error != bindings_gen.CaptureErrors.captureNoError) {
+      throw RecorderCppException.fromRecorderError(_toLocalCaptureError(error));
     }
   }
 
@@ -482,24 +497,24 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   int isFilterActive(RecorderFilterType filterType) {
-    return _bindings.flutter_recorder_isFilterActive(filterType);
+    return _bindings.flutter_recorder_isFilterActive(_toGenFilterType(filterType));
   }
 
   @override
   void addFilter(RecorderFilterType filterType) {
-    final error = _bindings.flutter_recorder_addFilter(filterType);
-    if (error != CaptureErrors.captureNoError) {
-      throw RecorderCppException.fromRecorderError(error);
+    final error = _bindings.flutter_recorder_addFilter(_toGenFilterType(filterType));
+    if (error != bindings_gen.CaptureErrors.captureNoError) {
+      throw RecorderCppException.fromRecorderError(_toLocalCaptureError(error));
     }
   }
 
   @override
   CaptureErrors removeFilter(RecorderFilterType filterType) {
-    final error = _bindings.flutter_recorder_removeFilter(filterType);
-    if (error != CaptureErrors.captureNoError) {
-      throw RecorderCppException.fromRecorderError(error);
+    final error = _bindings.flutter_recorder_removeFilter(_toGenFilterType(filterType));
+    if (error != bindings_gen.CaptureErrors.captureNoError) {
+      throw RecorderCppException.fromRecorderError(_toLocalCaptureError(error));
     }
-    return error;
+    return _toLocalCaptureError(error);
   }
 
   @override
@@ -508,7 +523,7 @@ class RecorderFfi extends RecorderImpl {
         calloc(ffi.sizeOf<ffi.Pointer<ffi.Pointer<ffi.Char>>>() * 30);
     final ffi.Pointer<ffi.Int> paramsCount = calloc(ffi.sizeOf<ffi.Int>());
     _bindings.flutter_recorder_getFilterParamNames(
-      filterType,
+      _toGenFilterType(filterType),
       names,
       paramsCount,
     );
@@ -531,11 +546,197 @@ class RecorderFfi extends RecorderImpl {
     int attributeId,
     double value,
   ) {
-    _bindings.flutter_recorder_setFilterParams(filterType, attributeId, value);
+    _bindings.flutter_recorder_setFilterParams(
+        _toGenFilterType(filterType), attributeId, value);
   }
 
   @override
   double getFilterParamValue(RecorderFilterType filterType, int attributeId) {
-    return _bindings.flutter_recorder_getFilterParams(filterType, attributeId);
+    return _bindings.flutter_recorder_getFilterParams(
+        _toGenFilterType(filterType), attributeId);
+  }
+
+  // ///////////////////////
+  //   AEC (Adaptive Echo Cancellation)
+  // ///////////////////////
+
+  @override
+  int aecCreateReferenceBuffer(int sampleRate, int channels) {
+    final ptr = _bindings.flutter_recorder_aec_createReferenceBuffer(
+      sampleRate,
+      channels,
+    );
+    return ptr.address;
+  }
+
+  @override
+  void aecDestroyReferenceBuffer() {
+    _bindings.flutter_recorder_aec_destroyReferenceBuffer();
+  }
+
+  @override
+  int aecGetOutputCallback() {
+    final ptr = _bindings.flutter_recorder_aec_getOutputCallback();
+    return ptr.address;
+  }
+
+  @override
+  void aecResetBuffer() {
+    _bindings.flutter_recorder_aec_resetBuffer();
+  }
+
+  // ==================== AEC CALIBRATION ====================
+
+  @override
+  Uint8List aecGenerateCalibrationSignal(int sampleRate, int channels) {
+    final outSize = calloc<ffi.Size>();
+    try {
+      final ptr = _bindings.flutter_recorder_aec_generateCalibrationSignal(
+        sampleRate,
+        channels,
+        outSize,
+      );
+      final size = outSize.value;
+      if (ptr.address == 0 || size == 0) {
+        return Uint8List(0);
+      }
+      // Copy data to Dart memory
+      final data = Uint8List.fromList(ptr.asTypedList(size));
+      // Free native memory
+      _bindings.flutter_recorder_nativeFree(ptr.cast());
+      return data;
+    } finally {
+      calloc.free(outSize);
+    }
+  }
+
+  @override
+  void aecStartCalibrationCapture(int maxSamples) {
+    _bindings.flutter_recorder_aec_startCalibrationCapture(maxSamples);
+  }
+
+  @override
+  void aecStopCalibrationCapture() {
+    _bindings.flutter_recorder_aec_stopCalibrationCapture();
+  }
+
+  @override
+  void aecCaptureForAnalysis() {
+    _bindings.flutter_recorder_aec_captureForAnalysis();
+  }
+
+  @override
+  AecCalibrationResult aecRunCalibrationAnalysis(int sampleRate) {
+    final outDelayMs = calloc<ffi.Int>();
+    final outEchoGain = calloc<ffi.Float>();
+    final outCorrelation = calloc<ffi.Float>();
+    try {
+      final success = _bindings.flutter_recorder_aec_runCalibrationAnalysis(
+        sampleRate,
+        outDelayMs,
+        outEchoGain,
+        outCorrelation,
+      );
+      return AecCalibrationResult(
+        delayMs: outDelayMs.value,
+        echoGain: outEchoGain.value,
+        correlation: outCorrelation.value,
+        success: success == 1,
+      );
+    } finally {
+      calloc.free(outDelayMs);
+      calloc.free(outEchoGain);
+      calloc.free(outCorrelation);
+    }
+  }
+
+  @override
+  void aecResetCalibration() {
+    _bindings.flutter_recorder_aec_resetCalibration();
+  }
+
+  @override
+  AecCalibrationResultWithImpulse aecRunCalibrationWithImpulse(int sampleRate) {
+    final outDelayMs = calloc<ffi.Int>();
+    final outEchoGain = calloc<ffi.Float>();
+    final outCorrelation = calloc<ffi.Float>();
+    final outImpulseLength = calloc<ffi.Int>();
+    try {
+      final success = _bindings.flutter_recorder_aec_runCalibrationWithImpulse(
+        sampleRate,
+        outDelayMs,
+        outEchoGain,
+        outCorrelation,
+        outImpulseLength,
+      );
+      return AecCalibrationResultWithImpulse(
+        delayMs: outDelayMs.value,
+        echoGain: outEchoGain.value,
+        correlation: outCorrelation.value,
+        success: success == 1,
+        impulseLength: outImpulseLength.value,
+      );
+    } finally {
+      calloc.free(outDelayMs);
+      calloc.free(outEchoGain);
+      calloc.free(outCorrelation);
+      calloc.free(outImpulseLength);
+    }
+  }
+
+  @override
+  Float32List aecGetImpulseResponse(int maxLength) {
+    final dest = calloc<ffi.Float>(maxLength);
+    try {
+      final actualLength = _bindings.flutter_recorder_aec_getImpulseResponse(
+        dest,
+        maxLength,
+      );
+      if (actualLength == 0) {
+        return Float32List(0);
+      }
+      return Float32List.fromList(dest.asTypedList(actualLength));
+    } finally {
+      calloc.free(dest);
+    }
+  }
+
+  @override
+  void aecApplyImpulseResponse() {
+    _bindings.flutter_recorder_aec_applyImpulseResponse();
+  }
+
+  @override
+  Float32List aecGetCalibrationRefSignal(int maxLength) {
+    final dest = calloc<ffi.Float>(maxLength);
+    try {
+      final actualLength = _bindings.flutter_recorder_aec_getCalibrationRefSignal(
+        dest,
+        maxLength,
+      );
+      if (actualLength == 0) {
+        return Float32List(0);
+      }
+      return Float32List.fromList(dest.asTypedList(actualLength));
+    } finally {
+      calloc.free(dest);
+    }
+  }
+
+  @override
+  Float32List aecGetCalibrationMicSignal(int maxLength) {
+    final dest = calloc<ffi.Float>(maxLength);
+    try {
+      final actualLength = _bindings.flutter_recorder_aec_getCalibrationMicSignal(
+        dest,
+        maxLength,
+      );
+      if (actualLength == 0) {
+        return Float32List(0);
+      }
+      return Float32List.fromList(dest.asTypedList(actualLength));
+    } finally {
+      calloc.free(dest);
+    }
   }
 }

@@ -5,6 +5,8 @@
 #include "capture.h"
 #include "analyzer.h"
 #include "filters/filters.h"
+#include "filters/aec/reference_buffer.h"
+#include "filters/aec/calibration.h"
 
 #include <memory>
 #include <stdint.h>
@@ -179,10 +181,11 @@ FFI_PLUGIN_EXPORT enum CaptureErrors flutter_recorder_init(
     unsigned int sampleRate,
     unsigned int channels)
 {
-    if (!mFilters || mFilters.get()->mSamplerate != sampleRate)
+    if (!mFilters || mFilters.get()->mSamplerate != sampleRate ||
+        mFilters.get()->mChannels != channels)
     {
         mFilters.reset();
-        mFilters = std::make_unique<Filters>(sampleRate);
+        mFilters = std::make_unique<Filters>(sampleRate, channels);
     }
     CaptureErrors res = capture.init(mFilters.get(), deviceID, (PCMFormat)pcmFormat, sampleRate, channels);
 
@@ -431,4 +434,234 @@ FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoring(bool enabled)
 FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoringMode(int mode)
 {
     capture.monitoringMode = mode;
+}
+
+/////////////////////////
+/// AEC (Adaptive Echo Cancellation)
+/////////////////////////
+
+// Callback function that SoLoud calls to send its output audio
+static void aecOutputCallback(const float* data, size_t frameCount, unsigned int channels)
+{
+    // Debug: check energy of incoming data every second
+    static int debugCounter = 0;
+    static float totalEnergy = 0.0f;
+    static size_t totalSamples = 0;
+    static bool hasLogged = false;
+
+    // Calculate energy of this buffer
+    size_t samples = frameCount * channels;
+    for (size_t i = 0; i < samples; ++i) {
+        totalEnergy += data[i] * data[i];
+    }
+    totalSamples += samples;
+
+    // Print debug every ~1 second (assuming ~48000 samples/sec)
+    debugCounter++;
+    if (debugCounter >= 375) {  // ~375 callbacks at 256 frames each = ~1 sec
+        float avgEnergy = totalSamples > 0 ? totalEnergy / totalSamples : 0;
+        printf("[AEC Callback] SoLoud output: frames=%zu ch=%u avgEnergy=%.6f totalSamples=%zu bufferOK=%d\n",
+               frameCount, channels, avgEnergy, totalSamples, g_aecReferenceBuffer != nullptr ? 1 : 0);
+        debugCounter = 0;
+        totalEnergy = 0.0f;
+        totalSamples = 0;
+        hasLogged = true;
+    }
+
+    if (g_aecReferenceBuffer != nullptr) {
+        g_aecReferenceBuffer->write(data, frameCount);
+    } else if (!hasLogged) {
+        printf("[AEC Callback] WARNING: Buffer not initialized!\n");
+        hasLogged = true;
+    }
+}
+
+// Create the AEC reference buffer with the given sample rate and channels
+FFI_PLUGIN_EXPORT void* flutter_recorder_aec_createReferenceBuffer(
+    unsigned int sampleRate,
+    unsigned int channels)
+{
+    // Buffer size: 4 seconds of audio to support calibration
+    // Calibration signal is 3 seconds (1s noise + 2s sweep) plus delay margin
+    // During normal AEC operation, only the most recent ~100ms is used
+    size_t bufferSizeFrames = sampleRate * 4;  // 4 seconds
+
+    // Destroy existing buffer if any
+    if (g_aecReferenceBuffer != nullptr) {
+        delete g_aecReferenceBuffer;
+    }
+
+    g_aecReferenceBuffer = new AECReferenceBuffer(bufferSizeFrames, channels, sampleRate);
+    printf("[AEC] Reference buffer created: %zu frames @ %uHz, %u channels\n",
+           bufferSizeFrames, sampleRate, channels);
+    return static_cast<void*>(g_aecReferenceBuffer);
+}
+
+// Destroy the AEC reference buffer
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_destroyReferenceBuffer()
+{
+    if (g_aecReferenceBuffer != nullptr) {
+        delete g_aecReferenceBuffer;
+        g_aecReferenceBuffer = nullptr;
+    }
+}
+
+// Get the output callback function pointer (to be set in SoLoud)
+FFI_PLUGIN_EXPORT void* flutter_recorder_aec_getOutputCallback()
+{
+    return reinterpret_cast<void*>(&aecOutputCallback);
+}
+
+// Reset the AEC reference buffer
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_resetBuffer()
+{
+    if (g_aecReferenceBuffer != nullptr) {
+        g_aecReferenceBuffer->reset();
+    }
+}
+
+/////////////////////////
+/// AEC CALIBRATION
+/////////////////////////
+
+// Generate calibration WAV data (white noise + sine sweep)
+// Returns pointer to WAV data that caller must free with flutter_recorder_nativeFree
+FFI_PLUGIN_EXPORT uint8_t* flutter_recorder_aec_generateCalibrationSignal(
+    unsigned int sampleRate,
+    unsigned int channels,
+    size_t* outSize)
+{
+    return AECCalibration::generateCalibrationWav(sampleRate, channels, outSize);
+}
+
+// Start capturing samples for calibration analysis
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_startCalibrationCapture(size_t maxSamples)
+{
+    capture.startCalibrationCapture(maxSamples);
+}
+
+// Stop capturing samples for calibration
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopCalibrationCapture()
+{
+    capture.stopCalibrationCapture();
+}
+
+// Capture signals from both buffers for cross-correlation analysis
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_captureForAnalysis()
+{
+    if (g_aecReferenceBuffer == nullptr) {
+        printf("[AEC Calibration] Error: Reference buffer not initialized\n");
+        return;
+    }
+
+    // Capture full 3 second calibration signal at 48kHz
+    // Must match calibration.h: WHITE_NOISE (1s) + SINE_SWEEP (2s) = 3 seconds
+    const size_t samplesToCapture = 48000 * 3;
+
+    std::vector<float> refData(samplesToCapture);
+    std::vector<float> micData(samplesToCapture);
+
+    // Read from AEC reference buffer (playback signal)
+    size_t refRead = g_aecReferenceBuffer->readForCalibration(refData.data(), samplesToCapture);
+
+    // Read from mic capture buffer
+    size_t micRead = capture.readCalibrationSamples(micData.data(), samplesToCapture);
+
+    printf("[AEC Calibration] Captured ref=%zu mic=%zu samples\n", refRead, micRead);
+
+    // Pass to calibration analyzer
+    AECCalibration::captureSignals(
+        refData.data(), refRead,
+        micData.data(), micRead);
+}
+
+// Run cross-correlation analysis and return results
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_runCalibrationAnalysis(
+    unsigned int sampleRate,
+    int* outDelayMs,
+    float* outEchoGain,
+    float* outCorrelation)
+{
+    CalibrationResult result = AECCalibration::analyze(sampleRate);
+
+    if (outDelayMs) *outDelayMs = result.delayMs;
+    if (outEchoGain) *outEchoGain = result.echoGain;
+    if (outCorrelation) *outCorrelation = result.correlation;
+
+    printf("[AEC Calibration] Result: delay=%dms gain=%.3f corr=%.3f success=%d\n",
+           result.delayMs, result.echoGain, result.correlation, result.success);
+
+    return result.success ? 1 : 0;
+}
+
+// Reset calibration state
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_resetCalibration()
+{
+    AECCalibration::reset();
+    capture.stopCalibrationCapture();
+}
+
+// Static storage for last calibration impulse response
+static std::vector<float> g_lastImpulseResponse;
+
+// Run calibration analysis and store impulse response
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_runCalibrationWithImpulse(
+    unsigned int sampleRate,
+    int* outDelayMs,
+    float* outEchoGain,
+    float* outCorrelation,
+    int* outImpulseLength)
+{
+    CalibrationResult result = AECCalibration::analyze(sampleRate);
+
+    if (outDelayMs) *outDelayMs = result.delayMs;
+    if (outEchoGain) *outEchoGain = result.echoGain;
+    if (outCorrelation) *outCorrelation = result.correlation;
+    if (outImpulseLength) *outImpulseLength = static_cast<int>(result.impulseResponse.size());
+
+    // Store impulse response for later retrieval
+    g_lastImpulseResponse = std::move(result.impulseResponse);
+
+    printf("[AEC Calibration] Result: delay=%dms gain=%.3f corr=%.3f impulseLen=%zu success=%d\n",
+           result.delayMs, result.echoGain, result.correlation, g_lastImpulseResponse.size(), result.success);
+
+    return result.success ? 1 : 0;
+}
+
+// Get stored impulse response
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_getImpulseResponse(float* dest, int maxLength)
+{
+    if (!dest || maxLength <= 0) return 0;
+
+    int copyLen = std::min(maxLength, static_cast<int>(g_lastImpulseResponse.size()));
+    std::memcpy(dest, g_lastImpulseResponse.data(), copyLen * sizeof(float));
+
+    return copyLen;
+}
+
+// Apply impulse response to AEC filter
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_applyImpulseResponse()
+{
+    if (g_lastImpulseResponse.empty()) {
+        printf("[AEC] No impulse response to apply\n");
+        return;
+    }
+
+    mFilters->setAecImpulseResponse(
+        g_lastImpulseResponse.data(),
+        static_cast<int>(g_lastImpulseResponse.size()));
+
+    printf("[AEC] Applied impulse response: %zu coefficients\n", g_lastImpulseResponse.size());
+}
+
+// Get captured reference signal for visualization
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_getCalibrationRefSignal(float* dest, int maxLength)
+{
+    return AECCalibration::getRefSignal(dest, maxLength);
+}
+
+// Get captured mic signal for visualization
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_getCalibrationMicSignal(float* dest, int maxLength)
+{
+    return AECCalibration::getMicSignal(dest, maxLength);
 }

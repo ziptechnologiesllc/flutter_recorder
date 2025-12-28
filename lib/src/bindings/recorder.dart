@@ -263,4 +263,75 @@ abstract class RecorderImpl {
   /// Get filter param value.
   @mustBeOverridden
   double getFilterParamValue(RecorderFilterType filterType, int attributeId);
+
+  // ///////////////////////
+  //   AEC (Adaptive Echo Cancellation)
+  // ///////////////////////
+
+  /// Create the AEC reference buffer.
+  /// Returns a pointer to the buffer that should be passed to SoLoud.
+  @mustBeOverridden
+  int aecCreateReferenceBuffer(int sampleRate, int channels);
+
+  /// Destroy the AEC reference buffer.
+  @mustBeOverridden
+  void aecDestroyReferenceBuffer();
+
+  /// Get the AEC output callback function pointer.
+  /// This should be passed to SoLoud to receive playback audio.
+  @mustBeOverridden
+  int aecGetOutputCallback();
+
+  /// Reset the AEC buffer (e.g., when switching audio configurations).
+  @mustBeOverridden
+  void aecResetBuffer();
+
+  // ==================== AEC CALIBRATION ====================
+
+  /// Generate calibration audio signal (white noise + sine sweep).
+  /// Returns WAV data as Uint8List that can be loaded into SoLoud.
+  @mustBeOverridden
+  Uint8List aecGenerateCalibrationSignal(int sampleRate, int channels);
+
+  /// Start capturing microphone samples for calibration analysis.
+  @mustBeOverridden
+  void aecStartCalibrationCapture(int maxSamples);
+
+  /// Stop capturing samples for calibration.
+  @mustBeOverridden
+  void aecStopCalibrationCapture();
+
+  /// Capture signals from both reference and mic buffers for analysis.
+  @mustBeOverridden
+  void aecCaptureForAnalysis();
+
+  /// Run cross-correlation analysis on captured signals.
+  @mustBeOverridden
+  AecCalibrationResult aecRunCalibrationAnalysis(int sampleRate);
+
+  /// Reset calibration state.
+  @mustBeOverridden
+  void aecResetCalibration();
+
+  /// Run calibration analysis with impulse response computation.
+  /// Returns result including impulse length (call aecGetImpulseResponse to get data).
+  @mustBeOverridden
+  AecCalibrationResultWithImpulse aecRunCalibrationWithImpulse(int sampleRate);
+
+  /// Get stored impulse response from last calibration.
+  /// Returns Float32List of coefficients.
+  @mustBeOverridden
+  Float32List aecGetImpulseResponse(int maxLength);
+
+  /// Apply stored impulse response to AEC filter.
+  @mustBeOverridden
+  void aecApplyImpulseResponse();
+
+  /// Get captured reference signal for visualization.
+  @mustBeOverridden
+  Float32List aecGetCalibrationRefSignal(int maxLength);
+
+  /// Get captured mic signal for visualization.
+  @mustBeOverridden
+  Float32List aecGetCalibrationMicSignal(int maxLength);
 }

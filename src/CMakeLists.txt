@@ -18,6 +18,9 @@ add_library(flutter_recorder SHARED
   "filters/filters.cpp"
   "filters/autogain.cpp"
   "filters/echo_cancellation.cpp"
+  "filters/aec/reference_buffer.cpp"
+  "filters/aec/adaptive_echo_cancellation.cpp"
+  "filters/aec/calibration.cpp"
 )
 
 set_target_properties(flutter_recorder PROPERTIES

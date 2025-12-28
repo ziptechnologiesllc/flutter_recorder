@@ -7,6 +7,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <functional>
 
 struct FilterObject
 {
@@ -29,7 +30,7 @@ class Filters
     /// The default maximum number of global filters active is 4, but this
     /// can be changed in a global constant in soloud.h (and rebuilding SoLoud).
 public:
-    Filters(unsigned int samplerate);
+    Filters(unsigned int samplerate, unsigned int channels = 2);
     ~Filters();
 
     /// Return -1 if the filter is not active or its index
@@ -46,8 +47,12 @@ public:
     
     /// If [handle]==0 the operation is done to global filters.
     float getFilterParams(RecorderFilterType filterType, int attributeId);
-    
+
+    /// Set AEC impulse response from calibration
+    void setAecImpulseResponse(const float* coeffs, int length);
+
     unsigned int mSamplerate;
+    unsigned int mChannels;
 
     std::vector<std::unique_ptr<FilterObject>> filters;
 };

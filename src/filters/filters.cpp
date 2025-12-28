@@ -1,12 +1,14 @@
 #include "filters.h"
 #include "autogain.h"
 #include "echo_cancellation.h"
+#include "aec/adaptive_echo_cancellation.h"
 
 #include <vector>
 #include <string>
 #include <memory>
 
-Filters::Filters(unsigned int samplerate) : mSamplerate(samplerate) {}
+Filters::Filters(unsigned int samplerate, unsigned int channels)
+    : mSamplerate(samplerate), mChannels(channels) {}
 
 Filters::~Filters() {}
 
@@ -41,6 +43,14 @@ std::vector<std::string> Filters::getFilterParamNames(RecorderFilterType filterT
             ret.push_back(f.getParamName(i));
     }
     break;
+    case RecorderFilterType::adaptiveEchoCancellation:
+    {
+        AdaptiveEchoCancellation f(mSamplerate, mChannels);
+        int nParams = f.getParamCount();
+        for (int i = 0; i < nParams; i++)
+            ret.push_back(f.getParamName(i));
+    }
+    break;
     default:
         break;
     }
@@ -63,6 +73,9 @@ CaptureErrors Filters::addFilter(RecorderFilterType filterType)
         break;
     case echoCancellation:
         newFilter = std::make_unique<EchoCancellation>(mSamplerate);
+        break;
+    case adaptiveEchoCancellation:
+        newFilter = std::make_unique<AdaptiveEchoCancellation>(mSamplerate, mChannels);
         break;
     default:
         return CaptureErrors::filterNotFound;
@@ -108,6 +121,8 @@ float Filters::getFilterParams(RecorderFilterType filterType, int attributeId)
             return AutoGain(0).getParamDef(attributeId);
         case echoCancellation:
             return EchoCancellation(0).getParamDef(attributeId);
+        case adaptiveEchoCancellation:
+            return AdaptiveEchoCancellation(mSamplerate, mChannels).getParamDef(attributeId);
         default:
             return 9999.f;
         }
@@ -116,4 +131,21 @@ float Filters::getFilterParams(RecorderFilterType filterType, int attributeId)
     float ret = filters[index].get()->filter.get()->getParamValue(attributeId);
 
     return ret;
+}
+
+void Filters::setAecImpulseResponse(const float* coeffs, int length) {
+    int index = isFilterActive(RecorderFilterType::adaptiveEchoCancellation);
+    if (index < 0) {
+        printf("[Filters] AEC not active, cannot set impulse response\n");
+        return;
+    }
+
+    // Cast to AEC filter and call setImpulseResponse
+    AdaptiveEchoCancellation* aec =
+        dynamic_cast<AdaptiveEchoCancellation*>(filters[index].get()->filter.get());
+    if (aec) {
+        aec->setImpulseResponse(coeffs, length);
+    } else {
+        printf("[Filters] Failed to cast to AEC filter\n");
+    }
 }

@@ -397,4 +397,89 @@ class RecorderWeb extends RecorderImpl {
     final value = wasmGetFilterParamValue(filterType.value, attributeId);
     return value;
   }
+
+  // ///////////////////////
+  //   AEC (Adaptive Echo Cancellation)
+  // ///////////////////////
+
+  @override
+  int aecCreateReferenceBuffer(int sampleRate, int channels) {
+    // AEC is not supported on web platform
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecDestroyReferenceBuffer() {
+    // AEC is not supported on web platform
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  int aecGetOutputCallback() {
+    // AEC is not supported on web platform
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecResetBuffer() {
+    // AEC is not supported on web platform
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  // ==================== AEC CALIBRATION ====================
+
+  @override
+  Uint8List aecGenerateCalibrationSignal(int sampleRate, int channels) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  void aecStartCalibrationCapture(int maxSamples) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  void aecStopCalibrationCapture() {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  void aecCaptureForAnalysis() {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  AecCalibrationResult aecRunCalibrationAnalysis(int sampleRate) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  void aecResetCalibration() {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  AecCalibrationResultWithImpulse aecRunCalibrationWithImpulse(int sampleRate) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  Float32List aecGetImpulseResponse(int maxLength) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  void aecApplyImpulseResponse() {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  Float32List aecGetCalibrationRefSignal(int maxLength) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  Float32List aecGetCalibrationMicSignal(int maxLength) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
 }

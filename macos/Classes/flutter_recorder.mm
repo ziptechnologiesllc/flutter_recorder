@@ -8,3 +8,6 @@
 #include "../../src/filters/filters.cpp"
 #include "../../src/filters/autogain.cpp"
 #include "../../src/filters/echo_cancellation.cpp"
+#include "../../src/filters/aec/reference_buffer.cpp"
+#include "../../src/filters/aec/adaptive_echo_cancellation.cpp"
+#include "../../src/filters/aec/calibration.cpp"

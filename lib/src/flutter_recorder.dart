@@ -1,6 +1,8 @@
 // ignore_for_file: omit_local_variable_types
 // ignore_for_file: avoid_positional_boolean_parameters
 
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_recorder/src/audio_data_container.dart';
 import 'package:flutter_recorder/src/bindings/recorder.dart';
@@ -15,6 +17,52 @@ typedef SilenceCallback = void Function(bool isSilent, double decibel);
 
 /// Silence state.
 typedef SilenceState = ({bool isSilent, double decibel});
+
+/// Result of AEC calibration analysis.
+class AecCalibrationResult {
+  /// Optimal delay in milliseconds between speaker output and microphone input.
+  final int delayMs;
+
+  /// Echo gain factor (ratio of echo to original signal, 0-1).
+  final double echoGain;
+
+  /// Peak correlation coefficient (quality metric, higher = better match).
+  final double correlation;
+
+  /// Whether the calibration was successful.
+  final bool success;
+
+  const AecCalibrationResult({
+    required this.delayMs,
+    required this.echoGain,
+    required this.correlation,
+    required this.success,
+  });
+
+  @override
+  String toString() =>
+      'AecCalibrationResult(delayMs: $delayMs, echoGain: ${echoGain.toStringAsFixed(3)}, '
+      'correlation: ${correlation.toStringAsFixed(3)}, success: $success)';
+}
+
+/// Result of AEC calibration analysis with impulse response info.
+class AecCalibrationResultWithImpulse extends AecCalibrationResult {
+  /// Length of the computed impulse response.
+  final int impulseLength;
+
+  const AecCalibrationResultWithImpulse({
+    required super.delayMs,
+    required super.echoGain,
+    required super.correlation,
+    required super.success,
+    required this.impulseLength,
+  });
+
+  @override
+  String toString() =>
+      'AecCalibrationResultWithImpulse(delayMs: $delayMs, echoGain: ${echoGain.toStringAsFixed(3)}, '
+      'correlation: ${correlation.toStringAsFixed(3)}, success: $success, impulseLength: $impulseLength)';
+}
 
 /// Use this class to _capture_ audio (such as from a microphone).
 interface class Recorder {
@@ -533,5 +581,96 @@ interface class Recorder {
   /// Get filter param value.
   double getFilterParamValue(RecorderFilterType filterType, int attributeId) {
     return _impl.getFilterParamValue(filterType, attributeId);
+  }
+
+  // ///////////////////////
+  //   AEC (Adaptive Echo Cancellation)
+  // ///////////////////////
+
+  /// Create the AEC reference buffer.
+  /// Returns a pointer to the buffer that should be passed to SoLoud.
+  /// [sampleRate] and [channels] should match the audio device configuration.
+  int aecCreateReferenceBuffer(int sampleRate, int channels) {
+    return _impl.aecCreateReferenceBuffer(sampleRate, channels);
+  }
+
+  /// Destroy the AEC reference buffer.
+  void aecDestroyReferenceBuffer() {
+    _impl.aecDestroyReferenceBuffer();
+  }
+
+  /// Get the AEC output callback function pointer.
+  /// This should be passed to SoLoud to receive playback audio.
+  int aecGetOutputCallback() {
+    return _impl.aecGetOutputCallback();
+  }
+
+  /// Reset the AEC buffer (e.g., when switching audio configurations).
+  void aecResetBuffer() {
+    _impl.aecResetBuffer();
+  }
+
+  // ==================== AEC CALIBRATION ====================
+
+  /// Generate calibration audio signal (white noise + sine sweep).
+  /// Returns WAV data as Uint8List that can be loaded into SoLoud.
+  Uint8List aecGenerateCalibrationSignal(int sampleRate, int channels) {
+    return _impl.aecGenerateCalibrationSignal(sampleRate, channels);
+  }
+
+  /// Start capturing microphone samples for calibration analysis.
+  /// [maxSamples] is the maximum number of mono samples to capture.
+  /// For ~2 seconds at 48kHz, use 96000.
+  void aecStartCalibrationCapture(int maxSamples) {
+    _impl.aecStartCalibrationCapture(maxSamples);
+  }
+
+  /// Stop capturing samples for calibration.
+  void aecStopCalibrationCapture() {
+    _impl.aecStopCalibrationCapture();
+  }
+
+  /// Capture signals from both reference and mic buffers for analysis.
+  /// Call this after the calibration audio has finished playing.
+  void aecCaptureForAnalysis() {
+    _impl.aecCaptureForAnalysis();
+  }
+
+  /// Run cross-correlation analysis on captured signals.
+  /// Returns a [AecCalibrationResult] with delay, gain, and correlation values.
+  AecCalibrationResult aecRunCalibrationAnalysis(int sampleRate) {
+    return _impl.aecRunCalibrationAnalysis(sampleRate);
+  }
+
+  /// Reset calibration state.
+  void aecResetCalibration() {
+    _impl.aecResetCalibration();
+  }
+
+  /// Run calibration with impulse response computation.
+  /// Returns result including impulse length (call aecGetImpulseResponse to get data).
+  AecCalibrationResultWithImpulse aecRunCalibrationWithImpulse(int sampleRate) {
+    return _impl.aecRunCalibrationWithImpulse(sampleRate);
+  }
+
+  /// Get stored impulse response from last calibration.
+  /// Returns Float32List of coefficients.
+  Float32List aecGetImpulseResponse(int maxLength) {
+    return _impl.aecGetImpulseResponse(maxLength);
+  }
+
+  /// Apply stored impulse response to AEC filter.
+  void aecApplyImpulseResponse() {
+    _impl.aecApplyImpulseResponse();
+  }
+
+  /// Get captured reference signal for visualization.
+  Float32List aecGetCalibrationRefSignal(int maxLength) {
+    return _impl.aecGetCalibrationRefSignal(maxLength);
+  }
+
+  /// Get captured mic signal for visualization.
+  Float32List aecGetCalibrationMicSignal(int maxLength) {
+    return _impl.aecGetCalibrationMicSignal(maxLength);
   }
 }

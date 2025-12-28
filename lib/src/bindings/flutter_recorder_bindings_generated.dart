@@ -8,9 +8,6 @@
 // ignore_for_file: type=lint
 import 'dart:ffi' as ffi;
 
-import 'package:flutter_recorder/src/enums.dart';
-import 'package:flutter_recorder/src/filters/filters.dart';
-
 /// Bindings for `src/flutter_recorder.h`.
 ///
 /// Regenerate bindings with
@@ -577,6 +574,252 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_getFilterParams =
       _flutter_recorder_getFilterParamsPtr
           .asFunction<double Function(int, int)>();
+
+  /// //////////////////////
+  /// AEC (Acoustic Echo Cancellation)
+  /// //////////////////////
+  ffi.Pointer<ffi.Void> flutter_recorder_aec_createReferenceBuffer(
+    int sampleRate,
+    int channels,
+  ) {
+    return _flutter_recorder_aec_createReferenceBuffer(
+      sampleRate,
+      channels,
+    );
+  }
+
+  late final _flutter_recorder_aec_createReferenceBufferPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Pointer<ffi.Void> Function(ffi.UnsignedInt,
+              ffi.UnsignedInt)>>('flutter_recorder_aec_createReferenceBuffer');
+  late final _flutter_recorder_aec_createReferenceBuffer =
+      _flutter_recorder_aec_createReferenceBufferPtr
+          .asFunction<ffi.Pointer<ffi.Void> Function(int, int)>();
+
+  void flutter_recorder_aec_destroyReferenceBuffer() {
+    return _flutter_recorder_aec_destroyReferenceBuffer();
+  }
+
+  late final _flutter_recorder_aec_destroyReferenceBufferPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_destroyReferenceBuffer');
+  late final _flutter_recorder_aec_destroyReferenceBuffer =
+      _flutter_recorder_aec_destroyReferenceBufferPtr
+          .asFunction<void Function()>();
+
+  ffi.Pointer<ffi.Void> flutter_recorder_aec_getOutputCallback() {
+    return _flutter_recorder_aec_getOutputCallback();
+  }
+
+  late final _flutter_recorder_aec_getOutputCallbackPtr =
+      _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Void> Function()>>(
+          'flutter_recorder_aec_getOutputCallback');
+  late final _flutter_recorder_aec_getOutputCallback =
+      _flutter_recorder_aec_getOutputCallbackPtr
+          .asFunction<ffi.Pointer<ffi.Void> Function()>();
+
+  void flutter_recorder_aec_resetBuffer() {
+    return _flutter_recorder_aec_resetBuffer();
+  }
+
+  late final _flutter_recorder_aec_resetBufferPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_resetBuffer');
+  late final _flutter_recorder_aec_resetBuffer =
+      _flutter_recorder_aec_resetBufferPtr.asFunction<void Function()>();
+
+  /// //////////////////////
+  /// AEC Calibration
+  /// //////////////////////
+  ffi.Pointer<ffi.Uint8> flutter_recorder_aec_generateCalibrationSignal(
+    int sampleRate,
+    int channels,
+    ffi.Pointer<ffi.Size> outSize,
+  ) {
+    return _flutter_recorder_aec_generateCalibrationSignal(
+      sampleRate,
+      channels,
+      outSize,
+    );
+  }
+
+  late final _flutter_recorder_aec_generateCalibrationSignalPtr = _lookup<
+          ffi.NativeFunction<
+              ffi.Pointer<ffi.Uint8> Function(
+                  ffi.UnsignedInt, ffi.UnsignedInt, ffi.Pointer<ffi.Size>)>>(
+      'flutter_recorder_aec_generateCalibrationSignal');
+  late final _flutter_recorder_aec_generateCalibrationSignal =
+      _flutter_recorder_aec_generateCalibrationSignalPtr.asFunction<
+          ffi.Pointer<ffi.Uint8> Function(int, int, ffi.Pointer<ffi.Size>)>();
+
+  void flutter_recorder_aec_startCalibrationCapture(
+    int maxSamples,
+  ) {
+    return _flutter_recorder_aec_startCalibrationCapture(
+      maxSamples,
+    );
+  }
+
+  late final _flutter_recorder_aec_startCalibrationCapturePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Size)>>(
+          'flutter_recorder_aec_startCalibrationCapture');
+  late final _flutter_recorder_aec_startCalibrationCapture =
+      _flutter_recorder_aec_startCalibrationCapturePtr
+          .asFunction<void Function(int)>();
+
+  void flutter_recorder_aec_stopCalibrationCapture() {
+    return _flutter_recorder_aec_stopCalibrationCapture();
+  }
+
+  late final _flutter_recorder_aec_stopCalibrationCapturePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_stopCalibrationCapture');
+  late final _flutter_recorder_aec_stopCalibrationCapture =
+      _flutter_recorder_aec_stopCalibrationCapturePtr
+          .asFunction<void Function()>();
+
+  void flutter_recorder_aec_captureForAnalysis() {
+    return _flutter_recorder_aec_captureForAnalysis();
+  }
+
+  late final _flutter_recorder_aec_captureForAnalysisPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_captureForAnalysis');
+  late final _flutter_recorder_aec_captureForAnalysis =
+      _flutter_recorder_aec_captureForAnalysisPtr.asFunction<void Function()>();
+
+  int flutter_recorder_aec_runCalibrationAnalysis(
+    int sampleRate,
+    ffi.Pointer<ffi.Int> outDelayMs,
+    ffi.Pointer<ffi.Float> outEchoGain,
+    ffi.Pointer<ffi.Float> outCorrelation,
+  ) {
+    return _flutter_recorder_aec_runCalibrationAnalysis(
+      sampleRate,
+      outDelayMs,
+      outEchoGain,
+      outCorrelation,
+    );
+  }
+
+  late final _flutter_recorder_aec_runCalibrationAnalysisPtr = _lookup<
+          ffi.NativeFunction<
+              ffi.Int Function(ffi.UnsignedInt, ffi.Pointer<ffi.Int>,
+                  ffi.Pointer<ffi.Float>, ffi.Pointer<ffi.Float>)>>(
+      'flutter_recorder_aec_runCalibrationAnalysis');
+  late final _flutter_recorder_aec_runCalibrationAnalysis =
+      _flutter_recorder_aec_runCalibrationAnalysisPtr.asFunction<
+          int Function(int, ffi.Pointer<ffi.Int>, ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>)>();
+
+  void flutter_recorder_aec_resetCalibration() {
+    return _flutter_recorder_aec_resetCalibration();
+  }
+
+  late final _flutter_recorder_aec_resetCalibrationPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_resetCalibration');
+  late final _flutter_recorder_aec_resetCalibration =
+      _flutter_recorder_aec_resetCalibrationPtr.asFunction<void Function()>();
+
+  /// Run calibration analysis with impulse response computation
+  int flutter_recorder_aec_runCalibrationWithImpulse(
+    int sampleRate,
+    ffi.Pointer<ffi.Int> outDelayMs,
+    ffi.Pointer<ffi.Float> outEchoGain,
+    ffi.Pointer<ffi.Float> outCorrelation,
+    ffi.Pointer<ffi.Int> outImpulseLength,
+  ) {
+    return _flutter_recorder_aec_runCalibrationWithImpulse(
+      sampleRate,
+      outDelayMs,
+      outEchoGain,
+      outCorrelation,
+      outImpulseLength,
+    );
+  }
+
+  late final _flutter_recorder_aec_runCalibrationWithImpulsePtr = _lookup<
+          ffi.NativeFunction<
+              ffi.Int Function(
+                  ffi.UnsignedInt,
+                  ffi.Pointer<ffi.Int>,
+                  ffi.Pointer<ffi.Float>,
+                  ffi.Pointer<ffi.Float>,
+                  ffi.Pointer<ffi.Int>)>>(
+      'flutter_recorder_aec_runCalibrationWithImpulse');
+  late final _flutter_recorder_aec_runCalibrationWithImpulse =
+      _flutter_recorder_aec_runCalibrationWithImpulsePtr.asFunction<
+          int Function(int, ffi.Pointer<ffi.Int>, ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>, ffi.Pointer<ffi.Int>)>();
+
+  /// Get stored impulse response from last calibration
+  int flutter_recorder_aec_getImpulseResponse(
+    ffi.Pointer<ffi.Float> dest,
+    int maxLength,
+  ) {
+    return _flutter_recorder_aec_getImpulseResponse(
+      dest,
+      maxLength,
+    );
+  }
+
+  late final _flutter_recorder_aec_getImpulseResponsePtr = _lookup<
+          ffi
+          .NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Float>, ffi.Int)>>(
+      'flutter_recorder_aec_getImpulseResponse');
+  late final _flutter_recorder_aec_getImpulseResponse =
+      _flutter_recorder_aec_getImpulseResponsePtr
+          .asFunction<int Function(ffi.Pointer<ffi.Float>, int)>();
+
+  /// Apply stored impulse response to AEC filter
+  void flutter_recorder_aec_applyImpulseResponse() {
+    return _flutter_recorder_aec_applyImpulseResponse();
+  }
+
+  late final _flutter_recorder_aec_applyImpulseResponsePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_applyImpulseResponse');
+  late final _flutter_recorder_aec_applyImpulseResponse =
+      _flutter_recorder_aec_applyImpulseResponsePtr
+          .asFunction<void Function()>();
+
+  /// Get captured calibration signals for visualization
+  int flutter_recorder_aec_getCalibrationRefSignal(
+    ffi.Pointer<ffi.Float> dest,
+    int maxLength,
+  ) {
+    return _flutter_recorder_aec_getCalibrationRefSignal(
+      dest,
+      maxLength,
+    );
+  }
+
+  late final _flutter_recorder_aec_getCalibrationRefSignalPtr = _lookup<
+          ffi
+          .NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Float>, ffi.Int)>>(
+      'flutter_recorder_aec_getCalibrationRefSignal');
+  late final _flutter_recorder_aec_getCalibrationRefSignal =
+      _flutter_recorder_aec_getCalibrationRefSignalPtr
+          .asFunction<int Function(ffi.Pointer<ffi.Float>, int)>();
+
+  int flutter_recorder_aec_getCalibrationMicSignal(
+    ffi.Pointer<ffi.Float> dest,
+    int maxLength,
+  ) {
+    return _flutter_recorder_aec_getCalibrationMicSignal(
+      dest,
+      maxLength,
+    );
+  }
+
+  late final _flutter_recorder_aec_getCalibrationMicSignalPtr = _lookup<
+          ffi
+          .NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Float>, ffi.Int)>>(
+      'flutter_recorder_aec_getCalibrationMicSignal');
+  late final _flutter_recorder_aec_getCalibrationMicSignal =
+      _flutter_recorder_aec_getCalibrationMicSignalPtr
+          .asFunction<int Function(ffi.Pointer<ffi.Float>, int)>();
 }
 
 typedef dartSilenceChangedCallback_t
@@ -591,3 +834,70 @@ typedef dartStreamDataCallback_tFunction = ffi.Void Function(
     ffi.Pointer<ffi.UnsignedChar> data, ffi.Int dataLength);
 typedef DartdartStreamDataCallback_tFunction = void Function(
     ffi.Pointer<ffi.UnsignedChar> data, int dataLength);
+
+/// Possible capture errors
+enum CaptureErrors {
+  /// No error
+  captureNoError(0),
+
+  /// The capture device has failed to initialize.
+  captureInitFailed(1),
+
+  /// The capture device has not yet been initialized.
+  captureNotInited(2),
+
+  /// Failed to start the device.
+  failedToStartDevice(3),
+
+  /// Failed to initialize wav recording.
+  failedToInitializeRecording(4),
+
+  /// Invalid arguments while initializing wav recording.
+  invalidArgs(5),
+
+  /// Failed to write wav file.
+  failedToWriteWav(6),
+
+  /// Filter not found
+  filterNotFound(7),
+
+  /// The filter has already been added.
+  filterAlreadyAdded(8),
+
+  /// Error getting filter parameter.
+  filterParameterGetError(9);
+
+  final int value;
+  const CaptureErrors(this.value);
+
+  static CaptureErrors fromValue(int value) => switch (value) {
+        0 => captureNoError,
+        1 => captureInitFailed,
+        2 => captureNotInited,
+        3 => failedToStartDevice,
+        4 => failedToInitializeRecording,
+        5 => invalidArgs,
+        6 => failedToWriteWav,
+        7 => filterNotFound,
+        8 => filterAlreadyAdded,
+        9 => filterParameterGetError,
+        _ => throw ArgumentError("Unknown value for CaptureErrors: $value"),
+      };
+}
+
+enum RecorderFilterType {
+  autogain(0),
+  echoCancellation(1),
+  adaptiveEchoCancellation(2);
+
+  final int value;
+  const RecorderFilterType(this.value);
+
+  static RecorderFilterType fromValue(int value) => switch (value) {
+        0 => autogain,
+        1 => echoCancellation,
+        2 => adaptiveEchoCancellation,
+        _ =>
+          throw ArgumentError("Unknown value for RecorderFilterType: $value"),
+      };
+}

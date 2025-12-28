@@ -274,6 +274,24 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput, ma_uin
         memcpy(capturedBuffer, captured, sizeof(float) * frameCount * userData->deviceConfig.capture.channels);
     }
 
+    // Calibration capture: accumulate samples if calibration is active
+    if (userData->mCalibrationActive) {
+        std::lock_guard<std::mutex> lock(userData->mCalibrationMutex);
+        size_t samplesToCapture = frameCount;
+        size_t spaceLeft = userData->mCalibrationBuffer.size() - userData->mCalibrationWritePos;
+        if (samplesToCapture > spaceLeft) {
+            samplesToCapture = spaceLeft;
+        }
+        if (samplesToCapture > 0) {
+            // Copy channel 0 only (mono) for calibration
+            int chans = userData->deviceConfig.capture.channels;
+            for (size_t i = 0; i < samplesToCapture; ++i) {
+                userData->mCalibrationBuffer[userData->mCalibrationWritePos + i] = captured[i * chans];
+            }
+            userData->mCalibrationWritePos += samplesToCapture;
+        }
+    }
+
     if (userData->deviceConfig.capture.format == ma_format_f32)
         calculateEnergy(captured, frameCount);
 
@@ -356,7 +374,9 @@ Capture::Capture() : isDetectingSilence(false),
                      monitoringEnabled(false),
                      monitoringMode(0),
                      mInited(false),
-                     mContextInited(false)
+                     mContextInited(false),
+                     mCalibrationWritePos(0),
+                     mCalibrationActive(false)
 {
     memset(waveData, 0, sizeof(float) * 256);
 }
@@ -767,5 +787,34 @@ float *Capture::getWave(bool *isTheSameAsBefore)
 float Capture::getVolumeDb()
 {
     return energy_db;
+}
+
+void Capture::startCalibrationCapture(size_t maxSamples)
+{
+    std::lock_guard<std::mutex> lock(mCalibrationMutex);
+    mCalibrationBuffer.resize(maxSamples, 0.0f);
+    mCalibrationWritePos = 0;
+    mCalibrationActive = true;
+}
+
+void Capture::stopCalibrationCapture()
+{
+    std::lock_guard<std::mutex> lock(mCalibrationMutex);
+    mCalibrationActive = false;
+}
+
+size_t Capture::readCalibrationSamples(float* dest, size_t maxSamples)
+{
+    std::lock_guard<std::mutex> lock(mCalibrationMutex);
+    size_t samplesToRead = std::min(maxSamples, mCalibrationWritePos);
+    if (samplesToRead > 0 && dest != nullptr) {
+        memcpy(dest, mCalibrationBuffer.data(), samplesToRead * sizeof(float));
+    }
+    return samplesToRead;
+}
+
+bool Capture::isCalibrationCaptureActive() const
+{
+    return mCalibrationActive;
 }
 

@@ -109,6 +109,29 @@ public:
     int bytesPerSample;
 
     Filters *mFilters;
+
+    /// @brief Start capturing samples for AEC calibration
+    /// @param maxSamples Maximum number of mono samples to capture
+    void startCalibrationCapture(size_t maxSamples);
+
+    /// @brief Stop capturing samples for calibration
+    void stopCalibrationCapture();
+
+    /// @brief Read captured calibration samples
+    /// @param dest Destination buffer for mono samples
+    /// @param maxSamples Maximum number of samples to read
+    /// @return Number of samples actually read
+    size_t readCalibrationSamples(float* dest, size_t maxSamples);
+
+    /// @brief Check if calibration capture is active
+    bool isCalibrationCaptureActive() const;
+
+    /// Calibration capture buffer and state (public for data callback access)
+    std::vector<float> mCalibrationBuffer;
+    size_t mCalibrationWritePos;
+    bool mCalibrationActive;
+    std::mutex mCalibrationMutex;
+
 private:
     ma_context context;
     ma_device_info *pPlaybackInfos;

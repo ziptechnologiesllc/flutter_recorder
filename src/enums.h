@@ -38,7 +38,8 @@ typedef enum PCMFormat
 typedef enum RecorderFilterType
 {
     autogain,
-    echoCancellation
+    echoCancellation,
+    adaptiveEchoCancellation
 } FilterType_t;
 
 #endif // ENUMS_H

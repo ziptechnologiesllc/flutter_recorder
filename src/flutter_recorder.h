@@ -5,6 +5,8 @@
 #include "enums.h"
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C"
@@ -94,6 +96,49 @@ extern "C"
     FFI_PLUGIN_EXPORT void flutter_recorder_getFilterParamNames(enum RecorderFilterType filterType, char **names, int *paramsCount);
     FFI_PLUGIN_EXPORT void flutter_recorder_setFilterParams(enum RecorderFilterType filterType, int attributeId, float value);
     FFI_PLUGIN_EXPORT float flutter_recorder_getFilterParams(enum RecorderFilterType filterType, int attributeId);
+
+    /////////////////////////
+    /// AEC (Acoustic Echo Cancellation)
+    /////////////////////////
+    FFI_PLUGIN_EXPORT void* flutter_recorder_aec_createReferenceBuffer(unsigned int sampleRate, unsigned int channels);
+    FFI_PLUGIN_EXPORT void flutter_recorder_aec_destroyReferenceBuffer();
+    FFI_PLUGIN_EXPORT void* flutter_recorder_aec_getOutputCallback();
+    FFI_PLUGIN_EXPORT void flutter_recorder_aec_resetBuffer();
+
+    /////////////////////////
+    /// AEC Calibration
+    /////////////////////////
+    FFI_PLUGIN_EXPORT uint8_t* flutter_recorder_aec_generateCalibrationSignal(
+        unsigned int sampleRate,
+        unsigned int channels,
+        size_t* outSize);
+    FFI_PLUGIN_EXPORT void flutter_recorder_aec_startCalibrationCapture(size_t maxSamples);
+    FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopCalibrationCapture();
+    FFI_PLUGIN_EXPORT void flutter_recorder_aec_captureForAnalysis();
+    FFI_PLUGIN_EXPORT int flutter_recorder_aec_runCalibrationAnalysis(
+        unsigned int sampleRate,
+        int* outDelayMs,
+        float* outEchoGain,
+        float* outCorrelation);
+    FFI_PLUGIN_EXPORT void flutter_recorder_aec_resetCalibration();
+
+    // Run calibration analysis with impulse response computation
+    FFI_PLUGIN_EXPORT int flutter_recorder_aec_runCalibrationWithImpulse(
+        unsigned int sampleRate,
+        int* outDelayMs,
+        float* outEchoGain,
+        float* outCorrelation,
+        int* outImpulseLength);
+
+    // Get stored impulse response from last calibration
+    FFI_PLUGIN_EXPORT int flutter_recorder_aec_getImpulseResponse(float* dest, int maxLength);
+
+    // Apply stored impulse response to AEC filter
+    FFI_PLUGIN_EXPORT void flutter_recorder_aec_applyImpulseResponse();
+
+    // Get captured calibration signals for visualization
+    FFI_PLUGIN_EXPORT int flutter_recorder_aec_getCalibrationRefSignal(float* dest, int maxLength);
+    FFI_PLUGIN_EXPORT int flutter_recorder_aec_getCalibrationMicSignal(float* dest, int maxLength);
 
 #ifdef __cplusplus
 }
