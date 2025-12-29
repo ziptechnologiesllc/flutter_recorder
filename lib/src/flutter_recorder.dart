@@ -12,6 +12,11 @@ import 'package:flutter_recorder/src/filters/filters.dart';
 import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
 
+export 'audio_data_container.dart';
+export 'enums.dart';
+export 'exceptions/exceptions.dart';
+export 'filters/filters.dart';
+
 /// Callback when silence state is changed.
 typedef SilenceCallback = void Function(bool isSilent, double decibel);
 
@@ -184,6 +189,9 @@ interface class Recorder {
   /// the items contain the same data.
   Stream<AudioDataContainer> get uint8ListStream => _impl.uint8ListStream;
 
+  /// Stream of AEC statistics (max attenuation, correlation, ERL).
+  Stream<AecStats> get aecStatsStream => _impl.aecStatsStream;
+
   /// Enable or disable silence detection.
   ///
   /// [enable] wheter to enable or disable silence detection. Default to false.
@@ -265,6 +273,7 @@ interface class Recorder {
     RecorderChannels channels = RecorderChannels.mono,
   }) async {
     await _impl.setDartEventCallbacks();
+    await _impl.setAecStatsCallback();
 
     // Sets the [_isInitialized].
     // Usefult when the consumer use the hot restart and that flag
@@ -672,5 +681,10 @@ interface class Recorder {
   /// Get captured mic signal for visualization.
   Float32List aecGetCalibrationMicSignal(int maxLength) {
     return _impl.aecGetCalibrationMicSignal(maxLength);
+  }
+
+  /// Force speaker output on iOS (useful for measurement mode).
+  void iosForceSpeakerOutput(bool enabled) {
+    _impl.iosForceSpeakerOutput(enabled);
   }
 }

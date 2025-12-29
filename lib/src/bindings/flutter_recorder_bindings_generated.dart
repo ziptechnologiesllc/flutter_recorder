@@ -15,6 +15,9 @@ import 'dart:ffi' as ffi;
 /// or
 /// `export CPATH="$(clang -v 2>&1 | grep "Selected GCC installation" | rev | cut -d' ' -f1 | rev)/include";  dart run ffigen --config ffigen.yaml`
 ///
+typedef AecStatsCallback = ffi.Void Function(AecStats stats);
+typedef dartAecStatsCallback_t = ffi.NativeFunction<AecStatsCallback>;
+
 class FlutterRecorderBindings {
   /// Holds the symbol lookup function.
   final ffi.Pointer<T> Function<T extends ffi.NativeType>(String symbolName)
@@ -59,6 +62,23 @@ class FlutterRecorderBindings {
       _flutter_recorder_setDartEventCallbackPtr.asFunction<
           void Function(
               dartSilenceChangedCallback_t, dartStreamDataCallback_t)>();
+
+  void flutter_recorder_set_aec_stats_callback(
+    ffi.Pointer<ffi.NativeFunction<AecStatsCallback>> callback,
+  ) {
+    return _flutter_recorder_set_aec_stats_callback(
+      callback,
+    );
+  }
+
+  late final _flutter_recorder_set_aec_stats_callbackPtr = _lookup<
+          ffi.NativeFunction<
+              ffi.Void Function(
+                  ffi.Pointer<ffi.NativeFunction<AecStatsCallback>>)>>(
+      'flutter_recorder_set_aec_stats_callback');
+  late final _flutter_recorder_set_aec_stats_callback =
+      _flutter_recorder_set_aec_stats_callbackPtr.asFunction<
+          void Function(ffi.Pointer<ffi.NativeFunction<AecStatsCallback>>)>();
 
   void flutter_recorder_nativeFree(
     ffi.Pointer<ffi.Void> pointer,
@@ -820,6 +840,24 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_aec_getCalibrationMicSignal =
       _flutter_recorder_aec_getCalibrationMicSignalPtr
           .asFunction<int Function(ffi.Pointer<ffi.Float>, int)>();
+
+  /// //////////////////////
+  /// iOS Hardware Control
+  /// //////////////////////
+  void flutter_recorder_ios_force_speaker_output(
+    bool enabled,
+  ) {
+    return _flutter_recorder_ios_force_speaker_output(
+      enabled,
+    );
+  }
+
+  late final _flutter_recorder_ios_force_speaker_outputPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Bool)>>(
+          'flutter_recorder_ios_force_speaker_output');
+  late final _flutter_recorder_ios_force_speaker_output =
+      _flutter_recorder_ios_force_speaker_outputPtr
+          .asFunction<void Function(bool)>();
 }
 
 typedef dartSilenceChangedCallback_t
@@ -900,4 +938,15 @@ enum RecorderFilterType {
         _ =>
           throw ArgumentError("Unknown value for RecorderFilterType: $value"),
       };
+}
+
+final class AecStats extends ffi.Struct {
+  @ffi.Float()
+  external double maxAttenuationDb;
+
+  @ffi.Float()
+  external double correlation;
+
+  @ffi.Float()
+  external double echoReturnLossDb;
 }

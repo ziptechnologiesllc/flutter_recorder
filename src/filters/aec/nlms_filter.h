@@ -6,32 +6,52 @@
 #include <cstring>
 
 /**
- * Static FIR Echo Cancellation Filter
+ * NPVSS-NLMS (Nonparametric Variable Step Size NLMS) Filter
  *
- * Uses calibrated impulse response coefficients to estimate and subtract
- * the acoustic echo. No adaptive learning - coefficients are fixed after
- * calibration for stable, distortion-free operation with music.
+ * Based on: Benesty et al. "A Nonparametric VSS NLMS Algorithm"
+ * IEEE Signal Processing Letters, Vol. 13, No. 10, October 2006
  *
- * For music/looper use cases, adaptive filters cause distortion because:
- * - Music is highly correlated (unlike speech)
- * - Continuous audio prevents convergence
- * - Adaptation artifacts create audible artifacts
+ * Algorithm from Table I of paper:
+ *   σ̂²ₑ(n) = λσ̂²ₑ(n-1) + (1-λ)|e(n)|²
+ *   μ̃(n) = max{1 - σ²ᵥ/σ̂²ₑ(n), 0}
+ *   h(n+1) = h(n) + [μ̃(n)/(||x(n)||² + δ)] * e(n) * x(n)
  *
- * Static FIR avoids these issues by using pre-measured impulse response.
+ * Key properties:
+ * - When error >> noise: μ ≈ 1 (fast convergence)
+ * - When error ≈ noise: μ ≈ 0 (low misadjustment)
+ * - σ²ᵥ estimated during silence periods only
  */
 class NLMSFilter {
 public:
-  static constexpr int DEFAULT_FILTER_LENGTH = 2048; // ~43ms @ 48kHz
-  static constexpr float DEFAULT_REGULARIZATION = 1e-6f;
+  // Filter length: ~64ms @ 48kHz for acoustic echo
+  static constexpr int DEFAULT_FILTER_LENGTH = 3072;
 
-  NLMSFilter(int filterLength = DEFAULT_FILTER_LENGTH, float stepSize = 0.1f,
+  // From paper: δ = 0.01 (regularization to avoid division by small numbers)
+  static constexpr float DEFAULT_REGULARIZATION = 0.01f;
+
+  // Stability bounds (not in paper, added for robustness)
+  static constexpr float MAX_COEFF_VALUE = 2.0f;   // Maximum coefficient magnitude
+  static constexpr float MAX_MU = 1.0f;            // Maximum step size
+
+  NLMSFilter(int filterLength = DEFAULT_FILTER_LENGTH,
+             float stepSize = 0.5f,  // Not used, NPVSS controls this
              float regularization = DEFAULT_REGULARIZATION)
-      : mFilterLength(filterLength), mHistoryIndex(0), mStepSize(stepSize),
-        mRegularization(regularization), mRefEnergy(0.0f), mErrorEnergy(0.0f),
-        mCoeffEnergy(0.0f), mSampleCount(0) {
+      : mFilterLength(filterLength),
+        mHistoryIndex(0),
+        mDelta(regularization),
+        // λ = 1 - 1/(3L) from paper Section III
+        mLambda(1.0f - 1.0f / (3.0f * filterLength)),
+        // NPVSS state
+        mSigmaE2(0.001f),     // Smoothed error power σ̂²ₑ (initialize small)
+        mSigmaV2(1e-6f),      // Noise power σ²ᵥ (estimated during silence)
+        mCurrentMu(0.0f),
+        mXNormSq(0.0f),       // ||x(n)||² - sum of squared reference samples
+        // Metrics
+        mRefEnergy(0.0f),
+        mErrorEnergy(0.0f),
+        mSampleCount(0) {
     mCoeffs = new float[filterLength]();
-    // Optimize: Double size for "mirrored" ring buffer to avoid modulo in inner
-    // loops
+    // Double-size ring buffer for efficient convolution
     mRefHistory = new float[filterLength * 2]();
   }
 
@@ -43,70 +63,108 @@ public:
   NLMSFilter(const NLMSFilter &) = delete;
   NLMSFilter &operator=(const NLMSFilter &) = delete;
 
+  /**
+   * Process one sample: compute echo estimate and subtract from mic
+   * @param micSample Input microphone sample d(n)
+   * @param refSample Reference (playback) sample x(n)
+   * @return Error signal e(n) = d(n) - ŷ(n)
+   */
   float process(float micSample, float refSample) {
-    // Write sample to both ends of the buffer (mirrored ring buffer)
+    // Update ||x(n)||² incrementally:
+    // Remove oldest sample's contribution, add new sample's contribution
+    int oldestIdx = mHistoryIndex;
+    float oldestSample = mRefHistory[oldestIdx];
+    mXNormSq -= oldestSample * oldestSample;
+    mXNormSq += refSample * refSample;
+    // Prevent negative due to floating point errors
+    mXNormSq = std::max(mXNormSq, 0.0f);
+
+    // Store reference sample in ring buffer (mirrored for efficiency)
     mRefHistory[mHistoryIndex] = refSample;
     mRefHistory[mHistoryIndex + mFilterLength] = refSample;
 
-    // FIR convolution without modulo
-    // We want x[n], x[n-1], ... x[n-L+1]
-    // In our double buffer, current is at `mHistoryIndex + mFilterLength`
-    // History is contiguous backwards from there.
+    // Compute echo estimate: ŷ(n) = h'(n) * x(n)
     float echoEstimate = 0.0f;
-    int dataPtrBase = mHistoryIndex + mFilterLength;
+    int baseIdx = mHistoryIndex + mFilterLength;
 
-// Pragma for auto-vectorization hint (widely supported)
+// Vectorized FIR convolution
 #pragma clang loop vectorize(enable) interleave(enable)
     for (int i = 0; i < mFilterLength; ++i) {
-      // Read backwards: x[n-i]
-      // echoEstimate += mCoeffs[i] * mRefHistory[idx];
-      // Optimized:
-      echoEstimate += mCoeffs[i] * mRefHistory[dataPtrBase - i];
+      echoEstimate += mCoeffs[i] * mRefHistory[baseIdx - i];
     }
 
-    // Error calculation
+    // Error signal: e(n) = d(n) - ŷ(n)
     float error = micSample - echoEstimate;
 
-    // Track energies
-    updateEnergies(refSample, error);
+    // Store for adapt()
+    mLastError = error;
+    mLastRefSample = refSample;
 
-    // Advance index
-    // Resume code with standard increment:
+    // Update energy tracking for metrics
+    mRefEnergy += refSample * refSample;
+    mErrorEnergy += error * error;
+    mSampleCount++;
+
+    // Advance ring buffer index
     mHistoryIndex = (mHistoryIndex + 1) % mFilterLength;
+
     return error;
   }
 
-  // Adapt coefficients using NLMS (or NPVSS)
-  // Should be called after process()
+  /**
+   * Adapt filter coefficients using NPVSS-NLMS (Table I from paper)
+   * Call after process() with the returned error
+   */
   void adapt(float error) {
-    // Standard NLMS update:
-    // h(n+1) = h(n) + mu * e(n) * x(n) / (x'x + epsilon)
+    // Update smoothed error power: σ̂²ₑ(n) = λσ̂²ₑ(n-1) + (1-λ)|e(n)|²
+    float errorSq = error * error;
+    mSigmaE2 = mLambda * mSigmaE2 + (1.0f - mLambda) * errorSq;
 
-    // Calculate variable step size (simplified NPVSS)
-    // For efficiency in this loop, we use a normalized step size
-    // mu_normalized = mu / (energy + regularization)
-    float normalization = mRefEnergy + mRegularization;
-    float currStep = mStepSize / normalization;
+    // Compute variable step size: μ̃(n) = max{1 - σ²ᵥ/σ̂²ₑ(n), 0}
+    float mu_tilde = 0.0f;
+    if (mSigmaE2 > mSigmaV2) {
+      mu_tilde = 1.0f - (mSigmaV2 / mSigmaE2);
+      mu_tilde = std::max(mu_tilde, 0.0f);
+      mu_tilde = std::min(mu_tilde, MAX_MU);
+    }
+    mCurrentMu = mu_tilde;
 
-    // Stability check: if energy is too low, don't adapt (avoid divergence)
-    if (mRefEnergy < 1e-5f)
+    // Don't adapt if step size is effectively zero or no reference energy
+    if (mu_tilde < 1e-6f || mXNormSq < 1e-8f) {
       return;
+    }
 
-    // Update coefficients
-    // Current sample x[n] is at `(mHistoryIndex - 1) + mFilterLength`
+    // NLMS update: h(n+1) = h(n) + [μ̃(n)/(||x(n)||² + δ)] * e(n) * x(n)
+    float normFactor = mXNormSq + mDelta;
+    float adaptStep = mu_tilde / normFactor;
 
+    // Get reference history for update
     int prevIdx = (mHistoryIndex == 0) ? mFilterLength - 1 : mHistoryIndex - 1;
-    int dataPtrBase = prevIdx + mFilterLength;
+    int baseIdx = prevIdx + mFilterLength;
+
+    float scaledError = adaptStep * error;
 
 #pragma clang loop vectorize(enable) interleave(enable)
     for (int i = 0; i < mFilterLength; ++i) {
-      // mCoeffs[i] += currStep * error * mRefHistory[idx];
-      // Optimized:
-      mCoeffs[i] += currStep * error * mRefHistory[dataPtrBase - i];
+      mCoeffs[i] += scaledError * mRefHistory[baseIdx - i];
+      // Clip coefficients to prevent explosion (stability bound)
+      mCoeffs[i] = std::max(-MAX_COEFF_VALUE, std::min(mCoeffs[i], MAX_COEFF_VALUE));
     }
   }
 
-  void setStepSize(float stepSize) { mStepSize = stepSize; }
+  /**
+   * Set noise floor estimate σ²ᵥ
+   * Should be called with measurements taken during silence periods
+   */
+  void setNoiseFloor(float sigmaV2) {
+    mSigmaV2 = std::max(sigmaV2, 1e-10f);
+  }
+
+  void setStepSize(float stepSize) {
+    // NPVSS controls step size automatically
+    (void)stepSize;
+  }
+
   void setCoefficients(const float *coeffs, int length) {
     int copyLen = std::min(length, mFilterLength);
     std::memcpy(mCoeffs, coeffs, copyLen * sizeof(float));
@@ -114,42 +172,27 @@ public:
       std::memset(mCoeffs + copyLen, 0,
                   (mFilterLength - copyLen) * sizeof(float));
     }
-    mCoeffEnergy = getCoeffEnergy();
   }
 
   int getFilterLength() const { return mFilterLength; }
   const float *getCoeffs() const { return mCoeffs; }
 
-  // Simple energy tracker for ref signal
-  void updateEnergies(float refSample, float errorSample) {
-    // Exponential moving average for energy
-    const float alpha = 0.001f;
-    // Estimate energy over the filter length (approx)
-    // For NLMS normalization we ideally want dot(x,x).
-    // For efficiency we can track it iteratively or approximate.
-    // Iterative update of sum-squares is expensive to maintain perfectly due to
-    // drift. We'll use a leaky integrator approach as a proxy for signal power.
-    // Actually for True NLMS we need sum(x[n-i]^2).
-    // Let's implement an efficient sliding window energy if possible,
-    // or just use the leaky integrator * filterLength approximation.
-
-    // Leaky integrator energy estimate
-    float refSq = refSample * refSample;
-    mRefEnergy = (1.0f - alpha) * mRefEnergy + alpha * (refSq * mFilterLength);
-
-    mErrorEnergy += errorSample * errorSample;
-    mSampleCount++;
-  }
-
   float getCoeffEnergy() const {
     float energy = 0.0f;
-    for (int i = 0; i < mFilterLength; ++i)
+    for (int i = 0; i < mFilterLength; ++i) {
       energy += mCoeffs[i] * mCoeffs[i];
+    }
     return energy;
   }
 
-  // Interface compatibility
-  float getAlpha() const { return mStepSize; }
+  // Get current variable step size (for debugging)
+  float getAlpha() const { return mCurrentMu; }
+
+  // Get noise floor estimate (for debugging)
+  float getNoiseFloor() const { return mSigmaV2; }
+
+  // Get smoothed error power (for debugging)
+  float getErrorPower() const { return mSigmaE2; }
 
   float getEchoReturnLoss() const {
     float energy = getCoeffEnergy();
@@ -162,15 +205,23 @@ public:
                              float &coeffChangeRate) {
     coeffEnergy = getCoeffEnergy();
     errorEnergyAvg = mSampleCount > 0 ? mErrorEnergy / mSampleCount : 0.0f;
-    coeffChangeRate = 0;
+    coeffChangeRate = mCurrentMu;
+    // Reset accumulators
     mErrorEnergy = 0.0f;
+    mRefEnergy = 0.0f;
     mSampleCount = 0;
   }
 
   void reset() {
+    std::memset(mCoeffs, 0, mFilterLength * sizeof(float));
     std::memset(mRefHistory, 0, mFilterLength * 2 * sizeof(float));
     mHistoryIndex = 0;
+    mSigmaE2 = 0.001f;
+    mXNormSq = 0.0f;
+    mCurrentMu = 0.0f;
     mRefEnergy = 0.0f;
+    mErrorEnergy = 0.0f;
+    mSampleCount = 0;
   }
 
 private:
@@ -179,12 +230,22 @@ private:
   float *mRefHistory;
   int mHistoryIndex;
 
-  float mStepSize;
-  float mRegularization;
+  float mDelta;   // Regularization δ
+  float mLambda;  // Smoothing factor λ = 1 - 1/(3L)
 
-  float mRefEnergy; // Approximated energy of reference vector
+  // NPVSS state variables
+  float mSigmaE2;   // Smoothed error power σ̂²ₑ(n)
+  float mSigmaV2;   // Noise power estimate σ²ᵥ (set externally)
+  float mCurrentMu; // Current variable step size μ̃(n)
+  float mXNormSq;   // ||x(n)||² - squared norm of reference vector
+
+  // Temporary storage for adapt()
+  float mLastError = 0.0f;
+  float mLastRefSample = 0.0f;
+
+  // Metrics
+  float mRefEnergy;
   float mErrorEnergy;
-  float mCoeffEnergy;
   size_t mSampleCount;
 };
 

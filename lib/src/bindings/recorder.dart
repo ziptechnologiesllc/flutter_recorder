@@ -42,6 +42,12 @@ abstract class RecorderImpl {
   /// Streams for audio data types.
   Stream<AudioDataContainer> get uint8ListStream => uint8ListController.stream;
 
+  /// Stream of AEC statistics (max attenuation, correlation, ERL).
+  Stream<AecStats> get aecStatsStream;
+
+  /// Set the AEC statistics callback.
+  Future<void> setAecStatsCallback() async {}
+
   /// Set Dart functions to call when an event occurs.
   @mustBeOverridden
   Future<void> setDartEventCallbacks();
@@ -334,4 +340,8 @@ abstract class RecorderImpl {
   /// Get captured mic signal for visualization.
   @mustBeOverridden
   Float32List aecGetCalibrationMicSignal(int maxLength);
+
+  /// Force speaker output on iOS (useful for measurement mode).
+  @mustBeOverridden
+  void iosForceSpeakerOutput(bool enabled);
 }

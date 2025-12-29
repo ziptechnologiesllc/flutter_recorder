@@ -113,3 +113,29 @@ enum PCMFormat {
         _ => throw ArgumentError('Unknown value for PCMFormat: $value'),
       };
 }
+
+/// Statistics from the Acoustic Echo Cancellation filter.
+class AecStats {
+  /// Constructs a new [AecStats].
+  const AecStats({
+    required this.maxAttenuationDb,
+    required this.correlation,
+    required this.echoReturnLossDb,
+  });
+
+  /// Maximum attenuation achieved in dB.
+  final double maxAttenuationDb;
+
+  /// Correlation between reference and mic signal.
+  final double correlation;
+
+  /// Echo Return Loss in dB.
+  final double echoReturnLossDb;
+
+  @override
+  String toString() {
+    return 'AecStats(maxAttenuationDb: ${maxAttenuationDb.toStringAsFixed(2)}, '
+        'correlation: ${correlation.toStringAsFixed(3)}, '
+        'ERL: ${echoReturnLossDb.toStringAsFixed(2)})';
+  }
+}

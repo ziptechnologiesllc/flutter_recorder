@@ -34106,12 +34106,12 @@ static ma_result ma_device__untrack__coreaudio(ma_device* pDevice)
 #endif
 
 #if defined(MA_APPLE_MOBILE)
-@interface ma_ios_notification_handler:NSObject {
+@interface ma_ios_notification_handler_recorder:NSObject {
     ma_device* m_pDevice;
 }
 @end
 
-@implementation ma_ios_notification_handler
+@implementation ma_ios_notification_handler_recorder
 -(id)init:(ma_device*)pDevice
 {
     self = [super init];
@@ -34239,7 +34239,7 @@ static ma_result ma_device_uninit__coreaudio(ma_device* pDevice)
 #endif
 #if defined(MA_APPLE_MOBILE)
     if (pDevice->coreaudio.pNotificationHandler != NULL) {
-        ma_ios_notification_handler* pNotificationHandler = (MA_BRIDGE_TRANSFER ma_ios_notification_handler*)pDevice->coreaudio.pNotificationHandler;
+        ma_ios_notification_handler_recorder* pNotificationHandler = (MA_BRIDGE_TRANSFER ma_ios_notification_handler_recorder*)pDevice->coreaudio.pNotificationHandler;
         [pNotificationHandler remove_handler];
     }
 #endif
@@ -34933,7 +34933,7 @@ static ma_result ma_device_init__coreaudio(ma_device* pDevice, const ma_device_c
     differently on non-Desktop Apple platforms.
     */
 #if defined(MA_APPLE_MOBILE)
-    pDevice->coreaudio.pNotificationHandler = (MA_BRIDGE_RETAINED void*)[[ma_ios_notification_handler alloc] init:pDevice];
+    pDevice->coreaudio.pNotificationHandler = (MA_BRIDGE_RETAINED void*)[[ma_ios_notification_handler_recorder alloc] init:pDevice];
 #endif
 
     return MA_SUCCESS;

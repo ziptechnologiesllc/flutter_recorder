@@ -32,11 +32,10 @@ struct CalibrationResult {
 
 class AECCalibration {
 public:
-    static constexpr int WHITE_NOISE_DURATION_MS = 1000;   // Doubled for better correlation
-    static constexpr int SINE_SWEEP_DURATION_MS = 2000;    // Doubled for better correlation
+    static constexpr int WHITE_NOISE_DURATION_MS = 1500;   // 1.5 seconds of white noise
     static constexpr int MAX_DELAY_SEARCH_MS = 150;  // Search up to 150ms delay
     static constexpr float SIGNAL_AMPLITUDE = 0.3f;  // Calibration signal level
-    static constexpr float MIN_CORRELATION_THRESHOLD = 0.4f;  // Minimum correlation for valid result (0.4+ needed for reliable calibration)
+    static constexpr float MIN_CORRELATION_THRESHOLD = 0.2f;  // Minimum correlation for valid result
 
     /**
      * Generate calibration WAV file in memory.

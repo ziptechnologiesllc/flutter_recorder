@@ -29,6 +29,12 @@ class RecorderController {
 /// Use this class to _capture_ audio (such as from a microphone).
 @internal
 class RecorderWeb extends RecorderImpl {
+  @override
+  Stream<AecStats> get aecStatsStream => Stream.empty();
+
+  @override
+  Future<void> setAecStatsCallback() async {}
+
   SilenceCallback? _silenceCallback;
 
   /// Create the worker in the WASM Module and listen for events coming
@@ -482,4 +488,7 @@ class RecorderWeb extends RecorderImpl {
   Float32List aecGetCalibrationMicSignal(int maxLength) {
     throw UnsupportedError('AEC calibration is not supported on web platform');
   }
+
+  @override
+  void iosForceSpeakerOutput(bool enabled) {}
 }

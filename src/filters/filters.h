@@ -4,57 +4,55 @@
 #include "../enums.h"
 #include "generic_filter.h"
 
-#include <vector>
-#include <string>
-#include <memory>
 #include <functional>
+#include <memory>
+#include <string>
+#include <vector>
 
-struct FilterObject
-{
-    RecorderFilterType type;
-    std::unique_ptr<GenericFilter> filter;
+struct FilterObject {
+  RecorderFilterType type;
+  std::unique_ptr<GenericFilter> filter;
 
-    FilterObject(RecorderFilterType t, std::unique_ptr<GenericFilter> f)
-        : type(t), filter(std::move(f)) {}
+  FilterObject(RecorderFilterType t, std::unique_ptr<GenericFilter> f)
+      : type(t), filter(std::move(f)) {}
 
-    bool operator==(RecorderFilterType const &i)
-    {
-        return (i == type);
-    }
+  bool operator==(RecorderFilterType const &i) { return (i == type); }
 };
 
 /// Class to manage global filters.
-class Filters
-{
-    /// Setting the global filter to NULL will clear the global filter.
-    /// The default maximum number of global filters active is 4, but this
-    /// can be changed in a global constant in soloud.h (and rebuilding SoLoud).
+class Filters {
+  /// Setting the global filter to NULL will clear the global filter.
+  /// The default maximum number of global filters active is 4, but this
+  /// can be changed in a global constant in soloud.h (and rebuilding SoLoud).
 public:
-    Filters(unsigned int samplerate, unsigned int channels = 2);
-    ~Filters();
+  Filters(unsigned int samplerate, unsigned int channels = 2);
+  ~Filters();
 
-    /// Return -1 if the filter is not active or its index
-    int isFilterActive(RecorderFilterType filter);
-    
-    CaptureErrors addFilter(RecorderFilterType filterType);
-    
-    CaptureErrors removeFilter(RecorderFilterType filterType);
-    
-    std::vector<std::string> getFilterParamNames(RecorderFilterType filterType);
-    
-    /// If [handle]==0 the operation is done to global filters.
-    void setFilterParams(RecorderFilterType filterType, int attributeId, float value);
-    
-    /// If [handle]==0 the operation is done to global filters.
-    float getFilterParams(RecorderFilterType filterType, int attributeId);
+  /// Return -1 if the filter is not active or its index
+  int isFilterActive(RecorderFilterType filter);
 
-    /// Set AEC impulse response from calibration
-    void setAecImpulseResponse(const float* coeffs, int length);
+  CaptureErrors addFilter(RecorderFilterType filterType);
 
-    unsigned int mSamplerate;
-    unsigned int mChannels;
+  CaptureErrors removeFilter(RecorderFilterType filterType);
 
-    std::vector<std::unique_ptr<FilterObject>> filters;
+  std::vector<std::string> getFilterParamNames(RecorderFilterType filterType);
+
+  /// If [handle]==0 the operation is done to global filters.
+  void setFilterParams(RecorderFilterType filterType, int attributeId,
+                       float value);
+
+  /// If [handle]==0 the operation is done to global filters.
+  float getFilterParams(RecorderFilterType filterType, int attributeId);
+
+  /// Set AEC impulse response from calibration
+  void setAecImpulseResponse(const float *coeffs, int length);
+
+  AecStats getAecStats();
+
+  unsigned int mSamplerate;
+  unsigned int mChannels;
+
+  std::vector<std::unique_ptr<FilterObject>> filters;
 };
 
 #endif // PLAYER_H

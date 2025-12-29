@@ -5,9 +5,30 @@
 #include "../../src/analyzer.cpp"
 #include "../../src/capture.cpp"
 #include "../../src/fft/soloud_fft.cpp"
-#include "../../src/filters/filters.cpp"
-#include "../../src/filters/autogain.cpp"
-#include "../../src/filters/echo_cancellation.cpp"
-#include "../../src/filters/aec/reference_buffer.cpp"
 #include "../../src/filters/aec/adaptive_echo_cancellation.cpp"
 #include "../../src/filters/aec/calibration.cpp"
+#include "../../src/filters/aec/reference_buffer.cpp"
+#include "../../src/filters/autogain.cpp"
+#include "../../src/filters/echo_cancellation.cpp"
+#include "../../src/filters/filters.cpp"
+
+#import <AVFoundation/AVFoundation.h>
+
+extern "C" {
+void flutter_recorder_ios_force_speaker_output(bool enabled) {
+  NSError *error = nil;
+  AVAudioSession *session = [AVAudioSession sharedInstance];
+  if (enabled) {
+    [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker
+                               error:&error];
+    NSLog(@"[FlutterRecorder] Forced speaker output: YES");
+  } else {
+    [session overrideOutputAudioPort:AVAudioSessionPortOverrideNone
+                               error:&error];
+    NSLog(@"[FlutterRecorder] Forced speaker output: NO");
+  }
+  if (error) {
+    NSLog(@"[FlutterRecorder] Error setting speaker output: %@", error);
+  }
+}
+}

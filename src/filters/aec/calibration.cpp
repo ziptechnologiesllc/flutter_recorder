@@ -12,10 +12,8 @@ std::vector<float> AECCalibration::sGeneratedSignal;
 uint8_t *AECCalibration::generateCalibrationWav(unsigned int sampleRate,
                                                 unsigned int channels,
                                                 size_t *outSize) {
-  // Calculate total samples
-  size_t whiteNoiseSamples = (sampleRate * WHITE_NOISE_DURATION_MS) / 1000;
-  size_t sineSweepSamples = (sampleRate * SINE_SWEEP_DURATION_MS) / 1000;
-  size_t totalSamples = whiteNoiseSamples + sineSweepSamples;
+  // Calculate total samples - white noise only
+  size_t totalSamples = (sampleRate * WHITE_NOISE_DURATION_MS) / 1000;
   size_t totalFrames = totalSamples; // samples per channel
 
   // WAV format: 44 byte header + float32 samples
@@ -33,16 +31,9 @@ uint8_t *AECCalibration::generateCalibrationWav(unsigned int sampleRate,
   // Generate mono signal first and store it for use as reference
   sGeneratedSignal.resize(totalSamples);
 
-  // White noise section
-  generateWhiteNoise(sGeneratedSignal.data(), whiteNoiseSamples,
-                     SIGNAL_AMPLITUDE);
-
-  // Sine sweep section
-  generateSineSweep(sGeneratedSignal.data() + whiteNoiseSamples,
-                    sineSweepSamples, sampleRate,
-                    50.0f,    // Start frequency
-                    20000.0f, // End frequency
-                    SIGNAL_AMPLITUDE);
+  // White noise only - works better for correlation than sine sweep
+  // (phone speakers can't reproduce high frequencies in sweep)
+  generateWhiteNoise(sGeneratedSignal.data(), totalSamples, SIGNAL_AMPLITUDE);
 
   // Copy to all channels (interleaved)
   for (size_t frame = 0; frame < totalFrames; ++frame) {
@@ -50,6 +41,9 @@ uint8_t *AECCalibration::generateCalibrationWav(unsigned int sampleRate,
       audioData[frame * channels + ch] = sGeneratedSignal[frame];
     }
   }
+
+  printf("[AEC Calibration] Generated %zu samples (%.1fms) of white noise\n",
+         totalSamples, totalSamples * 1000.0f / sampleRate);
 
   *outSize = totalSize;
   return buffer;
@@ -68,62 +62,6 @@ void AECCalibration::captureSignals(const float *referenceBuffer,
   printf(
       "[AEC Calibration] Captured signals: ref=%zu samples, mic=%zu samples\n",
       referenceLen, micLen);
-
-  // DEBUG: Dump captured signals to WAV files
-  /*
-  FILE *fRef = fopen("/tmp/debug_ref.wav", "wb");
-  if (fRef) {
-      uint8_t header[44];
-      writeWavHeader(header, 48000, 1, referenceLen); // Assuming 48k mono
-  for debug fwrite(header, 1, 44, fRef); fwrite(referenceBuffer,
-  sizeof(float), referenceLen, fRef); fclose(fRef); printf("[AEC
-  Calibration] Debug dumped ref to /tmp/debug_ref.wav\n"); } else {
-      printf("[AEC Calibration] Failed to open /tmp/debug_ref.wav\n");
-  }
-
-  FILE *fMic = fopen("/tmp/debug_mic.wav", "wb");
-  if (fMic) {
-      uint8_t header[44];
-      writeWavHeader(header, 48000, 1, micLen); // Assuming 48k mono for
-  debug fwrite(header, 1, 44, fMic); fwrite(micBuffer, sizeof(float),
-  micLen, fMic); fclose(fMic); printf("[AEC Calibration] Debug dumped mic to
-  /tmp/debug_mic.wav\n"); } else { printf("[AEC Calibration] Failed to open
-  /tmp/debug_mic.wav\n");
-  }
-  */
-
-  // Un-commented version for actual use:
-  FILE *fRef = fopen("/Users/liam/Documents/debug_ref.wav", "wb");
-  if (fRef) {
-    uint8_t header[44];
-    // Note: we need access to sampleRate here? analyze() has it,
-    // captureSignals doesn't. We'll hardcode 48000 mostly likely or just
-    // dump raw float. Reusing writeWavHeader requires it to be public or
-    // friend. It is private static helper in .cpp? It is defined in
-    // calibration.cpp as static void writeWavHeader(...) We can use it
-    // here.
-
-    // We don't have sampleRate passed to captureSignals, but we can assume
-    // 48000 or pass it? captureSignals matches a signature from
-    // flutter_recorder.cpp. Let's assume 48000 for debug dump.
-    writeWavHeader(reinterpret_cast<uint8_t *>(header), 48000, 1, referenceLen);
-    fwrite(header, 1, 44, fRef);
-    fwrite(referenceBuffer, sizeof(float), referenceLen, fRef);
-    fclose(fRef);
-    printf("[AEC Calibration] Debug dumped ref to "
-           "/Users/liam/Documents/debug_ref.wav\n");
-  }
-
-  FILE *fMic = fopen("/Users/liam/Documents/debug_mic.wav", "wb");
-  if (fMic) {
-    uint8_t header[44];
-    writeWavHeader(reinterpret_cast<uint8_t *>(header), 48000, 1, micLen);
-    fwrite(header, 1, 44, fMic);
-    fwrite(micBuffer, sizeof(float), micLen, fMic);
-    fclose(fMic);
-    printf("[AEC Calibration] Debug dumped mic to "
-           "/Users/liam/Documents/debug_mic.wav\n");
-  }
 }
 
 CalibrationResult AECCalibration::analyze(unsigned int sampleRate) {
@@ -136,16 +74,31 @@ CalibrationResult AECCalibration::analyze(unsigned int sampleRate) {
   }
 
   // Debug: compute signal energy
+  // Debug: compute signal energy and stats over ALL samples
   float refEnergy = 0.0f, micEnergy = 0.0f;
-  for (size_t i = 0; i < std::min((size_t)1000, sRefCapture.size()); ++i) {
-    refEnergy += sRefCapture[i] * sRefCapture[i];
+  float refMax = 0.0f, micMax = 0.0f;
+
+  for (float val : sRefCapture) {
+    refEnergy += val * val;
+    if (std::abs(val) > refMax)
+      refMax = std::abs(val);
   }
-  for (size_t i = 0; i < std::min((size_t)1000, sMicCapture.size()); ++i) {
-    micEnergy += sMicCapture[i] * sMicCapture[i];
+  for (float val : sMicCapture) {
+    micEnergy += val * val;
+    if (std::abs(val) > micMax)
+      micMax = std::abs(val);
   }
-  printf("[AEC Calibration] analyze: ref samples=%zu (energy=%.4f) mic "
-         "samples=%zu (energy=%.4f)\n",
-         sRefCapture.size(), refEnergy, sMicCapture.size(), micEnergy);
+
+  // Normalize energy by length
+  if (!sRefCapture.empty())
+    refEnergy /= sRefCapture.size();
+  if (!sMicCapture.empty())
+    micEnergy /= sMicCapture.size();
+
+  printf("[AEC Calibration] analyze: ref samples=%zu (RMS=%.6f, Peak=%.4f) mic "
+         "samples=%zu (RMS=%.6f, Peak=%.4f)\n",
+         sRefCapture.size(), std::sqrt(refEnergy), refMax, sMicCapture.size(),
+         std::sqrt(micEnergy), micMax);
 
   // Calculate max delay in samples
   int maxDelaySamples = (sampleRate * MAX_DELAY_SEARCH_MS) / 1000;
@@ -274,6 +227,27 @@ void AECCalibration::generateSineSweep(float *buffer, size_t samples,
   }
 }
 
+// Find where signal energy starts (first sample above threshold)
+static size_t findSignalOnset(const float *signal, size_t len,
+                              float threshold = 0.02f) {
+  // Use a sliding window to detect sustained energy above threshold
+  const size_t windowSize = 256; // ~5ms at 48kHz
+  float windowEnergy = 0.0f;
+
+  for (size_t i = 0; i < len; ++i) {
+    windowEnergy += signal[i] * signal[i];
+    if (i >= windowSize) {
+      windowEnergy -= signal[i - windowSize] * signal[i - windowSize];
+    }
+    float avgEnergy = windowEnergy / std::min(i + 1, windowSize);
+    if (avgEnergy > threshold * threshold) {
+      // Found onset, return position minus window size to get start
+      return (i > windowSize) ? (i - windowSize) : 0;
+    }
+  }
+  return 0; // No onset found, assume start
+}
+
 int AECCalibration::findOptimalDelay(const float *reference, size_t refLen,
                                      const float *recorded, size_t recLen,
                                      int maxDelaySamples,
@@ -281,30 +255,79 @@ int AECCalibration::findOptimalDelay(const float *reference, size_t refLen,
   int bestDelay = 0;
   float bestCorr = -1.0f;
 
-  // Use a window of the signal to reduce computation
-  // Use the first 50% of available samples for correlation
-  size_t windowLen = std::min(refLen, recLen) / 2;
-  if (windowLen < 1000) {
-    windowLen = std::min(refLen, recLen);
+  // Find signal onset in both buffers
+  size_t refOnset = findSignalOnset(reference, refLen);
+  size_t micOnset = findSignalOnset(recorded, recLen);
+
+  printf("[AEC Calibration] Signal onset: ref=%zu mic=%zu (%.1fms vs %.1fms)\n",
+         refOnset, micOnset, refOnset / 48.0f, micOnset / 48.0f);
+
+  // Debug: print energy at different points in each signal
+  auto printEnergy = [](const char *name, const float *sig, size_t len) {
+    float e0 = 0, e1 = 0, e2 = 0, e3 = 0;
+    size_t quarter = len / 4;
+    for (size_t i = 0; i < quarter && i < len; ++i)
+      e0 += sig[i] * sig[i];
+    for (size_t i = quarter; i < 2 * quarter && i < len; ++i)
+      e1 += sig[i] * sig[i];
+    for (size_t i = 2 * quarter; i < 3 * quarter && i < len; ++i)
+      e2 += sig[i] * sig[i];
+    for (size_t i = 3 * quarter; i < len; ++i)
+      e3 += sig[i] * sig[i];
+    printf("[AEC Calibration] %s energy by quarter: [%.4f, %.4f, %.4f, %.4f]\n",
+           name, std::sqrt(e0 / quarter), std::sqrt(e1 / quarter),
+           std::sqrt(e2 / quarter), std::sqrt(e3 / quarter));
+  };
+  printEnergy("ref", reference, refLen);
+  printEnergy("mic", recorded, recLen);
+
+  // Use the portion after onset for correlation (skip initial silence)
+  size_t refStart = refOnset;
+  size_t micStart = micOnset;
+
+  // Adjust available length after onset
+  size_t refAvail = refLen - refStart;
+  size_t micAvail = recLen - micStart;
+
+  // Use available samples, leaving margin for delay search
+  size_t windowLen = std::min(refAvail, micAvail);
+  // Leave margin for delay search (max delay samples on each side)
+  if (windowLen > (size_t)(maxDelaySamples * 2)) {
+    windowLen -= maxDelaySamples;
   }
 
-  // Pre-compute reference energy for normalization
+  printf("[AEC Calibration] Correlation window: %zu samples (%.1fms) starting "
+         "at ref[%zu], mic[%zu]\n",
+         windowLen, windowLen / 48.0f, refStart, micStart);
+
+  // Pre-compute reference energy for normalization (from onset)
   float refEnergy = 0.0f;
   for (size_t i = 0; i < windowLen; ++i) {
-    refEnergy += reference[i] * reference[i];
+    refEnergy += reference[refStart + i] * reference[refStart + i];
   }
 
-  // Search for optimal delay
-  for (int delay = 0;
-       delay < maxDelaySamples && delay < (int)recLen - (int)windowLen;
-       ++delay) {
+  // Search both positive and negative delays around the onset difference
+  // Positive delay = mic lags behind ref (acoustic delay)
+  // Negative delay = ref has more lead-in silence than mic
+  int startDelay = -maxDelaySamples;
+  int endDelay = maxDelaySamples;
+
+  for (int delay = startDelay; delay < endDelay; ++delay) {
+    // Calculate mic offset for this delay
+    int micOffset = (int)micStart + delay;
+    if (micOffset < 0 || micOffset + (int)windowLen > (int)recLen) {
+      continue; // Out of bounds
+    }
+
     float corr = 0.0f;
     float recEnergy = 0.0f;
 
-    // Compute cross-correlation and recorded energy at this delay
+    // Compute cross-correlation
     for (size_t i = 0; i < windowLen; ++i) {
-      corr += reference[i] * recorded[i + delay];
-      recEnergy += recorded[i + delay] * recorded[i + delay];
+      float refSample = reference[refStart + i];
+      float micSample = recorded[micOffset + i];
+      corr += refSample * micSample;
+      recEnergy += micSample * micSample;
     }
 
     // Normalized correlation coefficient
@@ -317,8 +340,20 @@ int AECCalibration::findOptimalDelay(const float *reference, size_t refLen,
     }
   }
 
+  // The actual acoustic delay is the difference in onsets plus the
+  // correlation delay
+  int totalDelaySamples = (int)(micOnset - refOnset) + bestDelay;
+
+  printf("[AEC Calibration] Best correlation: %.4f at delay=%d samples "
+         "(%.2fms)\n",
+         bestCorr, bestDelay, bestDelay / 48.0f);
+  printf("[AEC Calibration] Onset diff: %d samples, total delay: %d samples "
+         "(%.2fms)\n",
+         (int)(micOnset - refOnset), totalDelaySamples,
+         totalDelaySamples / 48.0f);
+
   *outCorrelation = bestCorr;
-  return bestDelay;
+  return totalDelaySamples; // Return total delay including onset difference
 }
 
 float AECCalibration::estimateEchoGain(const float *reference,

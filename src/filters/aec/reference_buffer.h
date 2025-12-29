@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <chrono>
+#include <cmath>
 
 /**
  * Lock-free Single-Producer Single-Consumer (SPSC) ring buffer for AEC reference signal.
@@ -58,8 +59,55 @@ public:
         size_t samplesToWrite = frameCount * mChannels;
         size_t writePos = mWritePos.load(std::memory_order_relaxed);
 
+        // Calculate energy of incoming data for debug
+        float energy = 0.0f;
         for (size_t i = 0; i < samplesToWrite; ++i) {
             mBuffer[(writePos + i) % mBuffer.size()] = data[i];
+            energy += data[i] * data[i];
+        }
+
+        // During calibration: PROGRESSIVELY copy data as it arrives
+        // This prevents the circular buffer from overwriting data before we save it
+        if (mCalibrationActive.load(std::memory_order_relaxed)) {
+            float rms = samplesToWrite > 0 ? std::sqrt(energy / samplesToWrite) : 0.0f;
+            static int calibWriteCount = 0;
+            if (++calibWriteCount <= 5 || calibWriteCount % 50 == 0) {
+                printf("[AEC RefBuf WRITE] pos=%zu frames=%zu RMS=%.4f (first: %.4f %.4f)\n",
+                       writePos, frameCount, rms,
+                       samplesToWrite > 0 ? data[0] : 0.0f,
+                       samplesToWrite > 1 ? data[1] : 0.0f);
+            }
+
+            // PROGRESSIVE COPY: Append incoming data to calibration buffer immediately
+            // This ensures we capture data before the circular buffer can overwrite it
+            if (!mCalibrationDataValid && mCalibrationCapturedFrames < mCalibrationExpectedFrames) {
+                size_t framesToAppend = std::min(frameCount, mCalibrationExpectedFrames - mCalibrationCapturedFrames);
+                size_t oldSize = mCalibrationData.size();
+                mCalibrationData.resize(oldSize + framesToAppend);
+
+                // Extract channel 0 (mono) from interleaved data
+                for (size_t i = 0; i < framesToAppend; ++i) {
+                    mCalibrationData[oldSize + i] = data[i * mChannels];  // Channel 0
+                }
+
+                mCalibrationCapturedFrames += frameCount;
+
+                // Check if we've captured enough
+                if (mCalibrationCapturedFrames >= mCalibrationExpectedFrames) {
+                    mCalibrationDataValid = true;
+
+                    // Calculate RMS of captured data
+                    float copyEnergy = 0.0f;
+                    for (size_t i = 0; i < mCalibrationData.size(); ++i) {
+                        copyEnergy += mCalibrationData[i] * mCalibrationData[i];
+                    }
+                    float copyRms = mCalibrationData.size() > 0 ? std::sqrt(copyEnergy / mCalibrationData.size()) : 0.0f;
+                    printf("[AEC RefBuf] PROGRESSIVE CAPTURE COMPLETE: %zu frames, RMS=%.4f\n",
+                           mCalibrationData.size(), copyRms);
+                }
+            } else {
+                mCalibrationCapturedFrames += frameCount;
+            }
         }
 
         // Update write position atomically
@@ -267,33 +315,83 @@ public:
     unsigned int channels() const { return mChannels; }
 
     /**
-     * Read recent samples for calibration analysis.
-     * Reads the most recent N samples from the buffer (mono, channel 0 only).
+     * Start calibration capture - save current write position.
+     * Call this BEFORE playing calibration signal.
+     * @param expectedFrames Expected number of frames to capture (auto-stops when reached)
+     */
+    void startCalibrationCapture(size_t expectedFrames = 72000) {
+        // Clear any previous calibration data and reserve space
+        mCalibrationData.clear();
+        mCalibrationData.reserve(expectedFrames);  // Pre-allocate for efficiency
+        mCalibrationDataValid = false;
+        mCalibrationExpectedFrames = expectedFrames;
+        mCalibrationCapturedFrames = 0;
+
+        mCalibrationStartPos.store(mWritePos.load(std::memory_order_acquire),
+                                   std::memory_order_release);
+        mCalibrationActive.store(true, std::memory_order_release);
+        printf("[AEC RefBuf] Calibration started at pos=%zu, expecting %zu frames (progressive capture)\n",
+               mCalibrationStartPos.load(std::memory_order_relaxed), expectedFrames);
+    }
+
+    /**
+     * Stop calibration capture.
+     * With progressive capture, data is already saved - just disable capture mode.
+     */
+    void stopCalibrationCapture() {
+        // Disable calibration (stops progressive capture in write())
+        mCalibrationActive.store(false, std::memory_order_release);
+
+        // Mark as valid even if we didn't get all expected frames
+        if (!mCalibrationDataValid && mCalibrationData.size() > 0) {
+            mCalibrationDataValid = true;
+        }
+
+        // Calculate RMS of what we captured
+        float energy = 0.0f;
+        for (size_t i = 0; i < mCalibrationData.size(); ++i) {
+            energy += mCalibrationData[i] * mCalibrationData[i];
+        }
+        float rms = mCalibrationData.size() > 0 ? std::sqrt(energy / mCalibrationData.size()) : 0.0f;
+
+        printf("[AEC RefBuf] Calibration stopped. Progressive capture: %zu frames, RMS=%.4f\n",
+               mCalibrationData.size(), rms);
+    }
+
+    /**
+     * Read samples captured during calibration.
+     * Returns the preserved data that was copied when stopCalibrationCapture() was called.
+     * This data is safe from being overwritten by ongoing silence.
      *
      * @param dest Destination buffer for mono samples
-     * @param sampleCount Number of samples to read
+     * @param sampleCount Number of mono samples to read
      * @return Number of samples actually read
      */
     size_t readForCalibration(float* dest, size_t sampleCount) const {
         if (dest == nullptr || sampleCount == 0) return 0;
 
-        size_t writePos = mWritePos.load(std::memory_order_acquire);
-        size_t bufferSize = mBuffer.size();
-
-        // Calculate how many samples are available
-        size_t available = std::min(sampleCount * mChannels, bufferSize);
-        size_t samplesToRead = (sampleCount < available / mChannels) ? sampleCount : available / mChannels;
-
-        // Read position: go back from write position
-        size_t startPos = (writePos + bufferSize - samplesToRead * mChannels) % bufferSize;
-
-        // Copy samples (extract channel 0 only for mono output)
-        for (size_t i = 0; i < samplesToRead; ++i) {
-            size_t srcIdx = (startPos + i * mChannels) % bufferSize;
-            dest[i] = mBuffer[srcIdx];
+        if (!mCalibrationDataValid || mCalibrationData.empty()) {
+            printf("[AEC RefBuf] readForCalibration: No preserved data available!\n");
+            return 0;
         }
 
-        return samplesToRead;
+        // Read from preserved calibration data (not from live buffer)
+        size_t framesToRead = std::min(sampleCount, mCalibrationData.size());
+
+        float energy = 0.0f;
+        float maxVal = 0.0f;
+        for (size_t i = 0; i < framesToRead; ++i) {
+            float val = mCalibrationData[i];
+            dest[i] = val;
+            energy += val * val;
+            if (std::abs(val) > maxVal) maxVal = std::abs(val);
+        }
+
+        float rms = framesToRead > 0 ? std::sqrt(energy / framesToRead) : 0.0f;
+        printf("[AEC RefBuf] readForCalibration: %zu samples from preserved data, RMS=%.4f Peak=%.4f\n",
+               framesToRead, rms, maxVal);
+
+        return framesToRead;
     }
 
 private:
@@ -306,6 +404,16 @@ private:
     std::atomic<size_t> mWritePos;
     std::atomic<size_t> mReadPos;
     std::atomic<size_t> mFramesWritten;
+
+    // Calibration capture tracking
+    std::atomic<size_t> mCalibrationStartPos{0};
+    std::atomic<bool> mCalibrationActive{false};
+    size_t mCalibrationExpectedFrames{72000};  // Expected frames to capture
+    size_t mCalibrationCapturedFrames{0};      // Frames captured so far
+
+    // Preserved calibration data (auto-copied when expected frames reached)
+    std::vector<float> mCalibrationData;
+    bool mCalibrationDataValid{false};
 
     // Timestamp tracking for synchronization
     // We store microseconds since a reference point instead of TimePoint directly

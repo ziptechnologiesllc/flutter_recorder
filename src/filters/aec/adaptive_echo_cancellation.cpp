@@ -11,7 +11,7 @@ AdaptiveEchoCancellation::AdaptiveEchoCancellation(unsigned int sampleRate,
       mParams{
           // Parameter: default, min, max
           {StepSize,
-           {0.05f, 0.001f, 0.2f}}, // NLMS step size (matches nlms_filter.h)
+           {0.005f, 0.001f, 0.2f}}, // NLMS step size (matches nlms_filter.h)
           {DelayMs,
            {30.0f, 0.0f,
             100.0f}}, // Acoustic delay in ms (30ms default for phone)
@@ -280,18 +280,26 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     else if (attenuationDb > 5.0f)
       status = "WEAK";
 
-    // Get current alpha (variable step-size) for debugging
+    // Get NPVSS parameters for debugging
     float alpha = 0.0f;
+    float noiseFloor = 0.0f;
+    float errorPower = 0.0f;
     if (!mFilters.empty()) {
       alpha = mFilters[0]->getAlpha();
+      noiseFloor = mFilters[0]->getNoiseFloor();
+      errorPower = mFilters[0]->getErrorPower();
     }
 
     float currentDelayMs = mValues[DelayMs];
 
-    printf("[AEC] delay=%.0fms α=%.2f ref=%.0fdB mic=%.0fdB corr=%.2f "
-           "coef=%.3f atten=%.0fdB | %s\n",
-           currentDelayMs, alpha, refDb, micDb, correlation, coeffEnergy,
-           attenuationDb, status);
+    // Convert noise/error to dB for readability
+    float noiseDb = noiseFloor > 1e-10f ? 10.0f * std::log10(noiseFloor) : -100.0f;
+    float errPwrDb = errorPower > 1e-10f ? 10.0f * std::log10(errorPower) : -100.0f;
+
+    printf("[AEC] delay=%.0fms μ=%.3f ref=%.0fdB mic=%.0fdB σ²ᵥ=%.0fdB σ²ₑ=%.0fdB "
+           "coef=%.4f | %s\n",
+           currentDelayMs, alpha, refDb, micDb, noiseDb, errPwrDb,
+           coeffEnergy, status);
     fflush(stdout);
 
     // Reset accumulators
@@ -391,3 +399,38 @@ template <>
 float AdaptiveEchoCancellation::denormalizeSample<float>(float sample) {
   return sample;
 }
+
+void AdaptiveEchoCancellation::updateStats(float ref, float mic, float out) {
+  // Simple leaky integrator stats
+  float micEnergy = mic * mic;
+  float outEnergy = out * out;
+
+  // Smooth energies (tau ~= 100ms at 48kHz, alpha=0.0005)
+  // For ~100 samples per call (block), alpha=0.1
+  const float alpha = 0.01f;
+  static float smoothMic = 0.0f;
+  static float smoothOut = 0.0f;
+
+  smoothMic = (1.0f - alpha) * smoothMic + alpha * micEnergy;
+  smoothOut = (1.0f - alpha) * smoothOut + alpha * outEnergy;
+
+  // Calculate instantaneous attenuation (positive dB)
+  float atten = 0.0f;
+  if (smoothMic > 1e-9f && smoothOut > 1e-9f) {
+    float ratio = smoothMic / smoothOut;
+    // ratio > 1 means mic > out (attenuation, since "out" is error)
+    // Wait, GenericFilter input is (mic, ref). output is error.
+    // If output is smaller than mic input, we have attenuation.
+    if (ratio > 1.0f) {
+      atten = 10.0f * std::log10(ratio);
+    }
+  }
+
+  mCurrentStats.maxAttenuationDb = atten; // For now just current attenuation
+  mCurrentStats.echoReturnLossDb = atten; // Proxy
+  // Correlation is harder to calculate cheaply per-sample, skipping for now or
+  // user approximation
+  mCurrentStats.correlation = 0.0f;
+}
+
+AecStats AdaptiveEchoCancellation::getStats() { return mCurrentStats; }
