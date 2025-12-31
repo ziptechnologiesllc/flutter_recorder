@@ -21,6 +21,8 @@ add_library(flutter_recorder SHARED
   "filters/aec/reference_buffer.cpp"
   "filters/aec/adaptive_echo_cancellation.cpp"
   "filters/aec/calibration.cpp"
+  "filters/aec/neural_post_filter.cpp"
+  "filters/aec/aec_test.cpp"
 )
 
 set_target_properties(flutter_recorder PROPERTIES

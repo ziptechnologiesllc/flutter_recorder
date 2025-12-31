@@ -1,9 +1,34 @@
 #include "adaptive_echo_cancellation.h"
+#include "aec_test.h"
 
+#include "neural_post_filter.h"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <stdint.h>
+#include <string>
+
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#if TARGET_OS_MAC && !TARGET_OS_IPHONE
+#include <Foundation/Foundation.h>
+#endif
+#endif
+
+// Get sandbox-accessible temp directory
+static std::string getTempDir() {
+#ifdef __APPLE__
+#if TARGET_OS_MAC && !TARGET_OS_IPHONE
+  NSString* tempDir = NSTemporaryDirectory();
+  if (tempDir) {
+    return std::string([tempDir UTF8String]);
+  }
+#endif
+#endif
+  return "/tmp/";
+}
+
+extern void aecLog(const char *fmt, ...);
 
 AdaptiveEchoCancellation::AdaptiveEchoCancellation(unsigned int sampleRate,
                                                    unsigned int channels)
@@ -18,20 +43,22 @@ AdaptiveEchoCancellation::AdaptiveEchoCancellation(unsigned int sampleRate,
           {Enabled, {1.0f, 0.0f, 1.0f}} // Enable flag (1=on, 0=bypass)
       },
       mValues(ParamCount, 0.0f), mDelaySamples(0), mUseTimestampSync(true),
-      mCurrentCallbackTimestamp(AECReferenceBuffer::Clock::now()) {
+      mCurrentCallbackTimestamp(AECReferenceBuffer::Clock::now()),
+      mNeuralFilter(std::make_unique<NeuralPostFilter>(sampleRate, channels)) {
   // Initialize parameter values with defaults
-  for (const auto &[param, range] : mParams) {
-    mValues[param] = range.defaultVal;
+  for (auto const &it : mParams) {
+    mValues[it.first] = it.second.defaultVal;
   }
 
   // Calculate initial delay in samples
   updateDelay();
 
-  // Create NLMS filter for each channel
+  // Create FIR filter for each channel
   for (unsigned int ch = 0; ch < channels; ++ch) {
-    mFilters.push_back(std::make_unique<NLMSFilter>(
-        NLMSFilter::DEFAULT_FILTER_LENGTH, mValues[StepSize],
-        NLMSFilter::DEFAULT_REGULARIZATION));
+    mFilters.push_back(
+        std::make_unique<NLMSFilter>(NLMSFilter::DEFAULT_FILTER_LENGTH));
+    mVssFilters.push_back(
+        std::make_unique<VssNlmsFilter>(VssNlmsFilter::DEFAULT_FILTER_LENGTH));
   }
 
   // Pre-allocate reference buffer for batch processing
@@ -153,13 +180,22 @@ void AdaptiveEchoCancellation::processWithTimestamp(
 template <typename T>
 void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
                                             unsigned int channels) {
+  static int callCount = 0;
+  callCount++;
+  // Log sparingly: first 5 calls, then every 500 calls (~5 seconds at typical buffer sizes)
+  if (callCount <= 5 || callCount % 500 == 0) {
+    aecLog("[AEC processAudio] call #%d, frames=%u ch=%u enabled=%.1f refBuf=%p\n",
+           callCount, frameCount, channels, mValues[Enabled], g_aecReferenceBuffer);
+  }
+
   T *input = static_cast<T *>(pInput);
 
   // Ensure we have enough filters for the channels
   while (mFilters.size() < channels) {
-    mFilters.push_back(std::make_unique<NLMSFilter>(
-        NLMSFilter::DEFAULT_FILTER_LENGTH, mValues[StepSize],
-        NLMSFilter::DEFAULT_REGULARIZATION));
+    mFilters.push_back(
+        std::make_unique<NLMSFilter>(NLMSFilter::DEFAULT_FILTER_LENGTH));
+    mVssFilters.push_back(
+        std::make_unique<VssNlmsFilter>(VssNlmsFilter::DEFAULT_FILTER_LENGTH));
   }
 
   // Read reference signal from shared buffer
@@ -167,27 +203,36 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   if (mRefBuffer.size() < totalSamples) {
     mRefBuffer.resize(totalSamples);
   }
+  if (mLinearOutputBuffer.size() < totalSamples) {
+    mLinearOutputBuffer.resize(totalSamples);
+  }
 
   // Read reference signal
   size_t framesRead = 0;
 
-  if (mUseTimestampSync && g_aecReferenceBuffer) {
-    // Use timestamp-based synchronization
-    framesRead = g_aecReferenceBuffer->readFramesAtTimestamp(
-        mRefBuffer.data(), frameCount, mCurrentCallbackTimestamp,
-        mValues[DelayMs]);
-  } else {
-    // Fallback to sample-based delay
-    float delayMs = mValues[DelayMs];
-    // Sample-based jitter/block compensation (matches 256 buffer size)
-    const float blockDurationMs = (256.0f / 48000.0f) * 1000.0f;
-    const float jitterBufferMs = 1.0f;
-    float adjustedDelayMs = delayMs - blockDurationMs + jitterBufferMs;
-    adjustedDelayMs = std::max(adjustedDelayMs, 0.0f);
-    size_t delaySamples =
-        static_cast<size_t>((adjustedDelayMs / 1000.0f) * mSampleRate) *
-        channels;
+  if (mUsePositionSync && mCalibratedOffset != 0) {
+    // NEW: Position-based sync using frame counters
+    // Calculate the output frame position that corresponds to this capture block
+    // captureFrame - offset = outputFrame
+    int64_t startOutputFrame =
+        static_cast<int64_t>(mCaptureFrameCount) - mCalibratedOffset;
 
+    if (startOutputFrame >= 0) {
+      framesRead = g_aecReferenceBuffer->readFramesAtPosition(
+          mRefBuffer.data(), frameCount, static_cast<size_t>(startOutputFrame));
+
+      static int posReadDebugCount = 0;
+      if (++posReadDebugCount % 500 == 0) {
+        aecLog("[AEC PosSync] capFrame=%zu offset=%lld outFrame=%lld read=%zu\n",
+               mCaptureFrameCount, (long long)mCalibratedOffset,
+               (long long)startOutputFrame, framesRead);
+      }
+    }
+  } else {
+    // LEGACY: Simple sample-based delay (for backwards compatibility)
+    float delayMs = mValues[DelayMs];
+    size_t delaySamples =
+        static_cast<size_t>((delayMs / 1000.0f) * mSampleRate) * channels;
     framesRead = g_aecReferenceBuffer->readFrames(mRefBuffer.data(), frameCount,
                                                   delaySamples);
   }
@@ -203,6 +248,65 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   // If we couldn't read the reference (data not available), skip processing
   if (framesRead == 0) {
     return;
+  }
+
+  // DEBUG: Dump ref and mic to files for alignment verification
+  static FILE* refFile = nullptr;
+  static FILE* micFile = nullptr;
+  static int dumpFrames = 0;
+  static const int MAX_DUMP_FRAMES = 48000 * 5; // 5 seconds
+  static std::string tempDir;
+
+  if (dumpFrames == 0 && refFile == nullptr) {
+    tempDir = getTempDir();
+    std::string refPath = tempDir + "aec_ref.raw";
+    std::string micPath = tempDir + "aec_mic.raw";
+    refFile = fopen(refPath.c_str(), "wb");
+    micFile = fopen(micPath.c_str(), "wb");
+    if (refFile && micFile) {
+      aecLog("[AEC DEBUG] Dumping to: %s\n", tempDir.c_str());
+      aecLog("[AEC DEBUG] Files: aec_ref.raw, aec_mic.raw\n");
+    } else {
+      aecLog("[AEC DEBUG] Failed to open files in %s\n", tempDir.c_str());
+    }
+  }
+
+  if (refFile && micFile && dumpFrames < MAX_DUMP_FRAMES) {
+    // Write channel 0 only (mono) for easier analysis
+    for (ma_uint32 frame = 0; frame < frameCount; ++frame) {
+      float micSample = normalizeSample(static_cast<T*>(pInput)[frame * channels]);
+      float refSample = mRefBuffer[frame * channels];
+      fwrite(&refSample, sizeof(float), 1, refFile);
+      fwrite(&micSample, sizeof(float), 1, micFile);
+    }
+    dumpFrames += frameCount;
+
+    if (dumpFrames >= MAX_DUMP_FRAMES) {
+      fclose(refFile);
+      fclose(micFile);
+      refFile = nullptr;
+      micFile = nullptr;
+      aecLog("[AEC DEBUG] Finished dumping %d frames to files\n", dumpFrames);
+    }
+  }
+
+  // Calibration capture: save frame-aligned ref+mic for delay estimation
+  // These are perfectly aligned since they come from the same callback
+  if (mCalibrationCaptureEnabled && mAlignedRefCapture.size() < mCalibrationMaxSamples) {
+    for (ma_uint32 frame = 0; frame < frameCount; ++frame) {
+      if (mAlignedRefCapture.size() >= mCalibrationMaxSamples) break;
+      float micSample = normalizeSample(static_cast<T*>(pInput)[frame * channels]);
+      float refSample = mRefBuffer[frame * channels];
+      mAlignedRefCapture.push_back(refSample);
+      mAlignedMicCapture.push_back(micSample);
+    }
+
+    // Log progress periodically
+    static int calibCapLogCount = 0;
+    if (++calibCapLogCount % 100 == 0) {
+      aecLog("[AEC CalibCapture] %zu/%zu samples\n",
+             mAlignedRefCapture.size(), mCalibrationMaxSamples);
+    }
   }
 
   // NLMS ADAPTIVE ECHO CANCELLATION
@@ -223,44 +327,54 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       totalRefEnergyForCorr += refSample * refSample;
       debugSamples++;
 
-      // NLMS adaptive filter:
-      // 1. Computes echo estimate via convolution
-      // 2. Subtracts echo estimate from mic signal (error)
-      // 3. Updates coefficients to minimize error (adaptation)
-      float error = mFilters[ch]->process(micSample, refSample);
+      // Fixed FIR echo cancellation (Old Path):
+      // float error = mFilters[ch]->process(micSample, refSample);
 
-      // Adapt coefficients
-      mFilters[ch]->adapt(error);
+      // VSS-NLMS Adaptive Echo Cancellation (New Path):
+      // 1. Estimate echo using adaptive filter
+      // 2. Subtract from mic signal (happens inside processSample)
+      float error = mVssFilters[ch]->processSample(refSample, micSample);
 
-      // Denormalize and write back error (cancelled signal)
-      input[idx] = denormalizeSample<T>(error);
+      // Store stage 1 result in float buffer for stage 2
+      mLinearOutputBuffer[idx] = error;
+
+      // Capture samples for AEC test (channel 0 only to avoid duplicates)
+      if (ch == 0 && AECTest::isCapturing()) {
+        AECTest::captureSample(micSample, error, refSample);
+      }
     }
   }
 
-  // Debug output every ~100ms (~50 callbacks at 256 frames/callback @ 48kHz)
-  if (++debugCounter % 50 == 0) {
+  // SECOND STAGE: Neural Post-Filter
+  // This stage runs on the output of the NLMS filters to remove
+  // residual echo and non-linearities.
+  // We reuse mRefBuffer for the reference signal.
+  mNeuralFilter->process(mLinearOutputBuffer.data(), mRefBuffer.data(),
+                         mLinearOutputBuffer.data(), frameCount);
+
+  // Write final results back to the original input buffer
+  for (unsigned int i = 0; i < totalSamples; ++i) {
+    input[i] = denormalizeSample<T>(mLinearOutputBuffer[i]);
+  }
+
+  // Debug output every ~1s (~500 callbacks at 256 frames/callback @ 48kHz)
+  if (++debugCounter % 500 == 0) {
     float avgRefEnergy = debugSamples > 0 ? totalRefEnergy / debugSamples : 0;
     float avgMicEnergy = debugSamples > 0 ? totalMicEnergy / debugSamples : 0;
 
-    // Get NLMS convergence metrics
-    float coeffEnergy = 0.0f, errorEnergyAvg = 0.0f, coeffChangeRate = 0.0f;
-    if (!mFilters.empty()) {
-      mFilters[0]->getConvergenceMetrics(coeffEnergy, errorEnergyAvg,
-                                         coeffChangeRate);
-    }
-
-    // Calculate correlation
+    // Compute cross-correlation to check alignment (normalized)
     float correlation = 0.0f;
-    if (totalRefEnergyForCorr > 1e-8f && totalMicEnergy > 1e-8f) {
+    if (totalRefEnergyForCorr > 1e-10f && totalMicEnergy > 1e-10f) {
       correlation =
           totalCrossCorr / std::sqrt(totalRefEnergyForCorr * totalMicEnergy);
-      correlation = std::max(-1.0f, std::min(correlation, 1.0f));
     }
 
-    // Calculate attenuation (ref energy vs error energy)
-    float attenuationDb = 0.0f;
-    if (avgRefEnergy > 1e-10f && errorEnergyAvg > 1e-10f) {
-      attenuationDb = 10.0f * std::log10(avgRefEnergy / errorEnergyAvg);
+    // Get filter metrics
+    float coeffEnergy = 0.0f;
+    float echoEst = 0.0f;
+    if (!mVssFilters.empty()) {
+      coeffEnergy = mVssFilters[0]->getCoeffEnergy();
+      echoEst = mVssFilters[0]->getLastEchoEstimate();
     }
 
     // Convert energy to dB for readability
@@ -268,39 +382,19 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
         avgRefEnergy > 1e-10f ? 10.0f * std::log10(avgRefEnergy) : -100.0f;
     float micDb =
         avgMicEnergy > 1e-10f ? 10.0f * std::log10(avgMicEnergy) : -100.0f;
+    float echoEstDb = std::abs(echoEst) > 1e-10f
+                          ? 20.0f * std::log10(std::abs(echoEst))
+                          : -100.0f;
 
-    // Status based on NLMS convergence
-    const char *status = "WAITING";
-    if (attenuationDb > 20.0f)
-      status = "✓ CANCELLING";
-    else if (attenuationDb > 10.0f)
-      status = "GOOD";
-    else if (coeffEnergy > 0.01f)
-      status = "ADAPTING";
-    else if (attenuationDb > 5.0f)
-      status = "WEAK";
-
-    // Get NPVSS parameters for debugging
-    float alpha = 0.0f;
-    float noiseFloor = 0.0f;
-    float errorPower = 0.0f;
-    if (!mFilters.empty()) {
-      alpha = mFilters[0]->getAlpha();
-      noiseFloor = mFilters[0]->getNoiseFloor();
-      errorPower = mFilters[0]->getErrorPower();
-    }
+    // Status based on coefficient energy (indicates calibration was applied)
+    const char *status = coeffEnergy > 0.001f ? "ACTIVE" : "NO COEFFS";
 
     float currentDelayMs = mValues[DelayMs];
 
-    // Convert noise/error to dB for readability
-    float noiseDb = noiseFloor > 1e-10f ? 10.0f * std::log10(noiseFloor) : -100.0f;
-    float errPwrDb = errorPower > 1e-10f ? 10.0f * std::log10(errorPower) : -100.0f;
-
-    printf("[AEC] delay=%.0fms μ=%.3f ref=%.0fdB mic=%.0fdB σ²ᵥ=%.0fdB σ²ₑ=%.0fdB "
+    aecLog("[AEC] delay=%.1fms ref=%.0fdB mic=%.0fdB ŷ=%.0fdB corr=%.2f "
            "coef=%.4f | %s\n",
-           currentDelayMs, alpha, refDb, micDb, noiseDb, errPwrDb,
-           coeffEnergy, status);
-    fflush(stdout);
+           currentDelayMs, refDb, micDb, echoEstDb, correlation, coeffEnergy,
+           status);
 
     // Reset accumulators
     totalRefEnergy = 0.0f;
@@ -315,17 +409,15 @@ void AdaptiveEchoCancellation::reset() {
   for (auto &filter : mFilters) {
     filter->reset();
   }
+  for (auto &filter : mVssFilters) {
+    filter->reset();
+  }
 }
 
 float AdaptiveEchoCancellation::getEchoReturnLoss() const {
-  if (mFilters.empty())
-    return 0.0f;
-  // Return average ERL across channels
-  float totalERL = 0.0f;
-  for (const auto &filter : mFilters) {
-    totalERL += filter->getEchoReturnLoss();
-  }
-  return totalERL / mFilters.size();
+  // Use the stats calculated in updateStats() which reflects the active filter
+  // performance
+  return mCurrentStats.echoReturnLossDb;
 }
 
 void AdaptiveEchoCancellation::setImpulseResponse(const float *coeffs,
@@ -335,14 +427,37 @@ void AdaptiveEchoCancellation::setImpulseResponse(const float *coeffs,
   for (auto &filter : mFilters) {
     filter->setCoefficients(coeffs, length);
   }
+  for (auto &filter : mVssFilters) {
+    filter->setWeights(coeffs, length);
+  }
 
   // Calculate coefficient energy for debug output
   float energy = 0.0f;
   for (int i = 0; i < length; ++i) {
     energy += coeffs[i] * coeffs[i];
   }
-  printf("[AEC] Set impulse response: %d coefficients, energy=%.4f\n", length,
+  aecLog("[AEC] Set impulse response: %d coefficients, energy=%.4f\n", length,
          energy);
+}
+
+float AdaptiveEchoCancellation::measureHardwareLatency(
+    const std::vector<float> &refBuffer, const std::vector<float> &micBuffer) {
+  if (refBuffer.empty() || micBuffer.empty())
+    return 0.0f;
+
+  // Use DelayEstimator to find lag
+  int lagSamples = DelayEstimator::estimateDelay(refBuffer, micBuffer);
+
+  // Convert to ms
+  float lagMs = (static_cast<float>(lagSamples) / mSampleRate) * 1000.0f;
+
+  aecLog("[AEC] Measured Hardware Latency: %d samples (%.2f ms)\n", lagSamples,
+         lagMs);
+
+  // Update the DelayMs parameter
+  setParamValue(Params::DelayMs, lagMs);
+
+  return lagMs;
 }
 
 void AdaptiveEchoCancellation::validateParam(int param) const {
@@ -434,3 +549,72 @@ void AdaptiveEchoCancellation::updateStats(float ref, float mic, float out) {
 }
 
 AecStats AdaptiveEchoCancellation::getStats() { return mCurrentStats; }
+
+// VSS-NLMS parameter control
+void AdaptiveEchoCancellation::setVssMuMax(float mu) {
+  for (auto &filter : mVssFilters) {
+    filter->setStepSize(mu);
+  }
+  aecLog("[AEC] Set VSS mu_max=%.4f for %zu filters\n", mu, mVssFilters.size());
+}
+
+void AdaptiveEchoCancellation::setVssLeakage(float lambda) {
+  for (auto &filter : mVssFilters) {
+    filter->setLeakage(lambda);
+  }
+  aecLog("[AEC] Set VSS leakage=%.6f for %zu filters\n", lambda,
+         mVssFilters.size());
+}
+
+void AdaptiveEchoCancellation::setVssAlpha(float alpha) {
+  for (auto &filter : mVssFilters) {
+    filter->setSmoothingFactor(alpha);
+  }
+  aecLog("[AEC] Set VSS alpha=%.4f for %zu filters\n", alpha,
+         mVssFilters.size());
+}
+
+float AdaptiveEchoCancellation::getVssMuMax() const {
+  return mVssFilters.empty() ? 0.0f : mVssFilters[0]->getMuMax();
+}
+
+float AdaptiveEchoCancellation::getVssLeakage() const {
+  return mVssFilters.empty() ? 1.0f : mVssFilters[0]->getLeakage();
+}
+
+float AdaptiveEchoCancellation::getVssAlpha() const {
+  return mVssFilters.empty() ? 0.95f : mVssFilters[0]->getAlpha();
+}
+
+void AdaptiveEchoCancellation::setCaptureFrameCount(size_t captureFrameCount) {
+  mCaptureFrameCount = captureFrameCount;
+}
+
+void AdaptiveEchoCancellation::setCalibratedOffset(int64_t offset) {
+  mCalibratedOffset = offset;
+  mUsePositionSync = true;  // Enable position sync when offset is set
+  aecLog("[AEC] Set calibrated offset=%lld, position sync enabled\n",
+         (long long)offset);
+}
+
+// Calibration capture methods
+void AdaptiveEchoCancellation::startCalibrationCapture(size_t maxSamples) {
+  mAlignedRefCapture.clear();
+  mAlignedMicCapture.clear();
+  mAlignedRefCapture.reserve(maxSamples);
+  mAlignedMicCapture.reserve(maxSamples);
+  mCalibrationMaxSamples = maxSamples;
+  mCalibrationCaptureEnabled = true;
+  aecLog("[AEC] Calibration capture started (max %zu samples)\n", maxSamples);
+}
+
+void AdaptiveEchoCancellation::stopCalibrationCapture() {
+  mCalibrationCaptureEnabled = false;
+  aecLog("[AEC] Calibration capture stopped: ref=%zu mic=%zu samples\n",
+         mAlignedRefCapture.size(), mAlignedMicCapture.size());
+}
+
+bool AdaptiveEchoCancellation::isCalibrationCaptureComplete() const {
+  return !mCalibrationCaptureEnabled &&
+         mAlignedRefCapture.size() >= mCalibrationMaxSamples;
+}

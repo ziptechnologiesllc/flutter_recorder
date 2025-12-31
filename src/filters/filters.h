@@ -49,6 +49,27 @@ public:
 
   AecStats getAecStats();
 
+  // VSS-NLMS parameter control for experimentation
+  void setAecVssMuMax(float mu);
+  void setAecVssLeakage(float lambda);
+  void setAecVssAlpha(float alpha);
+  float getAecVssMuMax() const;
+  float getAecVssLeakage() const;
+  float getAecVssAlpha() const;
+
+  // Sample-accurate AEC synchronization
+  // Call before processing filters with current capture frame count
+  void setAecCaptureFrameCount(size_t captureFrameCount);
+  // Set calibrated offset for position-based sync
+  void setAecCalibratedOffset(int64_t offset);
+  int64_t getAecCalibratedOffset() const;
+
+  // Aligned calibration capture (for accurate delay estimation)
+  void startAecCalibrationCapture(size_t maxSamples);
+  void stopAecCalibrationCapture();
+  const std::vector<float>& getAecAlignedRef() const;
+  const std::vector<float>& getAecAlignedMic() const;
+
   unsigned int mSamplerate;
   unsigned int mChannels;
 

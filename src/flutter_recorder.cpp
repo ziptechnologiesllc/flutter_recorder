@@ -3,6 +3,7 @@
 
 #include "analyzer.h"
 #include "capture.h"
+#include "filters/aec/aec_test.h"
 #include "filters/aec/calibration.h"
 #include "filters/aec/reference_buffer.h"
 #include "filters/filters.h"
@@ -15,6 +16,9 @@
 #include <stdlib.h>
 
 #include "enums.h"
+
+// External logging function defined in calibration.cpp
+extern void aecLog(const char *fmt, ...);
 
 // Define global callback pointers
 // Define global callback pointers
@@ -374,7 +378,11 @@ flutter_recorder_isFilterActive(enum RecorderFilterType filterType) {
 
 FFI_PLUGIN_EXPORT enum CaptureErrors
 flutter_recorder_addFilter(enum RecorderFilterType filterType) {
-  return mFilters.get()->addFilter(filterType);
+  aecLog("[FFI] flutter_recorder_addFilter called with type %d\n",
+         static_cast<int>(filterType));
+  CaptureErrors result = mFilters.get()->addFilter(filterType);
+  aecLog("[FFI] flutter_recorder_addFilter result: %d\n", static_cast<int>(result));
+  return result;
 }
 
 FFI_PLUGIN_EXPORT enum CaptureErrors
@@ -434,18 +442,19 @@ static void aecOutputCallback(const float *data, size_t frameCount,
   }
   float bufferRms = samples > 0 ? std::sqrt(bufferEnergy / samples) : 0.0f;
 
-  // Log first few callbacks and periodically when there's audio
+  // Log first few callbacks and periodically
   static int callbackCount = 0;
   callbackCount++;
-  if (callbackCount <= 3 || (bufferRms > 0.05f && callbackCount % 20 == 0)) {
-    printf("[AEC Callback #%d] frames=%zu ch=%u RMS=%.4f\n",
-           callbackCount, frameCount, channels, bufferRms);
+  if (callbackCount % 100 == 0) {
+    aecLog("[AEC Callback #%d] frames=%zu ch=%u RMS=%.4f (RefBuf=%p)\n",
+           callbackCount, frameCount, channels, bufferRms,
+           g_aecReferenceBuffer);
   }
 
   if (g_aecReferenceBuffer != nullptr) {
     g_aecReferenceBuffer->write(data, frameCount);
-  } else if (callbackCount <= 1) {
-    printf("[AEC Callback] WARNING: Buffer not initialized!\n");
+  } else if (callbackCount <= 10) {
+    aecLog("[AEC Callback] WARNING: Buffer not initialized!\n");
   }
 }
 
@@ -465,7 +474,7 @@ flutter_recorder_aec_createReferenceBuffer(unsigned int sampleRate,
 
   g_aecReferenceBuffer =
       new AECReferenceBuffer(bufferSizeFrames, channels, sampleRate);
-  printf("[AEC] Reference buffer created: %zu frames @ %uHz, %u channels\n",
+  aecLog("[AEC] Reference buffer created: %zu frames @ %uHz, %u channels\n",
          bufferSizeFrames, sampleRate, channels);
   return static_cast<void *>(g_aecReferenceBuffer);
 }
@@ -507,9 +516,11 @@ FFI_PLUGIN_EXPORT void
 flutter_recorder_aec_startCalibrationCapture(size_t maxSamples) {
   // Start mic calibration capture
   capture.startCalibrationCapture(maxSamples);
-  // Also start reference buffer calibration capture
+  // Also start reference buffer calibration capture with same frame count
+  // Note: maxSamples from Dart may include channel multiplier, but ref buffer
+  // captures mono so we use the same value which covers the full duration
   if (g_aecReferenceBuffer != nullptr) {
-    g_aecReferenceBuffer->startCalibrationCapture();
+    g_aecReferenceBuffer->startCalibrationCapture(maxSamples);
   }
 }
 
@@ -524,13 +535,16 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopCalibrationCapture() {
 // Capture signals from both buffers for cross-correlation analysis
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_captureForAnalysis() {
   if (g_aecReferenceBuffer == nullptr) {
-    printf("[AEC Calibration] Error: Reference buffer not initialized\n");
+    aecLog("[AEC Calibration] Error: Reference buffer not initialized\n");
     return;
   }
 
-  // Capture 1.5 second white noise calibration signal at 48kHz
-  // Must match calibration.h: WHITE_NOISE_DURATION_MS = 1500
-  const size_t samplesToCapture = 48000 * AECCalibration::WHITE_NOISE_DURATION_MS / 1000;
+  // Capture click-based calibration signal (~2.4s)
+  // Duration: (CLICK_COUNT - 1) * CLICK_SPACING_MS + TAIL_MS
+  const size_t calibrationDurationMs =
+      (AECCalibration::CLICK_COUNT - 1) * AECCalibration::CLICK_SPACING_MS +
+      AECCalibration::TAIL_MS + 100; // +100ms margin
+  const size_t samplesToCapture = 48000 * calibrationDurationMs / 1000;
 
   std::vector<float> refData(samplesToCapture);
   std::vector<float> micData(samplesToCapture);
@@ -543,7 +557,7 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_captureForAnalysis() {
   size_t micRead =
       capture.readCalibrationSamples(micData.data(), samplesToCapture);
 
-  printf("[AEC Calibration] Captured ref=%zu mic=%zu samples\n", refRead,
+  aecLog("[AEC Calibration] Captured ref=%zu mic=%zu samples\n", refRead,
          micRead);
 
   // Pass to calibration analyzer
@@ -552,21 +566,20 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_captureForAnalysis() {
 }
 
 // Run cross-correlation analysis and return results
-FFI_PLUGIN_EXPORT int
-flutter_recorder_aec_runCalibrationAnalysis(unsigned int sampleRate,
-                                            int *outDelayMs, float *outEchoGain,
-                                            float *outCorrelation) {
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_runCalibrationAnalysis(
+    unsigned int sampleRate, float *outDelayMs, float *outEchoGain,
+    float *outCorrelation) {
   CalibrationResult result = AECCalibration::analyze(sampleRate);
 
   if (outDelayMs)
-    *outDelayMs = result.delayMs;
+    *outDelayMs = result.delayMs; // Preserve full precision
   if (outEchoGain)
     *outEchoGain = result.echoGain;
   if (outCorrelation)
     *outCorrelation = result.correlation;
 
   printf(
-      "[AEC Calibration] Result: delay=%dms gain=%.3f corr=%.3f success=%d\n",
+      "[AEC Calibration] Result: delay=%.1fms gain=%.3f corr=%.3f success=%d\n",
       result.delayMs, result.echoGain, result.correlation, result.success);
 
   return result.success ? 1 : 0;
@@ -583,26 +596,29 @@ static std::vector<float> g_lastImpulseResponse;
 
 // Run calibration analysis and store impulse response
 FFI_PLUGIN_EXPORT int flutter_recorder_aec_runCalibrationWithImpulse(
-    unsigned int sampleRate, int *outDelayMs, float *outEchoGain,
-    float *outCorrelation, int *outImpulseLength) {
+    unsigned int sampleRate, float *outDelayMs, float *outEchoGain,
+    float *outCorrelation, int *outImpulseLength, int64_t *outCalibratedOffset) {
   CalibrationResult result = AECCalibration::analyze(sampleRate);
 
   if (outDelayMs)
-    *outDelayMs = result.delayMs;
+    *outDelayMs = result.delayMs; // Preserve full precision
   if (outEchoGain)
     *outEchoGain = result.echoGain;
   if (outCorrelation)
     *outCorrelation = result.correlation;
   if (outImpulseLength)
     *outImpulseLength = static_cast<int>(result.impulseResponse.size());
+  if (outCalibratedOffset)
+    *outCalibratedOffset = result.calibratedOffset;
 
   // Store impulse response for later retrieval
   g_lastImpulseResponse = std::move(result.impulseResponse);
 
-  printf("[AEC Calibration] Result: delay=%dms gain=%.3f corr=%.3f "
-         "impulseLen=%zu success=%d\n",
+  aecLog("[AEC Calibration] Result: delay=%.1fms gain=%.3f corr=%.3f "
+         "impulseLen=%zu offset=%lld success=%d\n",
          result.delayMs, result.echoGain, result.correlation,
-         g_lastImpulseResponse.size(), result.success);
+         g_lastImpulseResponse.size(), (long long)result.calibratedOffset,
+         result.success);
 
   return result.success ? 1 : 0;
 }
@@ -623,7 +639,7 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_getImpulseResponse(float *dest,
 // Apply impulse response to AEC filter
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_applyImpulseResponse() {
   if (g_lastImpulseResponse.empty()) {
-    printf("[AEC] No impulse response to apply\n");
+    aecLog("[AEC] No impulse response to apply\n");
     return;
   }
 
@@ -631,7 +647,7 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_applyImpulseResponse() {
       g_lastImpulseResponse.data(),
       static_cast<int>(g_lastImpulseResponse.size()));
 
-  printf("[AEC] Applied impulse response: %zu coefficients\n",
+  aecLog("[AEC] Applied impulse response: %zu coefficients\n",
          g_lastImpulseResponse.size());
 }
 
@@ -652,14 +668,14 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_setDelay(float delayMs) {
   if (mFilters) {
     // DelayMs is parameter index 1 in AdaptiveEchoCancellation::Params
     mFilters->setFilterParams(adaptiveEchoCancellation, 1, delayMs);
-    printf("[AEC] Set delay to %.1f ms\n", delayMs);
+    aecLog("[AEC] Set delay to %.1f ms\n", delayMs);
   }
 }
 
 // Apply full calibration result: delay + impulse response
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_applyCalibration(float delayMs) {
   if (!mFilters) {
-    printf("[AEC] Filters not initialized\n");
+    aecLog("[AEC] Filters not initialized\n");
     return;
   }
 
@@ -671,10 +687,237 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_applyCalibration(float delayMs) {
     mFilters->setAecImpulseResponse(
         g_lastImpulseResponse.data(),
         static_cast<int>(g_lastImpulseResponse.size()));
-    printf("[AEC] Applied calibration: delay=%.1fms, impulse=%zu coeffs\n",
+    aecLog("[AEC] Applied calibration: delay=%.1fms, impulse=%zu coeffs\n",
            delayMs, g_lastImpulseResponse.size());
   } else {
-    printf("[AEC] Applied calibration: delay=%.1fms (no impulse response)\n",
+    aecLog("[AEC] Applied calibration: delay=%.1fms (no impulse response)\n",
            delayMs);
   }
+}
+
+//////////////////////////
+/// AEC Testing Functions
+//////////////////////////
+
+FFI_PLUGIN_EXPORT void
+flutter_recorder_aec_startTestCapture(size_t maxSamples) {
+  AECTest::startTestCapture(maxSamples);
+}
+
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopTestCapture() {
+  AECTest::stopTestCapture();
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_runTest(
+    unsigned int sampleRate, float *outCancellationDb,
+    float *outCorrelationBefore, float *outCorrelationAfter, int *outPassed,
+    float *outMicEnergyDb, float *outCancelledEnergyDb) {
+
+  AecTestResult result = AECTest::analyze(sampleRate);
+
+  if (outCancellationDb)
+    *outCancellationDb = result.cancellationDb;
+  if (outCorrelationBefore)
+    *outCorrelationBefore = result.correlationBefore;
+  if (outCorrelationAfter)
+    *outCorrelationAfter = result.correlationAfter;
+  if (outPassed)
+    *outPassed = result.passed ? 1 : 0;
+  if (outMicEnergyDb)
+    *outMicEnergyDb = result.micEnergyDb;
+  if (outCancelledEnergyDb)
+    *outCancelledEnergyDb = result.cancelledEnergyDb;
+
+  return result.passed ? 1 : 0;
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_getTestMicSignal(float *dest,
+                                                            int maxLength) {
+  return AECTest::getMicSignal(dest, maxLength);
+}
+
+FFI_PLUGIN_EXPORT int
+flutter_recorder_aec_getTestCancelledSignal(float *dest, int maxLength) {
+  return AECTest::getCancelledSignal(dest, maxLength);
+}
+
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_resetTest() { AECTest::reset(); }
+
+// VSS-NLMS parameter control for experimentation
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setVssMuMax(float mu) {
+  if (mFilters) {
+    mFilters->setAecVssMuMax(mu);
+  }
+}
+
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setVssLeakage(float lambda) {
+  if (mFilters) {
+    mFilters->setAecVssLeakage(lambda);
+  }
+}
+
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setVssAlpha(float alpha) {
+  if (mFilters) {
+    mFilters->setAecVssAlpha(alpha);
+  }
+}
+
+FFI_PLUGIN_EXPORT float flutter_recorder_aec_getVssMuMax() {
+  if (mFilters) {
+    return mFilters->getAecVssMuMax();
+  }
+  return 0.5f; // Default
+}
+
+FFI_PLUGIN_EXPORT float flutter_recorder_aec_getVssLeakage() {
+  if (mFilters) {
+    return mFilters->getAecVssLeakage();
+  }
+  return 1.0f; // Default (no leakage)
+}
+
+FFI_PLUGIN_EXPORT float flutter_recorder_aec_getVssAlpha() {
+  if (mFilters) {
+    return mFilters->getAecVssAlpha();
+  }
+  return 0.95f; // Default
+}
+
+// Position-based sync for sample-accurate AEC
+FFI_PLUGIN_EXPORT size_t flutter_recorder_aec_getOutputFrameCount() {
+  if (g_aecReferenceBuffer) {
+    return g_aecReferenceBuffer->getFramesWritten();
+  }
+  return 0;
+}
+
+FFI_PLUGIN_EXPORT size_t flutter_recorder_aec_getCaptureFrameCount() {
+  return capture.getTotalFramesCaptured();
+}
+
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_recordCalibrationFrameCounters() {
+  size_t outputFrames = g_aecReferenceBuffer ? g_aecReferenceBuffer->getFramesWritten() : 0;
+  size_t captureFrames = capture.getTotalFramesCaptured();
+  AECCalibration::recordFrameCountersAtStart(outputFrames, captureFrames);
+}
+
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setCalibratedOffset(int64_t offset) {
+  if (mFilters) {
+    mFilters->setAecCalibratedOffset(offset);
+  }
+}
+
+FFI_PLUGIN_EXPORT int64_t flutter_recorder_aec_getCalibratedOffset() {
+  if (mFilters) {
+    return mFilters->getAecCalibratedOffset();
+  }
+  return 0;
+}
+
+// ==================== ALIGNED CALIBRATION CAPTURE ====================
+// These functions capture frame-aligned ref/mic from the AEC processAudio
+// callback for accurate delay estimation
+
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_startAlignedCalibrationCapture(
+    size_t maxSamples) {
+  if (mFilters) {
+    mFilters->startAecCalibrationCapture(maxSamples);
+  } else {
+    aecLog("[AEC] Cannot start aligned capture: filters not initialized\n");
+  }
+}
+
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopAlignedCalibrationCapture() {
+  if (mFilters) {
+    mFilters->stopAecCalibrationCapture();
+  }
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationAnalysis(
+    unsigned int sampleRate,
+    int *outDelaySamples,
+    float *outDelayMs,
+    float *outGain,
+    float *outCorrelation,
+    int64_t *outCalibratedOffset) {
+
+  if (!mFilters) {
+    aecLog("[AEC] Cannot run aligned analysis: filters not initialized\n");
+    return 0;
+  }
+
+  const std::vector<float>& alignedRef = mFilters->getAecAlignedRef();
+  const std::vector<float>& alignedMic = mFilters->getAecAlignedMic();
+
+  if (alignedRef.empty() || alignedMic.empty()) {
+    aecLog("[AEC] Cannot run aligned analysis: no captured data\n");
+    return 0;
+  }
+
+  CalibrationResult result = AECCalibration::analyzeAligned(
+      alignedRef, alignedMic, sampleRate);
+
+  *outDelaySamples = result.delaySamples;
+  *outDelayMs = result.delayMs;
+  *outGain = result.echoGain;
+  *outCorrelation = result.correlation;
+  *outCalibratedOffset = result.calibratedOffset;
+
+  // Store impulse response for later application
+  static std::vector<float> sLastImpulseResponse;
+  sLastImpulseResponse = result.impulseResponse;
+
+  aecLog("[AEC Aligned Calibration] Result: delay=%.1fms gain=%.3f corr=%.3f "
+         "success=%d offset=%lld\n",
+         result.delayMs, result.echoGain, result.correlation,
+         result.success ? 1 : 0, (long long)result.calibratedOffset);
+
+  return result.success ? 1 : 0;
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
+    unsigned int sampleRate,
+    int *outDelaySamples,
+    float *outDelayMs,
+    float *outGain,
+    float *outCorrelation,
+    int *outImpulseLength,
+    int64_t *outCalibratedOffset) {
+
+  if (!mFilters) {
+    aecLog("[AEC] Cannot run aligned analysis: filters not initialized\n");
+    return 0;
+  }
+
+  const std::vector<float>& alignedRef = mFilters->getAecAlignedRef();
+  const std::vector<float>& alignedMic = mFilters->getAecAlignedMic();
+
+  if (alignedRef.empty() || alignedMic.empty()) {
+    aecLog("[AEC] Cannot run aligned analysis: no captured data\n");
+    return 0;
+  }
+
+  CalibrationResult result = AECCalibration::analyzeAligned(
+      alignedRef, alignedMic, sampleRate);
+
+  *outDelaySamples = result.delaySamples;
+  *outDelayMs = result.delayMs;
+  *outGain = result.echoGain;
+  *outCorrelation = result.correlation;
+  *outImpulseLength = static_cast<int>(result.impulseResponse.size());
+  *outCalibratedOffset = result.calibratedOffset;
+
+  // Store and apply impulse response
+  if (result.success && !result.impulseResponse.empty()) {
+    mFilters->setAecImpulseResponse(result.impulseResponse.data(),
+                                     static_cast<int>(result.impulseResponse.size()));
+  }
+
+  aecLog("[AEC Aligned Calibration] Result: delay=%.1fms gain=%.3f corr=%.3f "
+         "impulseLen=%zu offset=%lld success=%d\n",
+         result.delayMs, result.echoGain, result.correlation,
+         result.impulseResponse.size(), (long long)result.calibratedOffset,
+         result.success ? 1 : 0);
+
+  return result.success ? 1 : 0;
 }

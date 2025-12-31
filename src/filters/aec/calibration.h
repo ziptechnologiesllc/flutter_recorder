@@ -23,23 +23,29 @@
 
 struct CalibrationResult {
     int delaySamples;      // Optimal delay in samples
-    int delayMs;           // Optimal delay in milliseconds
+    float delayMs;         // Optimal delay in milliseconds (float for sub-ms precision)
     float echoGain;        // Echo attenuation factor (0-1)
     float correlation;     // Peak correlation coefficient (quality metric)
     bool success;          // Whether calibration succeeded
     std::vector<float> impulseResponse;  // NLMS initial coefficients from FFT deconvolution
+    int64_t calibratedOffset;  // Sample-accurate sync: captureFrame - offset = outputFrame
 };
 
 class AECCalibration {
 public:
-    static constexpr int WHITE_NOISE_DURATION_MS = 1500;   // 1.5 seconds of white noise
-    static constexpr int MAX_DELAY_SEARCH_MS = 150;  // Search up to 150ms delay
-    static constexpr float SIGNAL_AMPLITUDE = 0.3f;  // Calibration signal level
-    static constexpr float MIN_CORRELATION_THRESHOLD = 0.2f;  // Minimum correlation for valid result
+    // Click-based calibration: 5 clicks averaged for noise reduction
+    static constexpr int CLICK_COUNT = 5;              // Number of clicks to average
+    static constexpr int CLICK_SAMPLES = 5;            // Samples per click (short pulse)
+    static constexpr int CLICK_SPACING_MS = 600;       // 600ms between clicks for full IR capture
+    static constexpr int IR_LENGTH = 2048;             // Impulse response taps (~42ms @ 48kHz)
+    static constexpr float CLICK_AMPLITUDE = 0.8f;     // Loud but not clipping
+    static constexpr int TAIL_MS = 400;                // Silence after last click for full decay
+    static constexpr float MIN_PEAK_THRESHOLD = 0.01f; // Minimum peak to detect
 
     /**
      * Generate calibration WAV file in memory.
-     * Contains: 500ms white noise + 1000ms logarithmic sine sweep
+     * Contains: 5 clicks spaced 400ms apart + 400ms tail
+     * Total duration: ~2.4s
      *
      * @param sampleRate Sample rate in Hz
      * @param channels Number of channels (1 or 2)
@@ -75,9 +81,33 @@ public:
     static CalibrationResult analyze(unsigned int sampleRate);
 
     /**
+     * Run analysis using frame-aligned ref/mic buffers from AEC processAudio.
+     * These buffers are captured from the same callback at the same time,
+     * providing perfect frame alignment for accurate delay estimation.
+     *
+     * @param alignedRef Reference signal from AEC processAudio (already aligned)
+     * @param alignedMic Mic signal from AEC processAudio (already aligned)
+     * @param sampleRate Sample rate for converting delay to milliseconds
+     * @return Calibration results including optimal delay
+     */
+    static CalibrationResult analyzeAligned(
+        const std::vector<float>& alignedRef,
+        const std::vector<float>& alignedMic,
+        unsigned int sampleRate);
+
+    /**
      * Clear captured signal buffers.
      */
     static void reset();
+
+    /**
+     * Record frame counters at calibration start.
+     * Call this when the calibration signal starts playing.
+     *
+     * @param outputFrames Current output frame count from reference buffer
+     * @param captureFrames Current capture frame count from Capture
+     */
+    static void recordFrameCountersAtStart(size_t outputFrames, size_t captureFrames);
 
     /**
      * Get captured reference signal for visualization.
@@ -97,47 +127,6 @@ public:
 
 private:
     /**
-     * Generate white noise samples.
-     */
-    static void generateWhiteNoise(
-        float* buffer,
-        size_t samples,
-        float amplitude);
-
-    /**
-     * Generate logarithmic sine sweep from startFreq to endFreq.
-     */
-    static void generateSineSweep(
-        float* buffer,
-        size_t samples,
-        unsigned int sampleRate,
-        float startFreq,
-        float endFreq,
-        float amplitude);
-
-    /**
-     * Find optimal delay using normalized cross-correlation.
-     * Returns delay in samples where correlation is maximum.
-     */
-    static int findOptimalDelay(
-        const float* reference,
-        size_t refLen,
-        const float* recorded,
-        size_t recLen,
-        int maxDelaySamples,
-        float* outCorrelation);
-
-    /**
-     * Estimate echo gain at given delay.
-     * Returns ratio of recorded amplitude to reference amplitude.
-     */
-    static float estimateEchoGain(
-        const float* reference,
-        const float* recorded,
-        size_t len,
-        int delay);
-
-    /**
      * Write WAV header to buffer.
      */
     static void writeWavHeader(
@@ -146,33 +135,16 @@ private:
         unsigned int channels,
         size_t numSamples);
 
-    /**
-     * Compute impulse response via FFT deconvolution.
-     * H(f) = FFT(mic) / FFT(ref), then h(t) = IFFT(H(f))
-     *
-     * @param reference Reference signal (calibration audio)
-     * @param mic Recorded mic signal
-     * @param len Length of signals
-     * @param filterLength Desired impulse response length
-     * @return Impulse response coefficients
-     */
-    static std::vector<float> computeImpulseResponse(
-        const float* reference,
-        const float* mic,
-        size_t len,
-        int filterLength);
-
-    /**
-     * Find next power of 2 >= n.
-     */
-    static size_t nextPowerOf2(size_t n);
-
     // Internal buffers for captured signals
     static std::vector<float> sRefCapture;
     static std::vector<float> sMicCapture;
 
     // Generated calibration signal (stored for use as reference)
     static std::vector<float> sGeneratedSignal;
+
+    // Frame counters recorded at calibration start
+    static size_t sOutputFramesAtStart;
+    static size_t sCaptureFramesAtStart;
 };
 
 #endif // AEC_CALIBRATION_H

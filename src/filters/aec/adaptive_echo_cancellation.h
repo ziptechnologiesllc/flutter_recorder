@@ -3,8 +3,11 @@
 
 #include "../../enums.h"
 #include "../generic_filter.h"
+#include "delay_estimator.h"
+#include "neural_post_filter.h"
 #include "nlms_filter.h"
 #include "reference_buffer.h"
+#include "vss_nlms_filter.h"
 
 #include <map>
 #include <memory>
@@ -73,11 +76,55 @@ public:
    * @param coeffs Impulse response coefficients
    * @param length Number of coefficients
    */
+  /**
+   * Set the impulse response from calibration.
+   */
   void setImpulseResponse(const float *coeffs, int length);
+
+  /**
+   * Measure hardware latency using cross-correlation.
+   * Updates the DelayMs parameter automatically.
+   * @param refBuffer Reference signal buffer (1-2 seconds)
+   * @param micBuffer Microphone signal buffer (1-2 seconds)
+   * @return Measured delay in milliseconds
+   */
+  float measureHardwareLatency(const std::vector<float> &refBuffer,
+                               const std::vector<float> &micBuffer);
 
   // Stats
   AecStats getStats();
   void updateStats(float ref, float mic, float out);
+
+  NeuralPostFilter *getNeuralFilter() { return mNeuralFilter.get(); }
+
+  // VSS-NLMS parameter control for experimentation
+  void setVssMuMax(float mu);
+  void setVssLeakage(float lambda);
+  void setVssAlpha(float alpha);
+  float getVssMuMax() const;
+  float getVssLeakage() const;
+  float getVssAlpha() const;
+
+  // Sample-accurate synchronization (frame counter based)
+  // Call this BEFORE process() with the capture frame count at block start
+  void setCaptureFrameCount(size_t captureFrameCount);
+
+  // Set the calibrated offset: captureFrame - offset = corresponding outputFrame
+  // This is calculated during calibration as:
+  // offset = (captureFramesAtCalib - outputFramesAtCalib) + acousticDelaySamples
+  void setCalibratedOffset(int64_t offset);
+  int64_t getCalibratedOffset() const { return mCalibratedOffset; }
+
+  // Enable/disable position-based sync (vs legacy timestamp/delay based)
+  void setUsePositionSync(bool enable) { mUsePositionSync = enable; }
+  bool getUsePositionSync() const { return mUsePositionSync; }
+
+  // Calibration capture: capture frame-aligned ref/mic for delay estimation
+  void startCalibrationCapture(size_t maxSamples = 96000);  // 2 seconds @ 48kHz
+  void stopCalibrationCapture();
+  const std::vector<float>& getAlignedRef() const { return mAlignedRefCapture; }
+  const std::vector<float>& getAlignedMic() const { return mAlignedMicCapture; }
+  bool isCalibrationCaptureComplete() const;
 
 private:
   struct ParamRange {
@@ -95,18 +142,35 @@ private:
 
   // NLMS filter instances (one per channel)
   std::vector<std::unique_ptr<NLMSFilter>> mFilters;
+  // VSS-NLMS filter instances (Parallel path for new algo)
+  std::vector<std::unique_ptr<VssNlmsFilter>> mVssFilters;
 
   // Delay in samples for reference signal alignment (fallback if no timestamp)
   unsigned int mDelaySamples;
 
   // Temporary buffer for reference signal
   std::vector<float> mRefBuffer;
+  // Temporary buffer for linear AEC output
+  std::vector<float> mLinearOutputBuffer;
 
   // Timestamp-based synchronization
   bool mUseTimestampSync;
   AECReferenceBuffer::TimePoint mCurrentCallbackTimestamp;
 
+  std::unique_ptr<NeuralPostFilter> mNeuralFilter;
+
   AecStats mCurrentStats = {0};
+
+  // Sample-accurate sync state
+  size_t mCaptureFrameCount = 0;  // Set before each process() call
+  int64_t mCalibratedOffset = 0;  // Capture frame - offset = output frame
+  bool mUsePositionSync = false;  // Use position-based sync vs legacy delay
+
+  // Calibration capture state (for frame-aligned delay estimation)
+  bool mCalibrationCaptureEnabled = false;
+  size_t mCalibrationMaxSamples = 0;
+  std::vector<float> mAlignedRefCapture;
+  std::vector<float> mAlignedMicCapture;
 
   void validateParam(int param) const;
   void updateDelay();

@@ -1,20 +1,66 @@
 #include "calibration.h"
-#include "../../fft/soloud_fft.h"
+#include "delay_estimator.h"
+#include "vss_nlms_filter.h"
 #include <algorithm>
+#include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+
+// Log file for calibration debug output (visible to Flutter test)
+static std::ofstream sLogFile;
+static bool sLogFileOpened = false;
+
+// Store log messages in memory so they can be retrieved via FFI
+static std::string sLogBuffer;
+static const size_t MAX_LOG_SIZE = 64 * 1024; // 64KB max
+
+void aecLog(const char *fmt, ...) {
+  char buffer[1024];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buffer, sizeof(buffer), fmt, args);
+  va_end(args);
+
+  // Append to in-memory buffer (truncate if too large)
+  if (sLogBuffer.size() < MAX_LOG_SIZE) {
+    sLogBuffer += buffer;
+  }
+
+  // Also print to stderr
+  fprintf(stderr, "%s", buffer);
+  fflush(stderr);
+}
+
+// FFI export to retrieve log buffer
+extern "C" {
+const char *flutter_recorder_aec_getCalibrationLog() {
+  return sLogBuffer.c_str();
+}
+
+void flutter_recorder_aec_clearCalibrationLog() { sLogBuffer.clear(); }
+}
 
 // Static member initialization
 std::vector<float> AECCalibration::sRefCapture;
 std::vector<float> AECCalibration::sMicCapture;
 std::vector<float> AECCalibration::sGeneratedSignal;
+size_t AECCalibration::sOutputFramesAtStart = 0;
+size_t AECCalibration::sCaptureFramesAtStart = 0;
 
 uint8_t *AECCalibration::generateCalibrationWav(unsigned int sampleRate,
                                                 unsigned int channels,
                                                 size_t *outSize) {
-  // Calculate total samples - white noise only
-  size_t totalSamples = (sampleRate * WHITE_NOISE_DURATION_MS) / 1000;
-  size_t totalFrames = totalSamples; // samples per channel
+  // Use a Logarithmic Sine Sweep (Chirp) for Warm Start
+  // Duration: 0.5s
+  const float DURATION_SEC = 0.5f;
+  size_t totalFrames = static_cast<size_t>(sampleRate * DURATION_SEC);
+
+  // Add some padding silence at end?
+  // Let's add 100ms silence to let the room ring out
+  size_t paddingFrames = sampleRate / 10;
+  totalFrames += paddingFrames;
 
   // WAV format: 44 byte header + float32 samples
   size_t dataSize = totalFrames * channels * sizeof(float);
@@ -27,13 +73,34 @@ uint8_t *AECCalibration::generateCalibrationWav(unsigned int sampleRate,
 
   // Generate audio data
   float *audioData = reinterpret_cast<float *>(buffer + 44);
+  std::memset(audioData, 0, dataSize);
 
-  // Generate mono signal first and store it for use as reference
-  sGeneratedSignal.resize(totalSamples);
+  // Generate mono chirp
+  sGeneratedSignal.resize(totalFrames, 0.0f);
 
-  // White noise only - works better for correlation than sine sweep
-  // (phone speakers can't reproduce high frequencies in sweep)
-  generateWhiteNoise(sGeneratedSignal.data(), totalSamples, SIGNAL_AMPLITUDE);
+  double f_start = 20.0;
+  double f_end = sampleRate / 2.0;
+  size_t chirpSamples = static_cast<size_t>(sampleRate * DURATION_SEC);
+  double k = std::pow(f_end / f_start, 1.0 / chirpSamples);
+
+  // CONSTANT: Max amplitude
+  const float MAX_AMPLITUDE = 0.5f;
+
+  for (size_t i = 0; i < chirpSamples; ++i) {
+    // Logarithmic frequency increase
+    // Phase phi(t) = 2*pi * f_start * (k^t - 1) / ln(k)
+    // where t is time in seconds? No, classic formula is discretized.
+    // Correct phase integration: division by sampleRate is required
+    // Phase = 2*pi * f_start * (k^i - 1) / (ln(k) * Fs)
+    double phase = 2.0 * M_PI * f_start * (std::pow(k, i) - 1.0) /
+                   (std::log(k) * sampleRate);
+    sGeneratedSignal[i] = MAX_AMPLITUDE * std::sin(phase);
+
+    // Fade out last 50 samples to prevent popping
+    if (i > chirpSamples - 50) {
+      sGeneratedSignal[i] *= (chirpSamples - i) / 50.0f;
+    }
+  }
 
   // Copy to all channels (interleaved)
   for (size_t frame = 0; frame < totalFrames; ++frame) {
@@ -42,8 +109,8 @@ uint8_t *AECCalibration::generateCalibrationWav(unsigned int sampleRate,
     }
   }
 
-  printf("[AEC Calibration] Generated %zu samples (%.1fms) of white noise\n",
-         totalSamples, totalSamples * 1000.0f / sampleRate);
+  aecLog("\n[AEC Calibration] Generated Log Chirp (%.2fs, %zu samples)\n",
+         DURATION_SEC, chirpSamples);
 
   *outSize = totalSize;
   return buffer;
@@ -59,98 +126,335 @@ void AECCalibration::captureSignals(const float *referenceBuffer,
   sRefCapture.assign(referenceBuffer, referenceBuffer + referenceLen);
   sMicCapture.assign(micBuffer, micBuffer + micLen);
 
-  printf(
+  aecLog(
       "[AEC Calibration] Captured signals: ref=%zu samples, mic=%zu samples\n",
       referenceLen, micLen);
 }
 
 CalibrationResult AECCalibration::analyze(unsigned int sampleRate) {
-  CalibrationResult result = {0, 0, 0.0f, 0.0f, false};
+  CalibrationResult result = {0, 0.0f, 0.0f, 0.0f, false, {}};
 
-  if (sRefCapture.empty() || sMicCapture.empty()) {
-    printf("[AEC Calibration] analyze: No data (ref=%zu mic=%zu)\n",
+  if (sMicCapture.empty() || sRefCapture.empty()) {
+    aecLog("[AEC Calibration] analyze: Missing data (ref=%zu, mic=%zu)\n",
            sRefCapture.size(), sMicCapture.size());
     return result;
   }
 
-  // Debug: compute signal energy
-  // Debug: compute signal energy and stats over ALL samples
-  float refEnergy = 0.0f, micEnergy = 0.0f;
-  float refMax = 0.0f, micMax = 0.0f;
+  aecLog("[AEC Calibration] Warm Start Analysis (Chirp method)...\n");
 
-  for (float val : sRefCapture) {
-    refEnergy += val * val;
-    if (std::abs(val) > refMax)
-      refMax = std::abs(val);
+  // Step 0: Pre-align signals using frame counters
+  // The ref and mic signals are captured by independent threads with no
+  // synchronization. Use the recorded frame counters to align them.
+  int64_t counterDiff = static_cast<int64_t>(sCaptureFramesAtStart) -
+                        static_cast<int64_t>(sOutputFramesAtStart);
+
+  aecLog("[AEC Calibration] Frame counter diff: capture=%zu - output=%zu = %lld\n",
+         sCaptureFramesAtStart, sOutputFramesAtStart, (long long)counterDiff);
+
+  std::vector<float> preAlignedRef, preAlignedMic;
+  if (counterDiff >= 0) {
+    // Capture started after output -> mic is "ahead" in time
+    // Trim mic start to align with ref start
+    size_t offset = std::min(static_cast<size_t>(counterDiff), sMicCapture.size());
+    preAlignedMic.assign(sMicCapture.begin() + offset, sMicCapture.end());
+    preAlignedRef = sRefCapture;
+    aecLog("[AEC Calibration] Pre-aligned: trimmed %zu samples from mic start\n", offset);
+  } else {
+    // Output started after capture -> ref is "ahead" in time
+    // Trim ref start to align with mic start
+    size_t offset = std::min(static_cast<size_t>(-counterDiff), sRefCapture.size());
+    preAlignedRef.assign(sRefCapture.begin() + offset, sRefCapture.end());
+    preAlignedMic = sMicCapture;
+    aecLog("[AEC Calibration] Pre-aligned: trimmed %zu samples from ref start\n", offset);
   }
-  for (float val : sMicCapture) {
-    micEnergy += val * val;
-    if (std::abs(val) > micMax)
-      micMax = std::abs(val);
-  }
 
-  // Normalize energy by length
-  if (!sRefCapture.empty())
-    refEnergy /= sRefCapture.size();
-  if (!sMicCapture.empty())
-    micEnergy /= sMicCapture.size();
-
-  printf("[AEC Calibration] analyze: ref samples=%zu (RMS=%.6f, Peak=%.4f) mic "
-         "samples=%zu (RMS=%.6f, Peak=%.4f)\n",
-         sRefCapture.size(), std::sqrt(refEnergy), refMax, sMicCapture.size(),
-         std::sqrt(micEnergy), micMax);
-
-  // Calculate max delay in samples
-  int maxDelaySamples = (sampleRate * MAX_DELAY_SEARCH_MS) / 1000;
-
-  // Find optimal delay via cross-correlation
-  float peakCorrelation = 0.0f;
-  int optimalDelay = findOptimalDelay(sRefCapture.data(), sRefCapture.size(),
-                                      sMicCapture.data(), sMicCapture.size(),
-                                      maxDelaySamples, &peakCorrelation);
-
-  // Check if correlation is strong enough
-  if (peakCorrelation < MIN_CORRELATION_THRESHOLD) {
-    // Correlation too weak - calibration may have failed
-    result.success = false;
-    result.correlation = peakCorrelation;
+  // Ensure we have enough data after alignment
+  if (preAlignedRef.size() < 1024 || preAlignedMic.size() < 1024) {
+    aecLog("[AEC Calibration] Error: Not enough aligned data (ref=%zu, mic=%zu)\n",
+           preAlignedRef.size(), preAlignedMic.size());
     return result;
   }
 
-  // Estimate echo gain at optimal delay
-  float echoGain = estimateEchoGain(
-      sRefCapture.data(), sMicCapture.data(),
-      std::min(sRefCapture.size(), sMicCapture.size()), optimalDelay);
+  // Step 1: Alignment using DelayEstimator on pre-aligned signals
+  // This now finds the ACOUSTIC delay only, not the thread timing offset
+  int estimatedDelay = DelayEstimator::estimateDelay(preAlignedRef, preAlignedMic);
 
-  // Compute impulse response via FFT deconvolution
-  // Align signals first using the optimal delay
-  size_t alignedLen =
-      std::min(sRefCapture.size(), sMicCapture.size() - optimalDelay);
-  if (alignedLen > 1000) { // Need enough samples for good deconvolution
-    result.impulseResponse = computeImpulseResponse(
-        sRefCapture.data(),
-        sMicCapture.data() + optimalDelay, // Align mic to reference
-        alignedLen,
-        2048); // Match NLMS filter length (43ms @ 48kHz -
-               // mobile-optimized)
-  } else {
-    printf("[AEC Calibration] Warning: Not enough aligned samples for "
-           "impulse "
-           "response (%zu)\n",
-           alignedLen);
+  // Apply offset to place peak inside filter (causality margin)
+  // Shift Mic BACK relative to Ref, so delay increases effectively?
+  // No, if we subtract from delay, we consume LESS of the Mic start.
+  // Mic[delay] aligns with Ref[0].
+  // Mic[delay - 32] aligns with Ref[0].
+  // So Ref[0] sees "early" Mic.
+  // Then Ref[32] sees Mic[delay].
+  // So Peak is at index 32. Correct.
+  int offset = 32;
+  estimatedDelay -= offset;
+
+  result.delaySamples = estimatedDelay;
+  if (result.delaySamples < 0)
+    result.delaySamples = 0;
+  result.delayMs = (float)(result.delaySamples * 1000) / (float)sampleRate;
+
+  aecLog(
+      "[AEC Calibration] Alignment Delay: %d samples (%.2fms) [Offset -%d]\n",
+      result.delaySamples, result.delayMs, offset);
+
+  // Step 2: Prepare Aligned Buffers for Training
+  // Use the pre-aligned signals and apply the acoustic delay offset
+  // Overlap length = min(Ref.size, Mic.size - delay)
+  size_t trainingLen = 0;
+  if (estimatedDelay >= 0 && estimatedDelay < (int)preAlignedMic.size()) {
+    trainingLen =
+        std::min(preAlignedRef.size(), preAlignedMic.size() - estimatedDelay);
   }
 
-  // Populate result
-  result.delaySamples = optimalDelay;
-  result.delayMs = (optimalDelay * 1000) / sampleRate;
-  result.echoGain = echoGain;
-  result.correlation = peakCorrelation;
-  result.success = true;
+  // Limit training to Chirp Duration + Reverb Tail to avoid training on silence
+  // Chirp is 0.5s (~24000 samples @ 48k). Add ~200ms reverb tail.
+  size_t chirpLen = (size_t)(0.5 * sampleRate);
+  size_t maxTrain = chirpLen + 9600; // +200ms reverb tail @ 48kHz
+  if (trainingLen > maxTrain) {
+    trainingLen = maxTrain;
+  }
 
-  printf("[AEC Calibration] Result: delay=%dms gain=%.3f corr=%.3f "
-         "impulseLen=%zu\n",
-         result.delayMs, result.echoGain, result.correlation,
-         result.impulseResponse.size());
+  if (trainingLen < 1024) {
+    aecLog("[AEC Calibration] Error: Insufficient overlap for training (%zu)\n",
+           trainingLen);
+    return result;
+  }
+
+  std::vector<float> alignedRef(trainingLen);
+  std::vector<float> alignedMic(trainingLen);
+
+  // Copy from pre-aligned ref (start at 0)
+  std::memcpy(alignedRef.data(), preAlignedRef.data(),
+              trainingLen * sizeof(float));
+
+  // Copy from pre-aligned mic (start at acoustic delay)
+  std::memcpy(alignedMic.data(), preAlignedMic.data() + estimatedDelay,
+              trainingLen * sizeof(float));
+
+  // Step 3: Offline Training
+  VssNlmsFilter trainer(
+      2048); // Use longer filter for calibration to cover tail
+
+  aecLog("[AEC Calibration] Training filter on %zu samples...\n", trainingLen);
+  // trainer.warmStartWeights(alignedRef, alignedMic);
+
+  // Manual Warm Start with Logging
+  trainer.setStepSize(1.0f);        // Aggressive mu
+  trainer.setSmoothingFactor(0.9f); // Fast smoothing
+  trainer.setLeakage(1.0f);         // No leakage during warm start!
+
+  // Debug: Check signal levels
+  float maxRef = 0.0f, maxMic = 0.0f;
+  for (float v : alignedRef)
+    maxRef = std::max(maxRef, std::abs(v));
+  for (float v : alignedMic)
+    maxMic = std::max(maxMic, std::abs(v));
+  aecLog("[AEC Calibration] Signal Max Levels: Ref=%.4f Mic=%.4f\n", maxRef,
+         maxMic);
+
+  for (size_t i = 0; i < trainingLen; ++i) {
+    trainer.processSample(alignedRef[i], alignedMic[i]);
+
+    if (i < 10 || (i % 5000) == 0) {
+      aecLog("[VSS] i=%zu x=%.4f d=%.4f e=%.4f mu=%.6f wEnerg=%.6f\n", i,
+             alignedRef[i], alignedMic[i], trainer.getLastError(),
+             trainer.getLastStepSize(), trainer.getCoeffEnergy());
+    }
+  }
+
+  // Restore (optional, as trainer is temporary)
+  // Restore (optional, as trainer is temporary)
+  trainer.setStepSize(0.5f);
+  trainer.setSmoothingFactor(0.95f);
+  trainer.setLeakage(1.0f);
+
+  // Step 4: Extract Weights
+  std::vector<float> weights = trainer.getWeights();
+
+  // Store as result IR
+  // Resize if needed (IR_LENGTH is usually 2048 in struct? Check calibration.h)
+  // Assuming IR_LENGTH matching weight count.
+  size_t weightCount = weights.size();
+  result.impulseResponse.resize(IR_LENGTH, 0.0f);
+
+  // Copy weights
+  float energy = 0.0f;
+  float peak = 0.0f;
+
+  for (size_t i = 0; i < std::min((size_t)IR_LENGTH, weightCount); ++i) {
+    result.impulseResponse[i] = weights[i];
+    energy += weights[i] * weights[i];
+    if (std::abs(weights[i]) > peak)
+      peak = std::abs(weights[i]);
+  }
+
+  // Metrics
+  result.echoGain = std::sqrt(energy); // Rough gain estimate
+  // Use the LAST correlation value? No, that might be zero at end of silence.
+  // Ideally we track max correlation, but for now let's use the last known
+  // correlation from the active part. Actually, let's just use
+  // trainer.getLastCorrelation() but be aware it might be low.
+  result.correlation = trainer.getLastCorrelation();
+
+  // Sanity check: If energy is super low, maybe failed?
+  if (energy < 1e-6f) {
+    aecLog("[AEC Calibration] Warning: Low energy weights. Training might have "
+           "failed.\n");
+    result.success = false;
+  } else {
+    result.success = true;
+  }
+
+  // Debug Print Weights
+  aecLog("[AEC Calibration] First 10 weights: ");
+  for (int i = 0; i < 10; ++i)
+    aecLog("%.4f ", result.impulseResponse[i]);
+  aecLog("\n");
+
+  aecLog(
+      "[AEC Calibration] Result: delay=%.2fms gain=%.3f (energy) corr=%.4f\n",
+      result.delayMs, result.echoGain, result.correlation);
+
+  // Calculate the calibrated offset for position-based sync
+  // Formula: captureFrame - offset = corresponding outputFrame
+  // offset = (captureAtStart - outputAtStart) + acousticDelay
+  // Note: counterDiff was already calculated at the start of this function
+  result.calibratedOffset = counterDiff + result.delaySamples;
+
+  aecLog("[AEC Calibration] Position sync offset: capStart=%zu outStart=%zu "
+         "diff=%lld acoustic=%d => offset=%lld\n",
+         sCaptureFramesAtStart, sOutputFramesAtStart, (long long)counterDiff,
+         result.delaySamples, (long long)result.calibratedOffset);
+
+  return result;
+}
+
+CalibrationResult AECCalibration::analyzeAligned(
+    const std::vector<float>& alignedRef,
+    const std::vector<float>& alignedMic,
+    unsigned int sampleRate) {
+
+  CalibrationResult result = {0, 0.0f, 0.0f, 0.0f, false, {}};
+
+  if (alignedMic.empty() || alignedRef.empty()) {
+    aecLog("[AEC Calibration] analyzeAligned: Missing data (ref=%zu, mic=%zu)\n",
+           alignedRef.size(), alignedMic.size());
+    return result;
+  }
+
+  aecLog("[AEC Calibration] analyzeAligned: Using frame-aligned buffers (ref=%zu, mic=%zu)\n",
+         alignedRef.size(), alignedMic.size());
+
+  // Step 1: Delay estimation directly on aligned signals
+  // No frame counter pre-alignment needed - signals are already frame-aligned!
+  int estimatedDelay = DelayEstimator::estimateDelay(alignedRef, alignedMic);
+
+  // Apply offset to place peak inside filter (causality margin)
+  int offset = 32;
+  estimatedDelay -= offset;
+
+  result.delaySamples = estimatedDelay;
+  if (result.delaySamples < 0)
+    result.delaySamples = 0;
+  result.delayMs = (float)(result.delaySamples * 1000) / (float)sampleRate;
+
+  aecLog("[AEC Calibration] Aligned Delay: %d samples (%.2fms) [Offset -%d]\n",
+         result.delaySamples, result.delayMs, offset);
+
+  // Step 2: Prepare Aligned Buffers for Training
+  size_t trainingLen = 0;
+  if (estimatedDelay >= 0 && estimatedDelay < (int)alignedMic.size()) {
+    trainingLen = std::min(alignedRef.size(), alignedMic.size() - estimatedDelay);
+  }
+
+  // Limit training length
+  size_t chirpLen = (size_t)(0.5 * sampleRate);
+  size_t maxTrain = chirpLen + 9600; // +200ms reverb tail
+  if (trainingLen > maxTrain) {
+    trainingLen = maxTrain;
+  }
+
+  if (trainingLen < 1024) {
+    aecLog("[AEC Calibration] Error: Insufficient overlap for training (%zu)\n",
+           trainingLen);
+    return result;
+  }
+
+  std::vector<float> trainRef(trainingLen);
+  std::vector<float> trainMic(trainingLen);
+
+  std::memcpy(trainRef.data(), alignedRef.data(), trainingLen * sizeof(float));
+  std::memcpy(trainMic.data(), alignedMic.data() + estimatedDelay,
+              trainingLen * sizeof(float));
+
+  // Step 3: Offline Training
+  VssNlmsFilter trainer(2048);
+
+  aecLog("[AEC Calibration] Training filter on %zu aligned samples...\n", trainingLen);
+
+  trainer.setStepSize(1.0f);
+  trainer.setSmoothingFactor(0.9f);
+  trainer.setLeakage(1.0f);
+
+  // Debug: Check signal levels
+  float maxRef = 0.0f, maxMic = 0.0f;
+  for (float v : trainRef)
+    maxRef = std::max(maxRef, std::abs(v));
+  for (float v : trainMic)
+    maxMic = std::max(maxMic, std::abs(v));
+  aecLog("[AEC Calibration] Aligned Signal Max Levels: Ref=%.4f Mic=%.4f\n",
+         maxRef, maxMic);
+
+  for (size_t i = 0; i < trainingLen; ++i) {
+    trainer.processSample(trainRef[i], trainMic[i]);
+
+    if (i < 10 || (i % 5000) == 0) {
+      aecLog("[VSS-Aligned] i=%zu x=%.4f d=%.4f e=%.4f mu=%.6f wEnerg=%.6f\n", i,
+             trainRef[i], trainMic[i], trainer.getLastError(),
+             trainer.getLastStepSize(), trainer.getCoeffEnergy());
+    }
+  }
+
+  trainer.setStepSize(0.5f);
+  trainer.setSmoothingFactor(0.95f);
+  trainer.setLeakage(1.0f);
+
+  // Step 4: Extract Weights
+  std::vector<float> weights = trainer.getWeights();
+  result.impulseResponse.resize(IR_LENGTH, 0.0f);
+
+  float energy = 0.0f;
+  for (size_t i = 0; i < std::min((size_t)IR_LENGTH, weights.size()); ++i) {
+    result.impulseResponse[i] = weights[i];
+    energy += weights[i] * weights[i];
+  }
+
+  result.echoGain = std::sqrt(energy);
+  result.correlation = trainer.getLastCorrelation();
+
+  if (energy < 1e-6f) {
+    aecLog("[AEC Calibration] Warning: Low energy weights in aligned analysis.\n");
+    result.success = false;
+  } else {
+    result.success = true;
+  }
+
+  aecLog("[AEC Calibration] First 10 weights: ");
+  for (int i = 0; i < 10; ++i)
+    aecLog("%.4f ", result.impulseResponse[i]);
+  aecLog("\n");
+
+  aecLog("[AEC Calibration] Aligned Result: delay=%.2fms gain=%.3f corr=%.4f\n",
+         result.delayMs, result.echoGain, result.correlation);
+
+  // The calibrated offset for position-based sync is simply the estimated delay
+  // since the aligned signals are already synchronized at frame level
+  result.calibratedOffset = result.delaySamples;
+
+  aecLog("[AEC Calibration] Aligned calibratedOffset=%lld samples\n",
+         (long long)result.calibratedOffset);
 
   return result;
 }
@@ -159,6 +463,16 @@ void AECCalibration::reset() {
   sRefCapture.clear();
   sMicCapture.clear();
   sGeneratedSignal.clear();
+  sOutputFramesAtStart = 0;
+  sCaptureFramesAtStart = 0;
+}
+
+void AECCalibration::recordFrameCountersAtStart(size_t outputFrames,
+                                                 size_t captureFrames) {
+  sOutputFramesAtStart = outputFrames;
+  sCaptureFramesAtStart = captureFrames;
+  aecLog("[AEC Calibration] Frame counters recorded: output=%zu capture=%zu\n",
+         outputFrames, captureFrames);
 }
 
 int AECCalibration::getRefSignal(float *dest, int maxLength) {
@@ -175,209 +489,6 @@ int AECCalibration::getMicSignal(float *dest, int maxLength) {
   int copyLen = std::min(maxLength, static_cast<int>(sMicCapture.size()));
   std::memcpy(dest, sMicCapture.data(), copyLen * sizeof(float));
   return copyLen;
-}
-
-void AECCalibration::generateWhiteNoise(float *buffer, size_t samples,
-                                        float amplitude) {
-  // Use Mersenne Twister for high-quality random numbers
-  static std::mt19937 gen(42); // Fixed seed for reproducibility
-  std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-
-  for (size_t i = 0; i < samples; ++i) {
-    buffer[i] = dist(gen) * amplitude;
-  }
-
-  // Apply fade in/out to avoid clicks (10ms)
-  size_t fadeLen = std::min(samples / 10, (size_t)480); // ~10ms @ 48kHz
-  for (size_t i = 0; i < fadeLen; ++i) {
-    float fade = static_cast<float>(i) / fadeLen;
-    buffer[i] *= fade;
-    buffer[samples - 1 - i] *= fade;
-  }
-}
-
-void AECCalibration::generateSineSweep(float *buffer, size_t samples,
-                                       unsigned int sampleRate, float startFreq,
-                                       float endFreq, float amplitude) {
-  // Logarithmic sine sweep (exponential chirp)
-  // More energy at lower frequencies for better room characterization
-  double k = std::pow(endFreq / startFreq, 1.0 / samples);
-  double phase = 0.0;
-
-  for (size_t i = 0; i < samples; ++i) {
-    // Current frequency
-    double freq = startFreq * std::pow(k, static_cast<double>(i));
-
-    // Generate sample
-    buffer[i] = static_cast<float>(amplitude * std::sin(phase));
-
-    // Update phase
-    phase += 2.0 * M_PI * freq / sampleRate;
-    if (phase > 2.0 * M_PI) {
-      phase -= 2.0 * M_PI;
-    }
-  }
-
-  // Apply fade in/out to avoid clicks (10ms)
-  size_t fadeLen = std::min(samples / 10, (size_t)480);
-  for (size_t i = 0; i < fadeLen; ++i) {
-    float fade = static_cast<float>(i) / fadeLen;
-    buffer[i] *= fade;
-    buffer[samples - 1 - i] *= fade;
-  }
-}
-
-// Find where signal energy starts (first sample above threshold)
-static size_t findSignalOnset(const float *signal, size_t len,
-                              float threshold = 0.02f) {
-  // Use a sliding window to detect sustained energy above threshold
-  const size_t windowSize = 256; // ~5ms at 48kHz
-  float windowEnergy = 0.0f;
-
-  for (size_t i = 0; i < len; ++i) {
-    windowEnergy += signal[i] * signal[i];
-    if (i >= windowSize) {
-      windowEnergy -= signal[i - windowSize] * signal[i - windowSize];
-    }
-    float avgEnergy = windowEnergy / std::min(i + 1, windowSize);
-    if (avgEnergy > threshold * threshold) {
-      // Found onset, return position minus window size to get start
-      return (i > windowSize) ? (i - windowSize) : 0;
-    }
-  }
-  return 0; // No onset found, assume start
-}
-
-int AECCalibration::findOptimalDelay(const float *reference, size_t refLen,
-                                     const float *recorded, size_t recLen,
-                                     int maxDelaySamples,
-                                     float *outCorrelation) {
-  int bestDelay = 0;
-  float bestCorr = -1.0f;
-
-  // Find signal onset in both buffers
-  size_t refOnset = findSignalOnset(reference, refLen);
-  size_t micOnset = findSignalOnset(recorded, recLen);
-
-  printf("[AEC Calibration] Signal onset: ref=%zu mic=%zu (%.1fms vs %.1fms)\n",
-         refOnset, micOnset, refOnset / 48.0f, micOnset / 48.0f);
-
-  // Debug: print energy at different points in each signal
-  auto printEnergy = [](const char *name, const float *sig, size_t len) {
-    float e0 = 0, e1 = 0, e2 = 0, e3 = 0;
-    size_t quarter = len / 4;
-    for (size_t i = 0; i < quarter && i < len; ++i)
-      e0 += sig[i] * sig[i];
-    for (size_t i = quarter; i < 2 * quarter && i < len; ++i)
-      e1 += sig[i] * sig[i];
-    for (size_t i = 2 * quarter; i < 3 * quarter && i < len; ++i)
-      e2 += sig[i] * sig[i];
-    for (size_t i = 3 * quarter; i < len; ++i)
-      e3 += sig[i] * sig[i];
-    printf("[AEC Calibration] %s energy by quarter: [%.4f, %.4f, %.4f, %.4f]\n",
-           name, std::sqrt(e0 / quarter), std::sqrt(e1 / quarter),
-           std::sqrt(e2 / quarter), std::sqrt(e3 / quarter));
-  };
-  printEnergy("ref", reference, refLen);
-  printEnergy("mic", recorded, recLen);
-
-  // Use the portion after onset for correlation (skip initial silence)
-  size_t refStart = refOnset;
-  size_t micStart = micOnset;
-
-  // Adjust available length after onset
-  size_t refAvail = refLen - refStart;
-  size_t micAvail = recLen - micStart;
-
-  // Use available samples, leaving margin for delay search
-  size_t windowLen = std::min(refAvail, micAvail);
-  // Leave margin for delay search (max delay samples on each side)
-  if (windowLen > (size_t)(maxDelaySamples * 2)) {
-    windowLen -= maxDelaySamples;
-  }
-
-  printf("[AEC Calibration] Correlation window: %zu samples (%.1fms) starting "
-         "at ref[%zu], mic[%zu]\n",
-         windowLen, windowLen / 48.0f, refStart, micStart);
-
-  // Pre-compute reference energy for normalization (from onset)
-  float refEnergy = 0.0f;
-  for (size_t i = 0; i < windowLen; ++i) {
-    refEnergy += reference[refStart + i] * reference[refStart + i];
-  }
-
-  // Search both positive and negative delays around the onset difference
-  // Positive delay = mic lags behind ref (acoustic delay)
-  // Negative delay = ref has more lead-in silence than mic
-  int startDelay = -maxDelaySamples;
-  int endDelay = maxDelaySamples;
-
-  for (int delay = startDelay; delay < endDelay; ++delay) {
-    // Calculate mic offset for this delay
-    int micOffset = (int)micStart + delay;
-    if (micOffset < 0 || micOffset + (int)windowLen > (int)recLen) {
-      continue; // Out of bounds
-    }
-
-    float corr = 0.0f;
-    float recEnergy = 0.0f;
-
-    // Compute cross-correlation
-    for (size_t i = 0; i < windowLen; ++i) {
-      float refSample = reference[refStart + i];
-      float micSample = recorded[micOffset + i];
-      corr += refSample * micSample;
-      recEnergy += micSample * micSample;
-    }
-
-    // Normalized correlation coefficient
-    float denom = std::sqrt(refEnergy * recEnergy);
-    float normCorr = (denom > 1e-10f) ? (corr / denom) : 0.0f;
-
-    if (normCorr > bestCorr) {
-      bestCorr = normCorr;
-      bestDelay = delay;
-    }
-  }
-
-  // The actual acoustic delay is the difference in onsets plus the
-  // correlation delay
-  int totalDelaySamples = (int)(micOnset - refOnset) + bestDelay;
-
-  printf("[AEC Calibration] Best correlation: %.4f at delay=%d samples "
-         "(%.2fms)\n",
-         bestCorr, bestDelay, bestDelay / 48.0f);
-  printf("[AEC Calibration] Onset diff: %d samples, total delay: %d samples "
-         "(%.2fms)\n",
-         (int)(micOnset - refOnset), totalDelaySamples,
-         totalDelaySamples / 48.0f);
-
-  *outCorrelation = bestCorr;
-  return totalDelaySamples; // Return total delay including onset difference
-}
-
-float AECCalibration::estimateEchoGain(const float *reference,
-                                       const float *recorded, size_t len,
-                                       int delay) {
-  if (delay < 0 || delay >= (int)len) {
-    return 0.0f;
-  }
-
-  // Compute RMS of both signals at optimal alignment
-  size_t windowLen = len - delay;
-  float refRms = 0.0f;
-  float recRms = 0.0f;
-
-  for (size_t i = 0; i < windowLen; ++i) {
-    refRms += reference[i] * reference[i];
-    recRms += recorded[i + delay] * recorded[i + delay];
-  }
-
-  refRms = std::sqrt(refRms / windowLen);
-  recRms = std::sqrt(recRms / windowLen);
-
-  // Echo gain is ratio of recorded to reference RMS
-  return (refRms > 1e-10f) ? (recRms / refRms) : 0.0f;
 }
 
 void AECCalibration::writeWavHeader(uint8_t *buffer, unsigned int sampleRate,
@@ -423,113 +534,4 @@ void AECCalibration::writeWavHeader(uint8_t *buffer, unsigned int sampleRate,
   buffer[39] = 'a';
   uint32_t dataChunkSize = static_cast<uint32_t>(dataSize);
   std::memcpy(buffer + 40, &dataChunkSize, 4);
-}
-
-size_t AECCalibration::nextPowerOf2(size_t n) {
-  size_t power = 1;
-  while (power < n) {
-    power *= 2;
-  }
-  return power;
-}
-
-std::vector<float>
-AECCalibration::computeImpulseResponse(const float *reference, const float *mic,
-                                       size_t len, int filterLength) {
-  // FFT deconvolution: H(f) = Mic(f) / Ref(f)
-  // The impulse response h(t) = IFFT(H(f)) gives us the
-  // complete speaker→mic transfer function.
-
-  // Zero-pad to power of 2 (at least 2x signal length for linear
-  // convolution)
-  size_t fftSize = nextPowerOf2(len * 2);
-
-  // SoLoud FFT uses interleaved complex format: [real0, imag0, real1,
-  // imag1,
-  // ...] So buffer size = fftSize * 2 (fftSize complex numbers)
-  std::vector<float> refFFT(fftSize * 2, 0.0f);
-  std::vector<float> micFFT(fftSize * 2, 0.0f);
-
-  // Apply Hann window to prevent spectral leakage, then copy to FFT
-  // buffers Hann window: w(n) = 0.5 * (1 - cos(2π * n / (N-1)))
-  for (size_t i = 0; i < len; ++i) {
-    float window = 0.5f * (1.0f - std::cos(2.0f * M_PI * i / (len - 1)));
-    refFFT[i * 2] = reference[i] * window; // Real part (windowed)
-    refFFT[i * 2 + 1] = 0.0f;              // Imaginary part
-    micFFT[i * 2] = mic[i] * window;
-    micFFT[i * 2 + 1] = 0.0f;
-  }
-
-  // Forward FFT of both signals
-  FFT::fft(refFFT.data(), static_cast<unsigned int>(fftSize * 2));
-  FFT::fft(micFFT.data(), static_cast<unsigned int>(fftSize * 2));
-
-  // Complex division: H = Mic / Ref (with regularization to avoid
-  // division by zero) For complex numbers: (a+bi) / (c+di) =
-  // (ac+bd)/(c²+d²) + (bc-ad)/(c²+d²)i
-  std::vector<float> transferFunc(fftSize * 2, 0.0f);
-
-  // Find max reference power for adaptive regularization
-  float maxRefPower = 0.0f;
-  for (size_t i = 0; i < fftSize; ++i) {
-    size_t idx = i * 2;
-    float power = refFFT[idx] * refFFT[idx] + refFFT[idx + 1] * refFFT[idx + 1];
-    if (power > maxRefPower)
-      maxRefPower = power;
-  }
-  // Use 1% of peak power as regularization - prevents instability while
-  // preserving detail
-  float regularization = 0.01f * maxRefPower + 1e-10f;
-  printf("[AEC Calibration] FFT deconvolution: fftSize=%zu maxRefPower=%.6f "
-         "reg=%.6f\n",
-         fftSize, maxRefPower, regularization);
-
-  for (size_t i = 0; i < fftSize; ++i) {
-    size_t idx = i * 2;
-    float refReal = refFFT[idx];
-    float refImag = refFFT[idx + 1];
-    float micReal = micFFT[idx];
-    float micImag = micFFT[idx + 1];
-
-    // Denominator: |Ref|² + regularization
-    float denom = refReal * refReal + refImag * refImag + regularization;
-
-    // H = Mic * conj(Ref) / denom
-    transferFunc[idx] = (micReal * refReal + micImag * refImag) / denom;
-    transferFunc[idx + 1] = (micImag * refReal - micReal * refImag) / denom;
-  }
-
-  // Inverse FFT to get time-domain impulse response
-  FFT::ifft(transferFunc.data(), static_cast<unsigned int>(fftSize * 2));
-
-  // Extract real parts as impulse response (first filterLength samples)
-  std::vector<float> impulseResponse(filterLength, 0.0f);
-  int copyLen = std::min(filterLength, static_cast<int>(fftSize));
-
-  // Find peak of impulse response to normalize
-  float maxVal = 0.0f;
-  for (int i = 0; i < copyLen; ++i) {
-    float val = std::abs(transferFunc[i * 2]); // Real part
-    if (val > maxVal)
-      maxVal = val;
-  }
-
-  // Copy and optionally normalize
-  // Copy and optionally normalize
-  // float normFactor = (maxVal > 0.01f) ? (1.0f / maxVal) : 1.0f;
-  for (int i = 0; i < copyLen; ++i) {
-    // Don't normalize - keep actual gain values for NLMS
-    impulseResponse[i] = transferFunc[i * 2]; // Real part only
-  }
-
-  // Debug output
-  float energy = 0.0f;
-  for (int i = 0; i < copyLen; ++i) {
-    energy += impulseResponse[i] * impulseResponse[i];
-  }
-  printf("[AEC Calibration] Computed impulse response: len=%d energy=%.4f "
-         "peak=%.4f\n",
-         copyLen, energy, maxVal);
-
-  return impulseResponse;
 }

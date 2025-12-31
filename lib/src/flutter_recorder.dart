@@ -26,7 +26,8 @@ typedef SilenceState = ({bool isSilent, double decibel});
 /// Result of AEC calibration analysis.
 class AecCalibrationResult {
   /// Optimal delay in milliseconds between speaker output and microphone input.
-  final int delayMs;
+  /// Float precision preserves sub-millisecond accuracy for phase alignment.
+  final double delayMs;
 
   /// Echo gain factor (ratio of echo to original signal, 0-1).
   final double echoGain;
@@ -55,18 +56,66 @@ class AecCalibrationResultWithImpulse extends AecCalibrationResult {
   /// Length of the computed impulse response.
   final int impulseLength;
 
+  /// Calibrated offset for position-based sync.
+  /// Use this with aecSetCalibratedOffset() to enable sample-accurate sync.
+  /// Formula: captureFrame - calibratedOffset = corresponding outputFrame
+  final int calibratedOffset;
+
   const AecCalibrationResultWithImpulse({
     required super.delayMs,
     required super.echoGain,
     required super.correlation,
     required super.success,
     required this.impulseLength,
+    required this.calibratedOffset,
   });
 
   @override
   String toString() =>
       'AecCalibrationResultWithImpulse(delayMs: $delayMs, echoGain: ${echoGain.toStringAsFixed(3)}, '
-      'correlation: ${correlation.toStringAsFixed(3)}, success: $success, impulseLength: $impulseLength)';
+      'correlation: ${correlation.toStringAsFixed(3)}, success: $success, impulseLength: $impulseLength, '
+      'calibratedOffset: $calibratedOffset)';
+}
+
+/// Result of AEC test analysis.
+/// Used to validate echo cancellation quality after calibration.
+class AecTestResult {
+  /// Energy of raw mic signal (before AEC) in dB.
+  final double micEnergyDb;
+
+  /// Energy of cancelled signal (after AEC) in dB.
+  final double cancelledEnergyDb;
+
+  /// How much was cancelled (micEnergyDb - cancelledEnergyDb).
+  /// Positive values = good cancellation.
+  final double cancellationDb;
+
+  /// Correlation of reference with raw mic (before AEC).
+  /// High value (~0.8+) indicates echo is present.
+  final double correlationBefore;
+
+  /// Correlation of reference with cancelled signal (after AEC).
+  /// Should be low (~0) if cancellation is working.
+  final double correlationAfter;
+
+  /// Whether the test passed (cancellationDb > threshold).
+  final bool passed;
+
+  const AecTestResult({
+    required this.micEnergyDb,
+    required this.cancelledEnergyDb,
+    required this.cancellationDb,
+    required this.correlationBefore,
+    required this.correlationAfter,
+    required this.passed,
+  });
+
+  @override
+  String toString() =>
+      'AecTestResult(cancellationDb: ${cancellationDb.toStringAsFixed(1)}, '
+      'correlationBefore: ${correlationBefore.toStringAsFixed(3)}, '
+      'correlationAfter: ${correlationAfter.toStringAsFixed(3)}, '
+      'passed: $passed)';
 }
 
 /// Use this class to _capture_ audio (such as from a microphone).
@@ -686,5 +735,145 @@ interface class Recorder {
   /// Force speaker output on iOS (useful for measurement mode).
   void iosForceSpeakerOutput(bool enabled) {
     _impl.iosForceSpeakerOutput(enabled);
+  }
+
+  // ==================== AEC TESTING ====================
+
+  /// Start capturing test signals (raw mic + cancelled output).
+  /// Call this BEFORE playing the test audio.
+  /// [maxSamples] is the maximum number of samples to capture per signal.
+  void aecStartTestCapture(int maxSamples) {
+    _impl.aecStartTestCapture(maxSamples);
+  }
+
+  /// Stop capturing test signals.
+  /// Call this AFTER test audio has finished playing.
+  void aecStopTestCapture() {
+    _impl.aecStopTestCapture();
+  }
+
+  /// Run analysis on captured test signals.
+  /// Computes cancellation metrics and determines pass/fail.
+  /// Returns [AecTestResult] with all metrics.
+  AecTestResult aecRunTest(int sampleRate) {
+    return _impl.aecRunTest(sampleRate);
+  }
+
+  /// Get captured raw mic signal (before AEC) for visualization.
+  Float32List aecGetTestMicSignal(int maxLength) {
+    return _impl.aecGetTestMicSignal(maxLength);
+  }
+
+  /// Get captured cancelled signal (after AEC) for visualization.
+  Float32List aecGetTestCancelledSignal(int maxLength) {
+    return _impl.aecGetTestCancelledSignal(maxLength);
+  }
+
+  /// Reset test data.
+  void aecResetTest() {
+    _impl.aecResetTest();
+  }
+
+  // ==================== VSS-NLMS PARAMETER CONTROL ====================
+
+  /// Set VSS-NLMS maximum step size (0.0-1.0). Set to 0 to freeze weights.
+  void aecSetVssMuMax(double mu) {
+    _impl.aecSetVssMuMax(mu);
+  }
+
+  /// Set VSS-NLMS leakage factor (0.99-1.0). Set to 1.0 for no decay.
+  void aecSetVssLeakage(double lambda) {
+    _impl.aecSetVssLeakage(lambda);
+  }
+
+  /// Set VSS-NLMS smoothing factor (0.9-0.999).
+  void aecSetVssAlpha(double alpha) {
+    _impl.aecSetVssAlpha(alpha);
+  }
+
+  /// Get current VSS-NLMS maximum step size.
+  double aecGetVssMuMax() {
+    return _impl.aecGetVssMuMax();
+  }
+
+  /// Get current VSS-NLMS leakage factor.
+  double aecGetVssLeakage() {
+    return _impl.aecGetVssLeakage();
+  }
+
+  /// Get current VSS-NLMS smoothing factor.
+  double aecGetVssAlpha() {
+    return _impl.aecGetVssAlpha();
+  }
+
+  // ==================== AEC CALIBRATION LOGGING ====================
+
+  /// Get the calibration log buffer containing debug messages from native code.
+  /// Useful for debugging calibration issues.
+  String aecGetCalibrationLog() {
+    return _impl.aecGetCalibrationLog();
+  }
+
+  /// Clear the calibration log buffer.
+  void aecClearCalibrationLog() {
+    _impl.aecClearCalibrationLog();
+  }
+
+  // ==================== AEC POSITION-BASED SYNC ====================
+
+  /// Get total frames written to reference buffer (output side counter).
+  /// Used for sample-accurate AEC synchronization.
+  int aecGetOutputFrameCount() {
+    return _impl.aecGetOutputFrameCount();
+  }
+
+  /// Get total frames captured by recorder (input side counter).
+  /// Used for sample-accurate AEC synchronization.
+  int aecGetCaptureFrameCount() {
+    return _impl.aecGetCaptureFrameCount();
+  }
+
+  /// Record frame counters at calibration start.
+  /// Call this when calibration signal starts playing.
+  /// The counters are used to calculate the position-based offset.
+  void aecRecordCalibrationFrameCounters() {
+    _impl.aecRecordCalibrationFrameCounters();
+  }
+
+  /// Set the calibrated offset for position-based sync.
+  /// This should be called after calibration completes:
+  /// offset = (captureFramesAtStart - outputFramesAtStart) + acousticDelaySamples
+  void aecSetCalibratedOffset(int offset) {
+    _impl.aecSetCalibratedOffset(offset);
+  }
+
+  /// Get the current calibrated offset.
+  int aecGetCalibratedOffset() {
+    return _impl.aecGetCalibratedOffset();
+  }
+
+  // ==================== ALIGNED CALIBRATION CAPTURE ====================
+
+  /// Start capturing aligned ref+mic from AEC processAudio callback.
+  /// This captures frame-aligned signals for accurate delay estimation.
+  /// Unlike independent capture (aecStartCalibrationCapture), this uses
+  /// signals that are already synchronized inside the AEC callback.
+  /// [maxSamples] is the maximum number of mono samples to capture.
+  void aecStartAlignedCalibrationCapture(int maxSamples) {
+    _impl.aecStartAlignedCalibrationCapture(maxSamples);
+  }
+
+  /// Stop aligned calibration capture.
+  void aecStopAlignedCalibrationCapture() {
+    _impl.aecStopAlignedCalibrationCapture();
+  }
+
+  /// Run calibration analysis on aligned buffers and apply impulse response.
+  /// Returns the calibration result with delay and impulse info.
+  /// This is more accurate than aecRunCalibrationWithImpulse because it uses
+  /// frame-aligned signals captured from inside the AEC callback.
+  AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(
+      int sampleRate) {
+    return _impl.aecRunAlignedCalibrationWithImpulse(sampleRate);
   }
 }

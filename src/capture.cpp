@@ -10,6 +10,9 @@
 #include <mutex>
 #include <time.h>
 
+// External logging function defined in calibration.cpp
+extern void aecLog(const char *fmt, ...);
+
 #ifdef _IS_ANDROID_
 #include <android/log.h>
 #include <jni.h>
@@ -248,7 +251,20 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
 
   // Apply filters (SKIP during calibration to capture raw impulse response and
   // save CPU)
-  if (userData->mFilters->filters.size() > 0 && !userData->mCalibrationActive) {
+  static int filterDebugCounter = 0;
+  filterDebugCounter++;
+  size_t filterCount = userData->mFilters->filters.size();
+  if (filterDebugCounter <= 5 || filterDebugCounter % 500 == 0) {
+    aecLog("[Capture CB #%d] filters=%zu calibActive=%d\n",
+           filterDebugCounter, filterCount, userData->mCalibrationActive);
+  }
+  if (filterCount > 0 && !userData->mCalibrationActive) {
+    // Set the capture frame count for AEC position-based sync BEFORE processing
+    // This is the frame count at the START of this block (before we increment)
+    size_t captureFrameCount =
+        userData->mTotalFramesCaptured.load(std::memory_order_acquire);
+    userData->mFilters->setAecCaptureFrameCount(captureFrameCount);
+
     for (auto &filter : userData->mFilters->filters) {
       filter->filter->process(captured, frameCount,
                               userData->deviceConfig.capture.channels,
@@ -364,6 +380,10 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
       userData->wav.write(captured, frameCount);
     }
   }
+
+  // Increment total frame counter for AEC synchronization
+  // This must be done AFTER all processing to mark this block as complete
+  userData->mTotalFramesCaptured.fetch_add(frameCount, std::memory_order_release);
 }
 
 // /////////////////////////////

@@ -7,6 +7,9 @@
 #include <string>
 #include <vector>
 
+// External logging function defined in calibration.cpp
+extern void aecLog(const char *fmt, ...);
+
 Filters::Filters(unsigned int samplerate, unsigned int channels)
     : mSamplerate(samplerate), mChannels(channels) {}
 
@@ -76,6 +79,9 @@ CaptureErrors Filters::addFilter(RecorderFilterType filterType) {
   /// In [filters] we add the new filter to the list. All these filters must be
   /// processed inside the callback.
   filters.push_back(std::move(nfo));
+
+  aecLog("[Filters] Added filter type %d, now have %zu filters\n",
+         static_cast<int>(filterType), filters.size());
 
   return CaptureErrors::captureNoError;
 }
@@ -150,4 +156,133 @@ AecStats Filters::getAecStats() {
   AdaptiveEchoCancellation *aec =
       static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
   return aec->getStats();
+}
+
+// VSS-NLMS parameter control
+void Filters::setAecVssMuMax(float mu) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  aec->setVssMuMax(mu);
+}
+
+void Filters::setAecVssLeakage(float lambda) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  aec->setVssLeakage(lambda);
+}
+
+void Filters::setAecVssAlpha(float alpha) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  aec->setVssAlpha(alpha);
+}
+
+float Filters::getAecVssMuMax() const {
+  int idx = const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return 0.5f;
+  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
+      filters[idx].get()->filter.get());
+  return aec->getVssMuMax();
+}
+
+float Filters::getAecVssLeakage() const {
+  int idx = const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return 1.0f;
+  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
+      filters[idx].get()->filter.get());
+  return aec->getVssLeakage();
+}
+
+float Filters::getAecVssAlpha() const {
+  int idx = const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return 0.95f;
+  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
+      filters[idx].get()->filter.get());
+  return aec->getVssAlpha();
+}
+
+// Sample-accurate AEC synchronization
+void Filters::setAecCaptureFrameCount(size_t captureFrameCount) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  aec->setCaptureFrameCount(captureFrameCount);
+}
+
+void Filters::setAecCalibratedOffset(int64_t offset) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  aec->setCalibratedOffset(offset);
+}
+
+int64_t Filters::getAecCalibratedOffset() const {
+  int idx =
+      const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return 0;
+  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
+      filters[idx].get()->filter.get());
+  return aec->getCalibratedOffset();
+}
+
+void Filters::startAecCalibrationCapture(size_t maxSamples) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0) {
+    aecLog("[Filters] AEC not active, cannot start calibration capture\n");
+    return;
+  }
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  aec->startCalibrationCapture(maxSamples);
+}
+
+void Filters::stopAecCalibrationCapture() {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0) {
+    aecLog("[Filters] AEC not active, cannot stop calibration capture\n");
+    return;
+  }
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  aec->stopCalibrationCapture();
+}
+
+// Static empty vectors for when AEC is not active
+static std::vector<float> sEmptyVector;
+
+const std::vector<float>& Filters::getAecAlignedRef() const {
+  int idx =
+      const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return sEmptyVector;
+  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
+      filters[idx].get()->filter.get());
+  return aec->getAlignedRef();
+}
+
+const std::vector<float>& Filters::getAecAlignedMic() const {
+  int idx =
+      const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return sEmptyVector;
+  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
+      filters[idx].get()->filter.get());
+  return aec->getAlignedMic();
 }

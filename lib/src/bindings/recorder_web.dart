@@ -467,6 +467,7 @@ class RecorderWeb extends RecorderImpl {
   @override
   AecCalibrationResultWithImpulse aecRunCalibrationWithImpulse(int sampleRate) {
     throw UnsupportedError('AEC calibration is not supported on web platform');
+    // Note: Constructor requires calibratedOffset now, but this throws before reaching it
   }
 
   @override
@@ -491,4 +492,125 @@ class RecorderWeb extends RecorderImpl {
 
   @override
   void iosForceSpeakerOutput(bool enabled) {}
+
+  // ==================== AEC TESTING ====================
+
+  @override
+  void aecStartTestCapture(int maxSamples) {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  @override
+  void aecStopTestCapture() {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  @override
+  AecTestResult aecRunTest(int sampleRate) {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  @override
+  Float32List aecGetTestMicSignal(int maxLength) {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  @override
+  Float32List aecGetTestCancelledSignal(int maxLength) {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  @override
+  void aecResetTest() {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  // ==================== VSS-NLMS PARAMETER CONTROL ====================
+
+  @override
+  void aecSetVssMuMax(double mu) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecSetVssLeakage(double lambda) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecSetVssAlpha(double alpha) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  double aecGetVssMuMax() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  double aecGetVssLeakage() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  double aecGetVssAlpha() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  // ==================== AEC CALIBRATION LOGGING ====================
+
+  @override
+  String aecGetCalibrationLog() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecClearCalibrationLog() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  // ==================== AEC POSITION-BASED SYNC ====================
+
+  @override
+  int aecGetOutputFrameCount() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  int aecGetCaptureFrameCount() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecRecordCalibrationFrameCounters() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecSetCalibratedOffset(int offset) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  int aecGetCalibratedOffset() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  // ==================== ALIGNED CALIBRATION CAPTURE ====================
+
+  @override
+  void aecStartAlignedCalibrationCapture(int maxSamples) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecStopAlignedCalibrationCapture() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(
+      int sampleRate) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
 }

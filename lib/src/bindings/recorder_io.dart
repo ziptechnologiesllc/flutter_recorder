@@ -119,10 +119,8 @@ class RecorderFfi extends RecorderImpl {
   @override
   Stream<AecStats> get aecStatsStream => _aecStatsController.stream;
 
-  static void _aecStatsCallback(bindings_gen.AecStats stats) {
-    // We know impl is RecorderFfi because we are in recorder_io.dart
-    final impl = RecorderController().impl as RecorderFfi;
-    impl._handleAecStats(stats);
+  void _aecStatsCallback(bindings_gen.AecStats stats) {
+    _handleAecStats(stats);
   }
 
   void _handleAecStats(bindings_gen.AecStats stats) {
@@ -136,12 +134,18 @@ class RecorderFfi extends RecorderImpl {
     );
   }
 
+  ffi.NativeCallable<bindings_gen.AecStatsCallbackFunction>?
+      _nativeAecStatsCallable;
+
   @override
   Future<void> setAecStatsCallback() async {
-    final nativeCallback =
-        ffi.Pointer.fromFunction<bindings_gen.AecStatsCallback>(
-            _aecStatsCallback);
-    _bindings.flutter_recorder_set_aec_stats_callback(nativeCallback);
+    _nativeAecStatsCallable = ffi
+        .NativeCallable<bindings_gen.AecStatsCallbackFunction>.listener(
+      _aecStatsCallback,
+    );
+    _bindings.flutter_recorder_set_aec_stats_callback(
+      _nativeAecStatsCallable!.nativeFunction,
+    );
   }
 
   @override
@@ -661,7 +665,7 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   AecCalibrationResult aecRunCalibrationAnalysis(int sampleRate) {
-    final outDelayMs = calloc<ffi.Int>();
+    final outDelayMs = calloc<ffi.Float>();
     final outEchoGain = calloc<ffi.Float>();
     final outCorrelation = calloc<ffi.Float>();
     try {
@@ -691,10 +695,11 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   AecCalibrationResultWithImpulse aecRunCalibrationWithImpulse(int sampleRate) {
-    final outDelayMs = calloc<ffi.Int>();
+    final outDelayMs = calloc<ffi.Float>();
     final outEchoGain = calloc<ffi.Float>();
     final outCorrelation = calloc<ffi.Float>();
     final outImpulseLength = calloc<ffi.Int>();
+    final outCalibratedOffset = calloc<ffi.Int64>();
     try {
       final success = _bindings.flutter_recorder_aec_runCalibrationWithImpulse(
         sampleRate,
@@ -702,6 +707,7 @@ class RecorderFfi extends RecorderImpl {
         outEchoGain,
         outCorrelation,
         outImpulseLength,
+        outCalibratedOffset,
       );
       return AecCalibrationResultWithImpulse(
         delayMs: outDelayMs.value,
@@ -709,12 +715,14 @@ class RecorderFfi extends RecorderImpl {
         correlation: outCorrelation.value,
         success: success == 1,
         impulseLength: outImpulseLength.value,
+        calibratedOffset: outCalibratedOffset.value,
       );
     } finally {
       calloc.free(outDelayMs);
       calloc.free(outEchoGain);
       calloc.free(outCorrelation);
       calloc.free(outImpulseLength);
+      calloc.free(outCalibratedOffset);
     }
   }
 
@@ -781,5 +789,214 @@ class RecorderFfi extends RecorderImpl {
     if (Platform.isIOS) {
       _bindings.flutter_recorder_ios_force_speaker_output(enabled);
     }
+  }
+
+  // ==================== AEC TESTING ====================
+
+  @override
+  void aecStartTestCapture(int maxSamples) {
+    _bindings.flutter_recorder_aec_startTestCapture(maxSamples);
+  }
+
+  @override
+  void aecStopTestCapture() {
+    _bindings.flutter_recorder_aec_stopTestCapture();
+  }
+
+  @override
+  AecTestResult aecRunTest(int sampleRate) {
+    final outCancellationDb = calloc<ffi.Float>();
+    final outCorrelationBefore = calloc<ffi.Float>();
+    final outCorrelationAfter = calloc<ffi.Float>();
+    final outPassed = calloc<ffi.Int>();
+    final outMicEnergyDb = calloc<ffi.Float>();
+    final outCancelledEnergyDb = calloc<ffi.Float>();
+    try {
+      final success = _bindings.flutter_recorder_aec_runTest(
+        sampleRate,
+        outCancellationDb,
+        outCorrelationBefore,
+        outCorrelationAfter,
+        outPassed,
+        outMicEnergyDb,
+        outCancelledEnergyDb,
+      );
+      // success returns 1 if test ran successfully (regardless of pass/fail)
+      // outPassed indicates if cancellation met threshold
+      return AecTestResult(
+        micEnergyDb: outMicEnergyDb.value,
+        cancelledEnergyDb: outCancelledEnergyDb.value,
+        cancellationDb: outCancellationDb.value,
+        correlationBefore: outCorrelationBefore.value,
+        correlationAfter: outCorrelationAfter.value,
+        passed: outPassed.value == 1,
+      );
+    } finally {
+      calloc.free(outCancellationDb);
+      calloc.free(outCorrelationBefore);
+      calloc.free(outCorrelationAfter);
+      calloc.free(outPassed);
+      calloc.free(outMicEnergyDb);
+      calloc.free(outCancelledEnergyDb);
+    }
+  }
+
+  @override
+  Float32List aecGetTestMicSignal(int maxLength) {
+    final dest = calloc<ffi.Float>(maxLength);
+    try {
+      final actualLength = _bindings.flutter_recorder_aec_getTestMicSignal(
+        dest,
+        maxLength,
+      );
+      if (actualLength == 0) {
+        return Float32List(0);
+      }
+      return Float32List.fromList(dest.asTypedList(actualLength));
+    } finally {
+      calloc.free(dest);
+    }
+  }
+
+  @override
+  Float32List aecGetTestCancelledSignal(int maxLength) {
+    final dest = calloc<ffi.Float>(maxLength);
+    try {
+      final actualLength = _bindings.flutter_recorder_aec_getTestCancelledSignal(
+        dest,
+        maxLength,
+      );
+      if (actualLength == 0) {
+        return Float32List(0);
+      }
+      return Float32List.fromList(dest.asTypedList(actualLength));
+    } finally {
+      calloc.free(dest);
+    }
+  }
+
+  @override
+  void aecResetTest() {
+    _bindings.flutter_recorder_aec_resetTest();
+  }
+
+  // ==================== VSS-NLMS PARAMETER CONTROL ====================
+
+  @override
+  void aecSetVssMuMax(double mu) {
+    _bindings.flutter_recorder_aec_setVssMuMax(mu);
+  }
+
+  @override
+  void aecSetVssLeakage(double lambda) {
+    _bindings.flutter_recorder_aec_setVssLeakage(lambda);
+  }
+
+  @override
+  void aecSetVssAlpha(double alpha) {
+    _bindings.flutter_recorder_aec_setVssAlpha(alpha);
+  }
+
+  @override
+  double aecGetVssMuMax() {
+    return _bindings.flutter_recorder_aec_getVssMuMax();
+  }
+
+  @override
+  double aecGetVssLeakage() {
+    return _bindings.flutter_recorder_aec_getVssLeakage();
+  }
+
+  @override
+  double aecGetVssAlpha() {
+    return _bindings.flutter_recorder_aec_getVssAlpha();
+  }
+
+  // ==================== AEC CALIBRATION LOGGING ====================
+
+  @override
+  String aecGetCalibrationLog() {
+    final ptr = _bindings.flutter_recorder_aec_getCalibrationLog();
+    if (ptr == ffi.nullptr) {
+      return '';
+    }
+    return ptr.cast<Utf8>().toDartString();
+  }
+
+  @override
+  void aecClearCalibrationLog() {
+    _bindings.flutter_recorder_aec_clearCalibrationLog();
+  }
+
+  // ==================== AEC POSITION-BASED SYNC ====================
+
+  @override
+  int aecGetOutputFrameCount() {
+    return _bindings.flutter_recorder_aec_getOutputFrameCount();
+  }
+
+  @override
+  int aecGetCaptureFrameCount() {
+    return _bindings.flutter_recorder_aec_getCaptureFrameCount();
+  }
+
+  @override
+  void aecRecordCalibrationFrameCounters() {
+    _bindings.flutter_recorder_aec_recordCalibrationFrameCounters();
+  }
+
+  @override
+  void aecSetCalibratedOffset(int offset) {
+    _bindings.flutter_recorder_aec_setCalibratedOffset(offset);
+  }
+
+  @override
+  int aecGetCalibratedOffset() {
+    return _bindings.flutter_recorder_aec_getCalibratedOffset();
+  }
+
+  // ==================== ALIGNED CALIBRATION CAPTURE ====================
+
+  @override
+  void aecStartAlignedCalibrationCapture(int maxSamples) {
+    _bindings.flutter_recorder_aec_startAlignedCalibrationCapture(maxSamples);
+  }
+
+  @override
+  void aecStopAlignedCalibrationCapture() {
+    _bindings.flutter_recorder_aec_stopAlignedCalibrationCapture();
+  }
+
+  @override
+  AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(
+      int sampleRate) {
+    return using((arena) {
+      final delaySamplesPtr = arena<ffi.Int>();
+      final delayMsPtr = arena<ffi.Float>();
+      final gainPtr = arena<ffi.Float>();
+      final correlationPtr = arena<ffi.Float>();
+      final impulseLengthPtr = arena<ffi.Int>();
+      final calibratedOffsetPtr = arena<ffi.Int64>();
+
+      final success =
+          _bindings.flutter_recorder_aec_runAlignedCalibrationWithImpulse(
+        sampleRate,
+        delaySamplesPtr,
+        delayMsPtr,
+        gainPtr,
+        correlationPtr,
+        impulseLengthPtr,
+        calibratedOffsetPtr,
+      );
+
+      return AecCalibrationResultWithImpulse(
+        delayMs: delayMsPtr.value,
+        echoGain: gainPtr.value,
+        correlation: correlationPtr.value,
+        success: success != 0,
+        impulseLength: impulseLengthPtr.value,
+        calibratedOffset: calibratedOffsetPtr.value,
+      );
+    });
   }
 }

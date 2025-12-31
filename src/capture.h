@@ -6,6 +6,7 @@
 #include "wav.h"
 #include "miniaudio.h"
 
+#include <atomic>
 #include <vector>
 #include <string>
 #include "filters/filters.h"
@@ -126,11 +127,26 @@ public:
     /// @brief Check if calibration capture is active
     bool isCalibrationCaptureActive() const;
 
+    /// @brief Get total frames captured since device started
+    /// This counter is used for sample-accurate AEC synchronization
+    size_t getTotalFramesCaptured() const {
+        return mTotalFramesCaptured.load(std::memory_order_acquire);
+    }
+
+    /// @brief Reset the frame counter (call before calibration)
+    void resetFrameCounter() {
+        mTotalFramesCaptured.store(0, std::memory_order_release);
+    }
+
     /// Calibration capture buffer and state (public for data callback access)
     std::vector<float> mCalibrationBuffer;
     size_t mCalibrationWritePos;
     bool mCalibrationActive;
     std::mutex mCalibrationMutex;
+
+    /// Total frames captured since device started (for AEC sync)
+    /// Atomic for lock-free access from data callback
+    std::atomic<size_t> mTotalFramesCaptured{0};
 
 private:
     ma_context context;

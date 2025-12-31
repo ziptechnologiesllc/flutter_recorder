@@ -15,9 +15,6 @@ import 'dart:ffi' as ffi;
 /// or
 /// `export CPATH="$(clang -v 2>&1 | grep "Selected GCC installation" | rev | cut -d' ' -f1 | rev)/include";  dart run ffigen --config ffigen.yaml`
 ///
-typedef AecStatsCallback = ffi.Void Function(AecStats stats);
-typedef dartAecStatsCallback_t = ffi.NativeFunction<AecStatsCallback>;
-
 class FlutterRecorderBindings {
   /// Holds the symbol lookup function.
   final ffi.Pointer<T> Function<T extends ffi.NativeType>(String symbolName)
@@ -62,23 +59,6 @@ class FlutterRecorderBindings {
       _flutter_recorder_setDartEventCallbackPtr.asFunction<
           void Function(
               dartSilenceChangedCallback_t, dartStreamDataCallback_t)>();
-
-  void flutter_recorder_set_aec_stats_callback(
-    ffi.Pointer<ffi.NativeFunction<AecStatsCallback>> callback,
-  ) {
-    return _flutter_recorder_set_aec_stats_callback(
-      callback,
-    );
-  }
-
-  late final _flutter_recorder_set_aec_stats_callbackPtr = _lookup<
-          ffi.NativeFunction<
-              ffi.Void Function(
-                  ffi.Pointer<ffi.NativeFunction<AecStatsCallback>>)>>(
-      'flutter_recorder_set_aec_stats_callback');
-  late final _flutter_recorder_set_aec_stats_callback =
-      _flutter_recorder_set_aec_stats_callbackPtr.asFunction<
-          void Function(ffi.Pointer<ffi.NativeFunction<AecStatsCallback>>)>();
 
   void flutter_recorder_nativeFree(
     ffi.Pointer<ffi.Void> pointer,
@@ -710,7 +690,7 @@ class FlutterRecorderBindings {
 
   int flutter_recorder_aec_runCalibrationAnalysis(
     int sampleRate,
-    ffi.Pointer<ffi.Int> outDelayMs,
+    ffi.Pointer<ffi.Float> outDelayMs,
     ffi.Pointer<ffi.Float> outEchoGain,
     ffi.Pointer<ffi.Float> outCorrelation,
   ) {
@@ -724,12 +704,12 @@ class FlutterRecorderBindings {
 
   late final _flutter_recorder_aec_runCalibrationAnalysisPtr = _lookup<
           ffi.NativeFunction<
-              ffi.Int Function(ffi.UnsignedInt, ffi.Pointer<ffi.Int>,
+              ffi.Int Function(ffi.UnsignedInt, ffi.Pointer<ffi.Float>,
                   ffi.Pointer<ffi.Float>, ffi.Pointer<ffi.Float>)>>(
       'flutter_recorder_aec_runCalibrationAnalysis');
   late final _flutter_recorder_aec_runCalibrationAnalysis =
       _flutter_recorder_aec_runCalibrationAnalysisPtr.asFunction<
-          int Function(int, ffi.Pointer<ffi.Int>, ffi.Pointer<ffi.Float>,
+          int Function(int, ffi.Pointer<ffi.Float>, ffi.Pointer<ffi.Float>,
               ffi.Pointer<ffi.Float>)>();
 
   void flutter_recorder_aec_resetCalibration() {
@@ -742,13 +722,28 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_aec_resetCalibration =
       _flutter_recorder_aec_resetCalibrationPtr.asFunction<void Function()>();
 
-  /// Run calibration analysis with impulse response computation
+  void flutter_recorder_set_aec_stats_callback(
+    AecStatsCallback callback,
+  ) {
+    return _flutter_recorder_set_aec_stats_callback(
+      callback,
+    );
+  }
+
+  late final _flutter_recorder_set_aec_stats_callbackPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(AecStatsCallback)>>(
+          'flutter_recorder_set_aec_stats_callback');
+  late final _flutter_recorder_set_aec_stats_callback =
+      _flutter_recorder_set_aec_stats_callbackPtr
+          .asFunction<void Function(AecStatsCallback)>();
+
   int flutter_recorder_aec_runCalibrationWithImpulse(
     int sampleRate,
-    ffi.Pointer<ffi.Int> outDelayMs,
+    ffi.Pointer<ffi.Float> outDelayMs,
     ffi.Pointer<ffi.Float> outEchoGain,
     ffi.Pointer<ffi.Float> outCorrelation,
     ffi.Pointer<ffi.Int> outImpulseLength,
+    ffi.Pointer<ffi.Int64> outCalibratedOffset,
   ) {
     return _flutter_recorder_aec_runCalibrationWithImpulse(
       sampleRate,
@@ -756,6 +751,7 @@ class FlutterRecorderBindings {
       outEchoGain,
       outCorrelation,
       outImpulseLength,
+      outCalibratedOffset,
     );
   }
 
@@ -763,15 +759,21 @@ class FlutterRecorderBindings {
           ffi.NativeFunction<
               ffi.Int Function(
                   ffi.UnsignedInt,
+                  ffi.Pointer<ffi.Float>,
+                  ffi.Pointer<ffi.Float>,
+                  ffi.Pointer<ffi.Float>,
                   ffi.Pointer<ffi.Int>,
-                  ffi.Pointer<ffi.Float>,
-                  ffi.Pointer<ffi.Float>,
-                  ffi.Pointer<ffi.Int>)>>(
+                  ffi.Pointer<ffi.Int64>)>>(
       'flutter_recorder_aec_runCalibrationWithImpulse');
   late final _flutter_recorder_aec_runCalibrationWithImpulse =
       _flutter_recorder_aec_runCalibrationWithImpulsePtr.asFunction<
-          int Function(int, ffi.Pointer<ffi.Int>, ffi.Pointer<ffi.Float>,
-              ffi.Pointer<ffi.Float>, ffi.Pointer<ffi.Int>)>();
+          int Function(
+              int,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Int64>)>();
 
   /// Get stored impulse response from last calibration
   int flutter_recorder_aec_getImpulseResponse(
@@ -840,6 +842,388 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_aec_getCalibrationMicSignal =
       _flutter_recorder_aec_getCalibrationMicSignalPtr
           .asFunction<int Function(ffi.Pointer<ffi.Float>, int)>();
+
+  /// Set AEC delay from calibration result
+  void flutter_recorder_aec_setDelay(
+    double delayMs,
+  ) {
+    return _flutter_recorder_aec_setDelay(
+      delayMs,
+    );
+  }
+
+  late final _flutter_recorder_aec_setDelayPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Float)>>(
+          'flutter_recorder_aec_setDelay');
+  late final _flutter_recorder_aec_setDelay =
+      _flutter_recorder_aec_setDelayPtr.asFunction<void Function(double)>();
+
+  /// Apply full calibration result: delay + impulse response
+  void flutter_recorder_aec_applyCalibration(
+    double delayMs,
+  ) {
+    return _flutter_recorder_aec_applyCalibration(
+      delayMs,
+    );
+  }
+
+  late final _flutter_recorder_aec_applyCalibrationPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Float)>>(
+          'flutter_recorder_aec_applyCalibration');
+  late final _flutter_recorder_aec_applyCalibration =
+      _flutter_recorder_aec_applyCalibrationPtr
+          .asFunction<void Function(double)>();
+
+  /// Start capturing test data (raw mic + cancelled output)
+  void flutter_recorder_aec_startTestCapture(
+    int maxSamples,
+  ) {
+    return _flutter_recorder_aec_startTestCapture(
+      maxSamples,
+    );
+  }
+
+  late final _flutter_recorder_aec_startTestCapturePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Size)>>(
+          'flutter_recorder_aec_startTestCapture');
+  late final _flutter_recorder_aec_startTestCapture =
+      _flutter_recorder_aec_startTestCapturePtr
+          .asFunction<void Function(int)>();
+
+  /// Get calibration log buffer (returns pointer to internal string, do not free)
+  ffi.Pointer<ffi.Char> flutter_recorder_aec_getCalibrationLog() {
+    return _flutter_recorder_aec_getCalibrationLog();
+  }
+
+  late final _flutter_recorder_aec_getCalibrationLogPtr =
+      _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Char> Function()>>(
+          'flutter_recorder_aec_getCalibrationLog');
+  late final _flutter_recorder_aec_getCalibrationLog =
+      _flutter_recorder_aec_getCalibrationLogPtr
+          .asFunction<ffi.Pointer<ffi.Char> Function()>();
+
+  /// Clear calibration log buffer
+  void flutter_recorder_aec_clearCalibrationLog() {
+    return _flutter_recorder_aec_clearCalibrationLog();
+  }
+
+  late final _flutter_recorder_aec_clearCalibrationLogPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_clearCalibrationLog');
+  late final _flutter_recorder_aec_clearCalibrationLog =
+      _flutter_recorder_aec_clearCalibrationLogPtr
+          .asFunction<void Function()>();
+
+  /// Stop capturing test data
+  void flutter_recorder_aec_stopTestCapture() {
+    return _flutter_recorder_aec_stopTestCapture();
+  }
+
+  late final _flutter_recorder_aec_stopTestCapturePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_stopTestCapture');
+  late final _flutter_recorder_aec_stopTestCapture =
+      _flutter_recorder_aec_stopTestCapturePtr.asFunction<void Function()>();
+
+  /// Run test analysis and return metrics
+  int flutter_recorder_aec_runTest(
+    int sampleRate,
+    ffi.Pointer<ffi.Float> outCancellationDb,
+    ffi.Pointer<ffi.Float> outCorrelationBefore,
+    ffi.Pointer<ffi.Float> outCorrelationAfter,
+    ffi.Pointer<ffi.Int> outPassed,
+    ffi.Pointer<ffi.Float> outMicEnergyDb,
+    ffi.Pointer<ffi.Float> outCancelledEnergyDb,
+  ) {
+    return _flutter_recorder_aec_runTest(
+      sampleRate,
+      outCancellationDb,
+      outCorrelationBefore,
+      outCorrelationAfter,
+      outPassed,
+      outMicEnergyDb,
+      outCancelledEnergyDb,
+    );
+  }
+
+  late final _flutter_recorder_aec_runTestPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Int Function(
+              ffi.UnsignedInt,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>)>>('flutter_recorder_aec_runTest');
+  late final _flutter_recorder_aec_runTest =
+      _flutter_recorder_aec_runTestPtr.asFunction<
+          int Function(
+              int,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>)>();
+
+  /// Get captured test signals for visualization
+  int flutter_recorder_aec_getTestMicSignal(
+    ffi.Pointer<ffi.Float> dest,
+    int maxLength,
+  ) {
+    return _flutter_recorder_aec_getTestMicSignal(
+      dest,
+      maxLength,
+    );
+  }
+
+  late final _flutter_recorder_aec_getTestMicSignalPtr = _lookup<
+          ffi
+          .NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Float>, ffi.Int)>>(
+      'flutter_recorder_aec_getTestMicSignal');
+  late final _flutter_recorder_aec_getTestMicSignal =
+      _flutter_recorder_aec_getTestMicSignalPtr
+          .asFunction<int Function(ffi.Pointer<ffi.Float>, int)>();
+
+  int flutter_recorder_aec_getTestCancelledSignal(
+    ffi.Pointer<ffi.Float> dest,
+    int maxLength,
+  ) {
+    return _flutter_recorder_aec_getTestCancelledSignal(
+      dest,
+      maxLength,
+    );
+  }
+
+  late final _flutter_recorder_aec_getTestCancelledSignalPtr = _lookup<
+          ffi
+          .NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Float>, ffi.Int)>>(
+      'flutter_recorder_aec_getTestCancelledSignal');
+  late final _flutter_recorder_aec_getTestCancelledSignal =
+      _flutter_recorder_aec_getTestCancelledSignalPtr
+          .asFunction<int Function(ffi.Pointer<ffi.Float>, int)>();
+
+  /// Reset test data
+  void flutter_recorder_aec_resetTest() {
+    return _flutter_recorder_aec_resetTest();
+  }
+
+  late final _flutter_recorder_aec_resetTestPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_resetTest');
+  late final _flutter_recorder_aec_resetTest =
+      _flutter_recorder_aec_resetTestPtr.asFunction<void Function()>();
+
+  /// VSS-NLMS parameter control for experimentation
+  /// mu_max: Maximum step size (0.0-1.0). Set to 0 to freeze weights.
+  void flutter_recorder_aec_setVssMuMax(
+    double mu,
+  ) {
+    return _flutter_recorder_aec_setVssMuMax(
+      mu,
+    );
+  }
+
+  late final _flutter_recorder_aec_setVssMuMaxPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Float)>>(
+          'flutter_recorder_aec_setVssMuMax');
+  late final _flutter_recorder_aec_setVssMuMax =
+      _flutter_recorder_aec_setVssMuMaxPtr.asFunction<void Function(double)>();
+
+  /// leakage: Weight decay factor (0.99-1.0). Set to 1.0 for no decay.
+  void flutter_recorder_aec_setVssLeakage(
+    double lambda,
+  ) {
+    return _flutter_recorder_aec_setVssLeakage(
+      lambda,
+    );
+  }
+
+  late final _flutter_recorder_aec_setVssLeakagePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Float)>>(
+          'flutter_recorder_aec_setVssLeakage');
+  late final _flutter_recorder_aec_setVssLeakage =
+      _flutter_recorder_aec_setVssLeakagePtr
+          .asFunction<void Function(double)>();
+
+  /// alpha: Smoothing factor for VSS statistics (0.9-0.999).
+  void flutter_recorder_aec_setVssAlpha(
+    double alpha,
+  ) {
+    return _flutter_recorder_aec_setVssAlpha(
+      alpha,
+    );
+  }
+
+  late final _flutter_recorder_aec_setVssAlphaPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Float)>>(
+          'flutter_recorder_aec_setVssAlpha');
+  late final _flutter_recorder_aec_setVssAlpha =
+      _flutter_recorder_aec_setVssAlphaPtr.asFunction<void Function(double)>();
+
+  /// Getters for current values
+  double flutter_recorder_aec_getVssMuMax() {
+    return _flutter_recorder_aec_getVssMuMax();
+  }
+
+  late final _flutter_recorder_aec_getVssMuMaxPtr =
+      _lookup<ffi.NativeFunction<ffi.Float Function()>>(
+          'flutter_recorder_aec_getVssMuMax');
+  late final _flutter_recorder_aec_getVssMuMax =
+      _flutter_recorder_aec_getVssMuMaxPtr.asFunction<double Function()>();
+
+  double flutter_recorder_aec_getVssLeakage() {
+    return _flutter_recorder_aec_getVssLeakage();
+  }
+
+  late final _flutter_recorder_aec_getVssLeakagePtr =
+      _lookup<ffi.NativeFunction<ffi.Float Function()>>(
+          'flutter_recorder_aec_getVssLeakage');
+  late final _flutter_recorder_aec_getVssLeakage =
+      _flutter_recorder_aec_getVssLeakagePtr.asFunction<double Function()>();
+
+  double flutter_recorder_aec_getVssAlpha() {
+    return _flutter_recorder_aec_getVssAlpha();
+  }
+
+  late final _flutter_recorder_aec_getVssAlphaPtr =
+      _lookup<ffi.NativeFunction<ffi.Float Function()>>(
+          'flutter_recorder_aec_getVssAlpha');
+  late final _flutter_recorder_aec_getVssAlpha =
+      _flutter_recorder_aec_getVssAlphaPtr.asFunction<double Function()>();
+
+  /// Position-based sync for sample-accurate AEC
+  /// Get total frames written to reference buffer (output side)
+  int flutter_recorder_aec_getOutputFrameCount() {
+    return _flutter_recorder_aec_getOutputFrameCount();
+  }
+
+  late final _flutter_recorder_aec_getOutputFrameCountPtr =
+      _lookup<ffi.NativeFunction<ffi.Size Function()>>(
+          'flutter_recorder_aec_getOutputFrameCount');
+  late final _flutter_recorder_aec_getOutputFrameCount =
+      _flutter_recorder_aec_getOutputFrameCountPtr.asFunction<int Function()>();
+
+  /// Get total frames captured by recorder (input side)
+  int flutter_recorder_aec_getCaptureFrameCount() {
+    return _flutter_recorder_aec_getCaptureFrameCount();
+  }
+
+  late final _flutter_recorder_aec_getCaptureFrameCountPtr =
+      _lookup<ffi.NativeFunction<ffi.Size Function()>>(
+          'flutter_recorder_aec_getCaptureFrameCount');
+  late final _flutter_recorder_aec_getCaptureFrameCount =
+      _flutter_recorder_aec_getCaptureFrameCountPtr
+          .asFunction<int Function()>();
+
+  /// Record frame counters at calibration start
+  void flutter_recorder_aec_recordCalibrationFrameCounters() {
+    return _flutter_recorder_aec_recordCalibrationFrameCounters();
+  }
+
+  late final _flutter_recorder_aec_recordCalibrationFrameCountersPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_recordCalibrationFrameCounters');
+  late final _flutter_recorder_aec_recordCalibrationFrameCounters =
+      _flutter_recorder_aec_recordCalibrationFrameCountersPtr
+          .asFunction<void Function()>();
+
+  /// Set calibrated offset: captureFrame - offset = outputFrame
+  void flutter_recorder_aec_setCalibratedOffset(
+    int offset,
+  ) {
+    return _flutter_recorder_aec_setCalibratedOffset(
+      offset,
+    );
+  }
+
+  late final _flutter_recorder_aec_setCalibratedOffsetPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int64)>>(
+          'flutter_recorder_aec_setCalibratedOffset');
+  late final _flutter_recorder_aec_setCalibratedOffset =
+      _flutter_recorder_aec_setCalibratedOffsetPtr
+          .asFunction<void Function(int)>();
+
+  /// Get current calibrated offset
+  int flutter_recorder_aec_getCalibratedOffset() {
+    return _flutter_recorder_aec_getCalibratedOffset();
+  }
+
+  late final _flutter_recorder_aec_getCalibratedOffsetPtr =
+      _lookup<ffi.NativeFunction<ffi.Int64 Function()>>(
+          'flutter_recorder_aec_getCalibratedOffset');
+  late final _flutter_recorder_aec_getCalibratedOffset =
+      _flutter_recorder_aec_getCalibratedOffsetPtr.asFunction<int Function()>();
+
+  /// Aligned calibration capture (for accurate delay estimation)
+  void flutter_recorder_aec_startAlignedCalibrationCapture(
+    int maxSamples,
+  ) {
+    return _flutter_recorder_aec_startAlignedCalibrationCapture(
+      maxSamples,
+    );
+  }
+
+  late final _flutter_recorder_aec_startAlignedCalibrationCapturePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Size)>>(
+          'flutter_recorder_aec_startAlignedCalibrationCapture');
+  late final _flutter_recorder_aec_startAlignedCalibrationCapture =
+      _flutter_recorder_aec_startAlignedCalibrationCapturePtr
+          .asFunction<void Function(int)>();
+
+  void flutter_recorder_aec_stopAlignedCalibrationCapture() {
+    return _flutter_recorder_aec_stopAlignedCalibrationCapture();
+  }
+
+  late final _flutter_recorder_aec_stopAlignedCalibrationCapturePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_stopAlignedCalibrationCapture');
+  late final _flutter_recorder_aec_stopAlignedCalibrationCapture =
+      _flutter_recorder_aec_stopAlignedCalibrationCapturePtr
+          .asFunction<void Function()>();
+
+  int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
+    int sampleRate,
+    ffi.Pointer<ffi.Int> outDelaySamples,
+    ffi.Pointer<ffi.Float> outDelayMs,
+    ffi.Pointer<ffi.Float> outGain,
+    ffi.Pointer<ffi.Float> outCorrelation,
+    ffi.Pointer<ffi.Int> outImpulseLength,
+    ffi.Pointer<ffi.Int64> outCalibratedOffset,
+  ) {
+    return _flutter_recorder_aec_runAlignedCalibrationWithImpulse(
+      sampleRate,
+      outDelaySamples,
+      outDelayMs,
+      outGain,
+      outCorrelation,
+      outImpulseLength,
+      outCalibratedOffset,
+    );
+  }
+
+  late final _flutter_recorder_aec_runAlignedCalibrationWithImpulsePtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Int Function(
+              ffi.UnsignedInt,
+              ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Int64>)>>(
+      'flutter_recorder_aec_runAlignedCalibrationWithImpulse');
+  late final _flutter_recorder_aec_runAlignedCalibrationWithImpulse =
+      _flutter_recorder_aec_runAlignedCalibrationWithImpulsePtr.asFunction<
+          int Function(
+              int,
+              ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Float>,
+              ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Int64>)>();
 
   /// //////////////////////
   /// iOS Hardware Control
@@ -939,6 +1323,13 @@ enum RecorderFilterType {
           throw ArgumentError("Unknown value for RecorderFilterType: $value"),
       };
 }
+
+/// Run calibration analysis with impulse response computation
+/// AecStats defined in enums.h
+typedef AecStatsCallback
+    = ffi.Pointer<ffi.NativeFunction<AecStatsCallbackFunction>>;
+typedef AecStatsCallbackFunction = ffi.Void Function(AecStats stats);
+typedef DartAecStatsCallbackFunction = void Function(AecStats stats);
 
 final class AecStats extends ffi.Struct {
   @ffi.Float()

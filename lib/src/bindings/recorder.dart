@@ -344,4 +344,110 @@ abstract class RecorderImpl {
   /// Force speaker output on iOS (useful for measurement mode).
   @mustBeOverridden
   void iosForceSpeakerOutput(bool enabled);
+
+  // ==================== AEC TESTING ====================
+
+  /// Start capturing test signals (raw mic + cancelled output).
+  /// Call this BEFORE playing the test audio.
+  @mustBeOverridden
+  void aecStartTestCapture(int maxSamples);
+
+  /// Stop capturing test signals.
+  /// Call this AFTER test audio has finished playing.
+  @mustBeOverridden
+  void aecStopTestCapture();
+
+  /// Run analysis on captured test signals.
+  /// Returns test results with cancellation metrics.
+  @mustBeOverridden
+  AecTestResult aecRunTest(int sampleRate);
+
+  /// Get captured raw mic signal (before AEC) for visualization.
+  @mustBeOverridden
+  Float32List aecGetTestMicSignal(int maxLength);
+
+  /// Get captured cancelled signal (after AEC) for visualization.
+  @mustBeOverridden
+  Float32List aecGetTestCancelledSignal(int maxLength);
+
+  /// Reset test data.
+  @mustBeOverridden
+  void aecResetTest();
+
+  // ==================== VSS-NLMS PARAMETER CONTROL ====================
+
+  /// Set VSS-NLMS maximum step size (0.0-1.0). Set to 0 to freeze weights.
+  @mustBeOverridden
+  void aecSetVssMuMax(double mu);
+
+  /// Set VSS-NLMS leakage factor (0.99-1.0). Set to 1.0 for no decay.
+  @mustBeOverridden
+  void aecSetVssLeakage(double lambda);
+
+  /// Set VSS-NLMS smoothing factor (0.9-0.999).
+  @mustBeOverridden
+  void aecSetVssAlpha(double alpha);
+
+  /// Get current VSS-NLMS maximum step size.
+  @mustBeOverridden
+  double aecGetVssMuMax();
+
+  /// Get current VSS-NLMS leakage factor.
+  @mustBeOverridden
+  double aecGetVssLeakage();
+
+  /// Get current VSS-NLMS smoothing factor.
+  @mustBeOverridden
+  double aecGetVssAlpha();
+
+  // ==================== AEC CALIBRATION LOGGING ====================
+
+  /// Get the calibration log buffer containing debug messages.
+  @mustBeOverridden
+  String aecGetCalibrationLog();
+
+  /// Clear the calibration log buffer.
+  @mustBeOverridden
+  void aecClearCalibrationLog();
+
+  // ==================== AEC POSITION-BASED SYNC ====================
+
+  /// Get total frames written to reference buffer (output side counter).
+  @mustBeOverridden
+  int aecGetOutputFrameCount();
+
+  /// Get total frames captured by recorder (input side counter).
+  @mustBeOverridden
+  int aecGetCaptureFrameCount();
+
+  /// Record frame counters at calibration start.
+  /// Call this when calibration signal starts playing.
+  @mustBeOverridden
+  void aecRecordCalibrationFrameCounters();
+
+  /// Set the calibrated offset for position-based sync.
+  /// offset = (captureAtStart - outputAtStart) + acousticDelaySamples
+  @mustBeOverridden
+  void aecSetCalibratedOffset(int offset);
+
+  /// Get the current calibrated offset.
+  @mustBeOverridden
+  int aecGetCalibratedOffset();
+
+  // ==================== ALIGNED CALIBRATION CAPTURE ====================
+
+  /// Start capturing aligned ref+mic from AEC processAudio.
+  /// This captures frame-aligned signals for accurate delay estimation.
+  @mustBeOverridden
+  void aecStartAlignedCalibrationCapture(int maxSamples);
+
+  /// Stop aligned calibration capture.
+  @mustBeOverridden
+  void aecStopAlignedCalibrationCapture();
+
+  /// Run calibration analysis on aligned buffers and apply impulse response.
+  /// Returns the calibration result with delay and impulse info.
+  @mustBeOverridden
+  AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(
+      int sampleRate);
 }
