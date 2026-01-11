@@ -645,6 +645,39 @@ interface class Recorder {
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////
 
+  /// Set AEC Mode (Bypass, Algo, Neural, Hybrid).
+  /// Allows switching between different AEC implementations for A/B testing.
+  void setAecMode(AecMode mode) {
+    _impl.aecSetMode(mode);
+  }
+
+  /// Get current AEC Mode.
+  AecMode getAecMode() {
+    return _impl.aecGetMode();
+  }
+
+  /// Load neural model by type.
+  /// [type] the model type (DTLN_AEC_48K, LSTM_V1).
+  /// [assetBasePath] path to the assets directory.
+  bool aecLoadNeuralModel(NeuralModelType type, String assetBasePath) {
+    return _impl.aecLoadNeuralModel(type, assetBasePath);
+  }
+
+  /// Get currently loaded neural model type.
+  NeuralModelType aecGetLoadedNeuralModel() {
+    return _impl.aecGetLoadedNeuralModel();
+  }
+
+  /// Enable or disable neural post-filter.
+  void aecSetNeuralEnabled(bool enabled) {
+    _impl.aecSetNeuralEnabled(enabled);
+  }
+
+  /// Check if neural post-filter is enabled.
+  bool aecIsNeuralEnabled() {
+    return _impl.aecIsNeuralEnabled();
+  }
+
   /// Create the AEC reference buffer.
   /// Returns a pointer to the buffer that should be passed to SoLoud.
   /// [sampleRate] and [channels] should match the audio device configuration.
@@ -804,6 +837,19 @@ interface class Recorder {
   /// Get current VSS-NLMS smoothing factor.
   double aecGetVssAlpha() {
     return _impl.aecGetVssAlpha();
+  }
+
+  // ==================== AEC FILTER LENGTH CONTROL ====================
+
+  /// Set AEC filter length (2048, 4096, 8192 recommended).
+  /// Longer filters can capture longer reverb tails but use more CPU.
+  void aecSetFilterLength(int length) {
+    _impl.aecSetFilterLength(length);
+  }
+
+  /// Get current AEC filter length.
+  int aecGetFilterLength() {
+    return _impl.aecGetFilterLength();
   }
 
   // ==================== AEC CALIBRATION LOGGING ====================

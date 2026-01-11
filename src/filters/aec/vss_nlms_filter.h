@@ -23,7 +23,7 @@
 class VssNlmsFilter {
 public:
   static constexpr int DEFAULT_FILTER_LENGTH =
-      2048; // ~42ms at 48kHz, matches calibration IR_LENGTH
+      8192; // ~170ms at 48kHz, covers long reverb tails
 
   /**
    * @param taps Filter length in samples. Will be rounded up to nearest
@@ -49,22 +49,35 @@ public:
   void reset();
 
   /**
+   * Resize the filter to a new length.
+   * Resets weights and history. Length will be rounded up to multiple of 8.
+   * @param newLength New filter length in samples.
+   */
+  void resize(size_t newLength);
+
+  /**
+   * Get the current filter length.
+   * @return Filter length in samples.
+   */
+  size_t getFilterLength() const { return filter_length; }
+
+  /**
    * Set the maximum step size (learning rate).
-   * @param mu Max step size (0.0 to 1.0). Default is 0.5.
+   * @param mu Max step size (0.0 to 2.0). Default is 1.2.
    */
   void setStepSize(float mu);
 
   /**
    * Set the smoothing factor for VSS statistics.
-   * @param a Alpha (0.0 to 1.0). Default is 0.99.
-   * Lower values = faster adaptation, less stable.
+   * @param a Alpha (0.0 to 1.0). Default is 0.05.
+   * Lower values = faster adaptation to transients.
    */
   void setSmoothingFactor(float a);
 
   /**
    * Set the leakage factor.
    * @param lambda Leakage (0.0 to 1.0). Default is 0.9999.
-   * 1.0 = No leakage (Standard LMS).
+   * 1.0 = No leakage (Standard LMS). Lower values add stability.
    */
   void setLeakage(float lambda);
 
@@ -117,18 +130,18 @@ private:
   float var_x = 0.0f; // Power of Reference (smoothed)
   float var_e = 0.0f; // Power of Error (smoothed)
 
-  // Tuning Parameters
-  // Tuning Parameters
-  float alpha = 0.95f;   // Smoothing factor (0.9 - 0.999)
-  float mu_max = 0.5f;   // Max step size
-  float epsilon = 1e-6f; // Small constant to prevent division by zero
-  float leakage = 1.0f;  // Leakage factor (1.0 = no leakage)
+  // Tuning Parameters (optimized via sweep test - 9.05dB cancellation)
+  float alpha =
+      0.05f; // Smoothing factor (lower = faster tracking for transients)
+  float mu_max = 1.2f;    // Max step size (higher = faster convergence)
+  float epsilon = 1e-6f;  // Small constant to prevent division by zero
+  float leakage = 0.9999f; // Leakage factor (slight decay for stability)
 
   // Diagnostics
   float mLastE = 0.0f;
   float mLastStep = 0.0f;
   float mLastCorrelation = 0.0f;
-  float mLastYEst = 0.0f;  // Last echo estimate for diagnostics
+  float mLastYEst = 0.0f; // Last echo estimate for diagnostics
 
   // SIMD helper functions defined in cpp
   void updateHistory(float new_sample);

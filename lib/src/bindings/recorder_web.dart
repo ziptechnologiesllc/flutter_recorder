@@ -428,7 +428,36 @@ class RecorderWeb extends RecorderImpl {
 
   @override
   void aecResetBuffer() {
-    // AEC is not supported on web platform
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecSetMode(AecMode mode) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  AecMode aecGetMode() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  bool aecLoadNeuralModel(NeuralModelType type, String assetBasePath) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  NeuralModelType aecGetLoadedNeuralModel() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecSetNeuralEnabled(bool enabled) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  bool aecIsNeuralEnabled() {
     throw UnsupportedError('AEC is not supported on web platform');
   }
 
@@ -467,7 +496,6 @@ class RecorderWeb extends RecorderImpl {
   @override
   AecCalibrationResultWithImpulse aecRunCalibrationWithImpulse(int sampleRate) {
     throw UnsupportedError('AEC calibration is not supported on web platform');
-    // Note: Constructor requires calibratedOffset now, but this throws before reaching it
   }
 
   @override
@@ -525,7 +553,7 @@ class RecorderWeb extends RecorderImpl {
     throw UnsupportedError('AEC test is not supported on web platform');
   }
 
-  // ==================== VSS-NLMS PARAMETER CONTROL ====================
+  // ==================== VSS-NLMS CONTROL ====================
 
   @override
   void aecSetVssMuMax(double mu) {
@@ -557,56 +585,38 @@ class RecorderWeb extends RecorderImpl {
     throw UnsupportedError('AEC is not supported on web platform');
   }
 
-  // ==================== AEC CALIBRATION LOGGING ====================
+  @override
+  String aecGetCalibrationLog() => '';
 
   @override
-  String aecGetCalibrationLog() {
-    throw UnsupportedError('AEC is not supported on web platform');
-  }
+  void aecClearCalibrationLog() {}
 
   @override
-  void aecClearCalibrationLog() {
-    throw UnsupportedError('AEC is not supported on web platform');
-  }
-
-  // ==================== AEC POSITION-BASED SYNC ====================
+  int aecGetOutputFrameCount() => 0;
 
   @override
-  int aecGetOutputFrameCount() {
-    throw UnsupportedError('AEC is not supported on web platform');
-  }
+  int aecGetCaptureFrameCount() => 0;
 
   @override
-  int aecGetCaptureFrameCount() {
-    throw UnsupportedError('AEC is not supported on web platform');
-  }
+  void aecRecordCalibrationFrameCounters() {}
 
   @override
-  void aecRecordCalibrationFrameCounters() {
-    throw UnsupportedError('AEC is not supported on web platform');
-  }
+  void aecSetCalibratedOffset(int offset) {}
 
   @override
-  void aecSetCalibratedOffset(int offset) {
-    throw UnsupportedError('AEC is not supported on web platform');
-  }
+  int aecGetCalibratedOffset() => 0;
 
   @override
-  int aecGetCalibratedOffset() {
-    throw UnsupportedError('AEC is not supported on web platform');
-  }
-
-  // ==================== ALIGNED CALIBRATION CAPTURE ====================
+  void aecSetFilterLength(int length) {}
 
   @override
-  void aecStartAlignedCalibrationCapture(int maxSamples) {
-    throw UnsupportedError('AEC is not supported on web platform');
-  }
+  int aecGetFilterLength() => 0;
 
   @override
-  void aecStopAlignedCalibrationCapture() {
-    throw UnsupportedError('AEC is not supported on web platform');
-  }
+  void aecStartAlignedCalibrationCapture(int maxSamples) {}
+
+  @override
+  void aecStopAlignedCalibrationCapture() {}
 
   @override
   AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(

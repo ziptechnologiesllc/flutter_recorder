@@ -130,6 +130,11 @@ class RecorderFfi extends RecorderImpl {
         maxAttenuationDb: stats.maxAttenuationDb,
         correlation: stats.correlation,
         echoReturnLossDb: stats.echoReturnLossDb,
+        filterLength: stats.filterLength,
+        muMax: stats.muMax,
+        muEffective: stats.muEffective,
+        lastErrorDb: stats.lastErrorDb,
+        instantCorrelation: stats.instantCorrelation,
       ),
     );
   }
@@ -139,8 +144,8 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   Future<void> setAecStatsCallback() async {
-    _nativeAecStatsCallable = ffi
-        .NativeCallable<bindings_gen.AecStatsCallbackFunction>.listener(
+    _nativeAecStatsCallable =
+        ffi.NativeCallable<bindings_gen.AecStatsCallbackFunction>.listener(
       _aecStatsCallback,
     );
     _bindings.flutter_recorder_set_aec_stats_callback(
@@ -623,6 +628,50 @@ class RecorderFfi extends RecorderImpl {
     _bindings.flutter_recorder_aec_resetBuffer();
   }
 
+  @override
+  void aecSetMode(AecMode mode) {
+    _bindings.flutter_recorder_aec_setMode(mode.index);
+  }
+
+  @override
+  AecMode aecGetMode() {
+    final modeIndex = _bindings.flutter_recorder_aec_getMode();
+    if (modeIndex >= 0 && modeIndex < AecMode.values.length) {
+      return AecMode.values[modeIndex];
+    }
+    return AecMode.hybrid;
+  }
+
+  @override
+  bool aecLoadNeuralModel(NeuralModelType type, String assetBasePath) {
+    final assetPathPtr = assetBasePath.toNativeUtf8();
+    try {
+      final res = _bindings.flutter_recorder_neural_loadModel(
+        type.value,
+        assetPathPtr.cast<ffi.Char>(),
+      );
+      return res == 1;
+    } finally {
+      malloc.free(assetPathPtr);
+    }
+  }
+
+  @override
+  NeuralModelType aecGetLoadedNeuralModel() {
+    final res = _bindings.flutter_recorder_neural_getLoadedModel();
+    return NeuralModelType.fromValue(res);
+  }
+
+  @override
+  void aecSetNeuralEnabled(bool enabled) {
+    _bindings.flutter_recorder_neural_setEnabled(enabled ? 1 : 0);
+  }
+
+  @override
+  bool aecIsNeuralEnabled() {
+    return _bindings.flutter_recorder_neural_isEnabled() == 1;
+  }
+
   // ==================== AEC CALIBRATION ====================
 
   @override
@@ -862,7 +911,8 @@ class RecorderFfi extends RecorderImpl {
   Float32List aecGetTestCancelledSignal(int maxLength) {
     final dest = calloc<ffi.Float>(maxLength);
     try {
-      final actualLength = _bindings.flutter_recorder_aec_getTestCancelledSignal(
+      final actualLength =
+          _bindings.flutter_recorder_aec_getTestCancelledSignal(
         dest,
         maxLength,
       );
@@ -910,6 +960,18 @@ class RecorderFfi extends RecorderImpl {
   @override
   double aecGetVssAlpha() {
     return _bindings.flutter_recorder_aec_getVssAlpha();
+  }
+
+  // ==================== AEC FILTER LENGTH CONTROL ====================
+
+  @override
+  void aecSetFilterLength(int length) {
+    _bindings.flutter_recorder_aec_setFilterLength(length);
+  }
+
+  @override
+  int aecGetFilterLength() {
+    return _bindings.flutter_recorder_aec_getFilterLength();
   }
 
   // ==================== AEC CALIBRATION LOGGING ====================

@@ -628,6 +628,112 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_aec_resetBuffer =
       _flutter_recorder_aec_resetBufferPtr.asFunction<void Function()>();
 
+  /// AEC Mode Control (A/B Testing)
+  void flutter_recorder_aec_setMode(
+    int mode,
+  ) {
+    return _flutter_recorder_aec_setMode(
+      mode,
+    );
+  }
+
+  late final _flutter_recorder_aec_setModePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int)>>(
+          'flutter_recorder_aec_setMode');
+  late final _flutter_recorder_aec_setMode =
+      _flutter_recorder_aec_setModePtr.asFunction<void Function(int)>();
+
+  int flutter_recorder_aec_getMode() {
+    return _flutter_recorder_aec_getMode();
+  }
+
+  late final _flutter_recorder_aec_getModePtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_aec_getMode');
+  late final _flutter_recorder_aec_getMode =
+      _flutter_recorder_aec_getModePtr.asFunction<int Function()>();
+
+  /// //////////////////////
+  /// Neural Model Control
+  /// //////////////////////
+  /// Load neural model by type
+  /// modelType: 0=NONE, 1=DTLN_AEC_48K, 2=LSTM_V1
+  /// assetBasePath: Platform-specific path to assets directory
+  /// Returns: 1 if successful, 0 if failed
+  int flutter_recorder_neural_loadModel(
+    int modelType,
+    ffi.Pointer<ffi.Char> assetBasePath,
+  ) {
+    return _flutter_recorder_neural_loadModel(
+      modelType,
+      assetBasePath,
+    );
+  }
+
+  late final _flutter_recorder_neural_loadModelPtr = _lookup<
+          ffi.NativeFunction<ffi.Int Function(ffi.Int, ffi.Pointer<ffi.Char>)>>(
+      'flutter_recorder_neural_loadModel');
+  late final _flutter_recorder_neural_loadModel =
+      _flutter_recorder_neural_loadModelPtr
+          .asFunction<int Function(int, ffi.Pointer<ffi.Char>)>();
+
+  /// Get currently loaded neural model type
+  /// Returns: 0=NONE, 1=DTLN_AEC_48K, 2=LSTM_V1
+  int flutter_recorder_neural_getLoadedModel() {
+    return _flutter_recorder_neural_getLoadedModel();
+  }
+
+  late final _flutter_recorder_neural_getLoadedModelPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_neural_getLoadedModel');
+  late final _flutter_recorder_neural_getLoadedModel =
+      _flutter_recorder_neural_getLoadedModelPtr.asFunction<int Function()>();
+
+  /// Enable/disable neural post-filter
+  void flutter_recorder_neural_setEnabled(
+    int enabled,
+  ) {
+    return _flutter_recorder_neural_setEnabled(
+      enabled,
+    );
+  }
+
+  late final _flutter_recorder_neural_setEnabledPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int)>>(
+          'flutter_recorder_neural_setEnabled');
+  late final _flutter_recorder_neural_setEnabled =
+      _flutter_recorder_neural_setEnabledPtr.asFunction<void Function(int)>();
+
+  /// Check if neural post-filter is enabled
+  int flutter_recorder_neural_isEnabled() {
+    return _flutter_recorder_neural_isEnabled();
+  }
+
+  late final _flutter_recorder_neural_isEnabledPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_neural_isEnabled');
+  late final _flutter_recorder_neural_isEnabled =
+      _flutter_recorder_neural_isEnabledPtr.asFunction<int Function()>();
+
+  /// Load dual-stage model (for future DTLN 2-stage support)
+  int flutter_recorder_neural_loadDualStageModel(
+    ffi.Pointer<ffi.Char> model1Path,
+    ffi.Pointer<ffi.Char> model2Path,
+  ) {
+    return _flutter_recorder_neural_loadDualStageModel(
+      model1Path,
+      model2Path,
+    );
+  }
+
+  late final _flutter_recorder_neural_loadDualStageModelPtr = _lookup<
+          ffi.NativeFunction<
+              ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>(
+      'flutter_recorder_neural_loadDualStageModel');
+  late final _flutter_recorder_neural_loadDualStageModel =
+      _flutter_recorder_neural_loadDualStageModelPtr.asFunction<
+          int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
+
   /// //////////////////////
   /// AEC Calibration
   /// //////////////////////
@@ -1093,6 +1199,31 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_aec_getVssAlpha =
       _flutter_recorder_aec_getVssAlphaPtr.asFunction<double Function()>();
 
+  /// Filter length control (2048, 4096, 8192 recommended)
+  void flutter_recorder_aec_setFilterLength(
+    int length,
+  ) {
+    return _flutter_recorder_aec_setFilterLength(
+      length,
+    );
+  }
+
+  late final _flutter_recorder_aec_setFilterLengthPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int)>>(
+          'flutter_recorder_aec_setFilterLength');
+  late final _flutter_recorder_aec_setFilterLength =
+      _flutter_recorder_aec_setFilterLengthPtr.asFunction<void Function(int)>();
+
+  int flutter_recorder_aec_getFilterLength() {
+    return _flutter_recorder_aec_getFilterLength();
+  }
+
+  late final _flutter_recorder_aec_getFilterLengthPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_aec_getFilterLength');
+  late final _flutter_recorder_aec_getFilterLength =
+      _flutter_recorder_aec_getFilterLengthPtr.asFunction<int Function()>();
+
   /// Position-based sync for sample-accurate AEC
   /// Get total frames written to reference buffer (output side)
   int flutter_recorder_aec_getOutputFrameCount() {
@@ -1156,7 +1287,27 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_aec_getCalibratedOffset =
       _flutter_recorder_aec_getCalibratedOffsetPtr.asFunction<int Function()>();
 
-  /// Aligned calibration capture (for accurate delay estimation)
+  /// //////////////////////
+  /// iOS Hardware Control
+  /// //////////////////////
+  void flutter_recorder_ios_force_speaker_output(
+    bool enabled,
+  ) {
+    return _flutter_recorder_ios_force_speaker_output(
+      enabled,
+    );
+  }
+
+  late final _flutter_recorder_ios_force_speaker_outputPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Bool)>>(
+          'flutter_recorder_ios_force_speaker_output');
+  late final _flutter_recorder_ios_force_speaker_output =
+      _flutter_recorder_ios_force_speaker_outputPtr
+          .asFunction<void Function(bool)>();
+
+  /// //////////////////////
+  /// Aligned Calibration Capture (frame-aligned signals from processAudio)
+  /// //////////////////////
   void flutter_recorder_aec_startAlignedCalibrationCapture(
     int maxSamples,
   ) {
@@ -1203,17 +1354,18 @@ class FlutterRecorderBindings {
     );
   }
 
-  late final _flutter_recorder_aec_runAlignedCalibrationWithImpulsePtr = _lookup<
-      ffi.NativeFunction<
-          ffi.Int Function(
-              ffi.UnsignedInt,
-              ffi.Pointer<ffi.Int>,
-              ffi.Pointer<ffi.Float>,
-              ffi.Pointer<ffi.Float>,
-              ffi.Pointer<ffi.Float>,
-              ffi.Pointer<ffi.Int>,
-              ffi.Pointer<ffi.Int64>)>>(
-      'flutter_recorder_aec_runAlignedCalibrationWithImpulse');
+  late final _flutter_recorder_aec_runAlignedCalibrationWithImpulsePtr =
+      _lookup<
+              ffi.NativeFunction<
+                  ffi.Int Function(
+                      ffi.UnsignedInt,
+                      ffi.Pointer<ffi.Int>,
+                      ffi.Pointer<ffi.Float>,
+                      ffi.Pointer<ffi.Float>,
+                      ffi.Pointer<ffi.Float>,
+                      ffi.Pointer<ffi.Int>,
+                      ffi.Pointer<ffi.Int64>)>>(
+          'flutter_recorder_aec_runAlignedCalibrationWithImpulse');
   late final _flutter_recorder_aec_runAlignedCalibrationWithImpulse =
       _flutter_recorder_aec_runAlignedCalibrationWithImpulsePtr.asFunction<
           int Function(
@@ -1224,24 +1376,6 @@ class FlutterRecorderBindings {
               ffi.Pointer<ffi.Float>,
               ffi.Pointer<ffi.Int>,
               ffi.Pointer<ffi.Int64>)>();
-
-  /// //////////////////////
-  /// iOS Hardware Control
-  /// //////////////////////
-  void flutter_recorder_ios_force_speaker_output(
-    bool enabled,
-  ) {
-    return _flutter_recorder_ios_force_speaker_output(
-      enabled,
-    );
-  }
-
-  late final _flutter_recorder_ios_force_speaker_outputPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Bool)>>(
-          'flutter_recorder_ios_force_speaker_output');
-  late final _flutter_recorder_ios_force_speaker_output =
-      _flutter_recorder_ios_force_speaker_outputPtr
-          .asFunction<void Function(bool)>();
 }
 
 typedef dartSilenceChangedCallback_t
@@ -1340,4 +1474,24 @@ final class AecStats extends ffi.Struct {
 
   @ffi.Float()
   external double echoReturnLossDb;
+
+  /// Current filter length in samples
+  @ffi.Int()
+  external int filterLength;
+
+  /// Configured max step size
+  @ffi.Float()
+  external double muMax;
+
+  /// Last effective step size (runtime)
+  @ffi.Float()
+  external double muEffective;
+
+  /// Last error in dB
+  @ffi.Float()
+  external double lastErrorDb;
+
+  /// Instantaneous correlation metric
+  @ffi.Float()
+  external double instantCorrelation;
 }

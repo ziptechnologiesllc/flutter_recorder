@@ -121,6 +121,11 @@ class AecStats {
     required this.maxAttenuationDb,
     required this.correlation,
     required this.echoReturnLossDb,
+    this.filterLength = 8192,
+    this.muMax = 0.5,
+    this.muEffective = 0.0,
+    this.lastErrorDb = -100.0,
+    this.instantCorrelation = 0.0,
   });
 
   /// Maximum attenuation achieved in dB.
@@ -132,10 +137,64 @@ class AecStats {
   /// Echo Return Loss in dB.
   final double echoReturnLossDb;
 
+  /// Current filter length in samples.
+  final int filterLength;
+
+  /// Configured maximum step size.
+  final double muMax;
+
+  /// Last effective step size (runtime).
+  final double muEffective;
+
+  /// Last error in dB.
+  final double lastErrorDb;
+
+  /// Instantaneous correlation metric.
+  final double instantCorrelation;
+
   @override
   String toString() {
-    return 'AecStats(maxAttenuationDb: ${maxAttenuationDb.toStringAsFixed(2)}, '
-        'correlation: ${correlation.toStringAsFixed(3)}, '
-        'ERL: ${echoReturnLossDb.toStringAsFixed(2)})';
+    return 'AecStats(ERL: ${echoReturnLossDb.toStringAsFixed(2)} dB, '
+        'corr: ${correlation.toStringAsFixed(3)}, '
+        'filterLen: $filterLength, '
+        'muMax: ${muMax.toStringAsFixed(2)}, '
+        'muEff: ${muEffective.toStringAsFixed(3)})';
   }
+}
+
+/// AEC Mode for A/B testing
+enum AecMode {
+  /// Raw microphone input (no AEC)
+  bypass,
+
+  /// Standard Algo (VSS-NLMS) only
+  algo,
+
+  /// Neural (DTLN-AEC) only
+  neural,
+
+  /// Hybrid (VSS-NLMS + Neural Post-Filter)
+  hybrid;
+}
+
+/// Neural model types for AEC
+enum NeuralModelType {
+  /// No neural model loaded
+  none(0),
+
+  /// DTLN-AEC 48kHz model
+  dtlnAec48k(1),
+
+  /// LSTM-based AEC model
+  lstmV1(2);
+
+  final int value;
+  const NeuralModelType(this.value);
+
+  static NeuralModelType fromValue(int value) => switch (value) {
+        0 => none,
+        1 => dtlnAec48k,
+        2 => lstmV1,
+        _ => throw ArgumentError('Unknown value for NeuralModelType: $value'),
+      };
 }

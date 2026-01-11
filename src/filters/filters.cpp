@@ -187,30 +187,53 @@ void Filters::setAecVssAlpha(float alpha) {
 }
 
 float Filters::getAecVssMuMax() const {
-  int idx = const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  int idx =
+      const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
     return 0.5f;
-  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
-      filters[idx].get()->filter.get());
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
   return aec->getVssMuMax();
 }
 
 float Filters::getAecVssLeakage() const {
-  int idx = const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  int idx =
+      const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
     return 1.0f;
-  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
-      filters[idx].get()->filter.get());
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
   return aec->getVssLeakage();
 }
 
 float Filters::getAecVssAlpha() const {
-  int idx = const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  int idx =
+      const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
     return 0.95f;
-  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
-      filters[idx].get()->filter.get());
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
   return aec->getVssAlpha();
+}
+
+// Filter length control
+void Filters::setAecFilterLength(int length) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  aec->setFilterLength(length);
+}
+
+int Filters::getAecFilterLength() const {
+  int idx =
+      const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return 8192; // Default
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  return aec->getFilterLength();
 }
 
 // Sample-accurate AEC synchronization
@@ -237,8 +260,8 @@ int64_t Filters::getAecCalibratedOffset() const {
       const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
     return 0;
-  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
-      filters[idx].get()->filter.get());
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
   return aec->getCalibratedOffset();
 }
 
@@ -267,22 +290,104 @@ void Filters::stopAecCalibrationCapture() {
 // Static empty vectors for when AEC is not active
 static std::vector<float> sEmptyVector;
 
-const std::vector<float>& Filters::getAecAlignedRef() const {
+const std::vector<float> &Filters::getAecAlignedRef() const {
   int idx =
       const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
     return sEmptyVector;
-  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
-      filters[idx].get()->filter.get());
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
   return aec->getAlignedRef();
 }
 
-const std::vector<float>& Filters::getAecAlignedMic() const {
+const std::vector<float> &Filters::getAecAlignedMic() const {
   int idx =
       const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
     return sEmptyVector;
-  AdaptiveEchoCancellation *aec = static_cast<AdaptiveEchoCancellation *>(
-      filters[idx].get()->filter.get());
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
   return aec->getAlignedMic();
+}
+
+void Filters::setAecMode(AecMode mode) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  aec->setAecMode(mode);
+}
+
+AecMode Filters::getAecMode() const {
+  int idx =
+      const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return aecModeHybrid;
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  return aec->getAecMode();
+}
+
+// Neural Model Control
+bool Filters::loadNeuralModel(NeuralModelType modelType,
+                               const std::string &assetBasePath) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return false; // AEC filter not active
+
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  NeuralPostFilter *neuralFilter = aec->getNeuralFilter();
+
+  if (!neuralFilter)
+    return false;
+
+  return neuralFilter->loadModelByType(modelType, assetBasePath);
+}
+
+NeuralModelType Filters::getLoadedNeuralModel() const {
+  int idx =
+      const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return NeuralModelType::NONE;
+
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  NeuralPostFilter *neuralFilter = aec->getNeuralFilter();
+
+  if (!neuralFilter)
+    return NeuralModelType::NONE;
+
+  return neuralFilter->getLoadedModelType();
+}
+
+void Filters::setNeuralEnabled(bool enabled) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  NeuralPostFilter *neuralFilter = aec->getNeuralFilter();
+
+  if (neuralFilter) {
+    neuralFilter->setEnabled(enabled);
+  }
+}
+
+bool Filters::isNeuralEnabled() const {
+  int idx =
+      const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return false;
+
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  NeuralPostFilter *neuralFilter = aec->getNeuralFilter();
+
+  if (!neuralFilter)
+    return false;
+
+  return neuralFilter->isEnabled();
 }

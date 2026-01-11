@@ -105,13 +105,17 @@ public:
   float getVssLeakage() const;
   float getVssAlpha() const;
 
+  // Filter length control
+  void setFilterLength(int length);
+  int getFilterLength() const;
+
   // Sample-accurate synchronization (frame counter based)
   // Call this BEFORE process() with the capture frame count at block start
   void setCaptureFrameCount(size_t captureFrameCount);
 
-  // Set the calibrated offset: captureFrame - offset = corresponding outputFrame
-  // This is calculated during calibration as:
-  // offset = (captureFramesAtCalib - outputFramesAtCalib) + acousticDelaySamples
+  // Set the calibrated offset: captureFrame - offset = corresponding
+  // outputFrame This is calculated during calibration as: offset =
+  // (captureFramesAtCalib - outputFramesAtCalib) + acousticDelaySamples
   void setCalibratedOffset(int64_t offset);
   int64_t getCalibratedOffset() const { return mCalibratedOffset; }
 
@@ -120,11 +124,22 @@ public:
   bool getUsePositionSync() const { return mUsePositionSync; }
 
   // Calibration capture: capture frame-aligned ref/mic for delay estimation
-  void startCalibrationCapture(size_t maxSamples = 96000);  // 2 seconds @ 48kHz
+  void startCalibrationCapture(size_t maxSamples = 96000); // 2 seconds @ 48kHz
   void stopCalibrationCapture();
-  const std::vector<float>& getAlignedRef() const { return mAlignedRefCapture; }
-  const std::vector<float>& getAlignedMic() const { return mAlignedMicCapture; }
+  const std::vector<float> &getAlignedRef() const { return mAlignedRefCapture; }
+  const std::vector<float> &getAlignedMic() const { return mAlignedMicCapture; }
   bool isCalibrationCaptureComplete() const;
+
+  // AEC Mode Control (A/B Testing)
+  void setAecMode(AecMode mode);
+  AecMode getAecMode() const;
+
+  /**
+   * Loads a TFLite model for the neural post-filter.
+   * @param modelPath Path to the .tflite model file.
+   * @return true if successful.
+   */
+  bool loadNeuralModel(const std::string &modelPath);
 
 private:
   struct ParamRange {
@@ -162,15 +177,18 @@ private:
   AecStats mCurrentStats = {0};
 
   // Sample-accurate sync state
-  size_t mCaptureFrameCount = 0;  // Set before each process() call
-  int64_t mCalibratedOffset = 0;  // Capture frame - offset = output frame
-  bool mUsePositionSync = false;  // Use position-based sync vs legacy delay
+  size_t mCaptureFrameCount = 0; // Set before each process() call
+  int64_t mCalibratedOffset = 0; // Capture frame - offset = output frame
+  bool mUsePositionSync = false; // Use position-based sync vs legacy delay
 
   // Calibration capture state (for frame-aligned delay estimation)
   bool mCalibrationCaptureEnabled = false;
   size_t mCalibrationMaxSamples = 0;
   std::vector<float> mAlignedRefCapture;
   std::vector<float> mAlignedMicCapture;
+
+  // AEC Mode
+  AecMode mAecMode = aecModeHybrid;
 
   void validateParam(int param) const;
   void updateDelay();

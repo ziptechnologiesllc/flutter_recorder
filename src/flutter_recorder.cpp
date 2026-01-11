@@ -381,7 +381,8 @@ flutter_recorder_addFilter(enum RecorderFilterType filterType) {
   aecLog("[FFI] flutter_recorder_addFilter called with type %d\n",
          static_cast<int>(filterType));
   CaptureErrors result = mFilters.get()->addFilter(filterType);
-  aecLog("[FFI] flutter_recorder_addFilter result: %d\n", static_cast<int>(result));
+  aecLog("[FFI] flutter_recorder_addFilter result: %d\n",
+         static_cast<int>(result));
   return result;
 }
 
@@ -432,29 +433,52 @@ FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoringMode(int mode) {
 /////////////////////////
 
 // Callback function that SoLoud calls to send its output audio
+// Handles channel mismatch: converts SoLoud output to match reference buffer channels
 static void aecOutputCallback(const float *data, size_t frameCount,
                               unsigned int channels) {
-  // Calculate energy of this buffer
-  size_t samples = frameCount * channels;
-  float bufferEnergy = 0.0f;
-  for (size_t i = 0; i < samples; ++i) {
-    bufferEnergy += data[i] * data[i];
+  if (g_aecReferenceBuffer == nullptr) {
+    static int warnCount = 0;
+    if (++warnCount <= 10) {
+      aecLog("[AEC Callback] WARNING: Buffer not initialized!\n");
+    }
+    return;
   }
-  float bufferRms = samples > 0 ? std::sqrt(bufferEnergy / samples) : 0.0f;
 
-  // Log first few callbacks and periodically
+  unsigned int bufferCh = g_aecReferenceBuffer->channels();
+
+  // Log periodically with channel info
   static int callbackCount = 0;
-  callbackCount++;
-  if (callbackCount % 100 == 0) {
-    aecLog("[AEC Callback #%d] frames=%zu ch=%u RMS=%.4f (RefBuf=%p)\n",
-           callbackCount, frameCount, channels, bufferRms,
-           g_aecReferenceBuffer);
+  if (++callbackCount % 100 == 0) {
+    aecLog("[AEC Callback #%d] frames=%zu inputCh=%u bufferCh=%u\n",
+           callbackCount, frameCount, channels, bufferCh);
   }
 
-  if (g_aecReferenceBuffer != nullptr) {
+  if (channels == bufferCh) {
+    // Channels match - direct write
     g_aecReferenceBuffer->write(data, frameCount);
-  } else if (callbackCount <= 10) {
-    aecLog("[AEC Callback] WARNING: Buffer not initialized!\n");
+  } else if (channels == 2 && bufferCh == 1) {
+    // Stereo → Mono: average L+R
+    static std::vector<float> mono;
+    if (mono.size() < frameCount) mono.resize(frameCount);
+    for (size_t i = 0; i < frameCount; ++i) {
+      mono[i] = (data[i * 2] + data[i * 2 + 1]) * 0.5f;
+    }
+    g_aecReferenceBuffer->write(mono.data(), frameCount);
+  } else if (channels == 1 && bufferCh == 2) {
+    // Mono → Stereo: duplicate to both channels
+    static std::vector<float> stereo;
+    if (stereo.size() < frameCount * 2) stereo.resize(frameCount * 2);
+    for (size_t i = 0; i < frameCount; ++i) {
+      stereo[i * 2] = stereo[i * 2 + 1] = data[i];
+    }
+    g_aecReferenceBuffer->write(stereo.data(), frameCount);
+  } else {
+    // Unsupported channel conversion
+    static int unsupportedWarnCount = 0;
+    if (++unsupportedWarnCount <= 10) {
+      aecLog("[AEC Callback] Unsupported channel conversion: %u → %u\n",
+             channels, bufferCh);
+    }
   }
 }
 
@@ -498,6 +522,61 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_resetBuffer() {
     g_aecReferenceBuffer->reset();
   }
 }
+
+// AEC Mode Control
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setMode(int mode) {
+  if (mFilters) {
+    mFilters->setAecMode(static_cast<AecMode>(mode));
+  }
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_getMode() {
+  if (mFilters) {
+    return static_cast<int>(mFilters->getAecMode());
+  }
+  return 3; // Default to Hybrid
+}
+
+/////////////////////////
+/// Neural Model Control
+/////////////////////////
+
+FFI_PLUGIN_EXPORT int flutter_recorder_neural_loadModel(int modelType,
+                                                        const char *assetBasePath) {
+  if (!mFilters) {
+    return 0; // Failure - filters not initialized
+  }
+
+  bool success = mFilters->loadNeuralModel(
+      static_cast<NeuralModelType>(modelType), std::string(assetBasePath));
+
+  return success ? 1 : 0;
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_neural_getLoadedModel() {
+  if (!mFilters) {
+    return 0; // NONE
+  }
+
+  return static_cast<int>(mFilters->getLoadedNeuralModel());
+}
+
+FFI_PLUGIN_EXPORT void flutter_recorder_neural_setEnabled(int enabled) {
+  if (mFilters) {
+    mFilters->setNeuralEnabled(enabled != 0);
+  }
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_neural_isEnabled() {
+  if (!mFilters) {
+    return 0; // Disabled
+  }
+
+  return mFilters->isNeuralEnabled() ? 1 : 0;
+}
+
+/////////////////////////
+/// AEC CALIBRATION
 
 /////////////////////////
 /// AEC CALIBRATION
@@ -597,7 +676,8 @@ static std::vector<float> g_lastImpulseResponse;
 // Run calibration analysis and store impulse response
 FFI_PLUGIN_EXPORT int flutter_recorder_aec_runCalibrationWithImpulse(
     unsigned int sampleRate, float *outDelayMs, float *outEchoGain,
-    float *outCorrelation, int *outImpulseLength, int64_t *outCalibratedOffset) {
+    float *outCorrelation, int *outImpulseLength,
+    int64_t *outCalibratedOffset) {
   CalibrationResult result = AECCalibration::analyze(sampleRate);
 
   if (outDelayMs)
@@ -783,6 +863,20 @@ FFI_PLUGIN_EXPORT float flutter_recorder_aec_getVssAlpha() {
   return 0.95f; // Default
 }
 
+// Filter length control
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setFilterLength(int length) {
+  if (mFilters) {
+    mFilters->setAecFilterLength(length);
+  }
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_getFilterLength() {
+  if (mFilters) {
+    return mFilters->getAecFilterLength();
+  }
+  return 8192; // Default
+}
+
 // Position-based sync for sample-accurate AEC
 FFI_PLUGIN_EXPORT size_t flutter_recorder_aec_getOutputFrameCount() {
   if (g_aecReferenceBuffer) {
@@ -796,12 +890,14 @@ FFI_PLUGIN_EXPORT size_t flutter_recorder_aec_getCaptureFrameCount() {
 }
 
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_recordCalibrationFrameCounters() {
-  size_t outputFrames = g_aecReferenceBuffer ? g_aecReferenceBuffer->getFramesWritten() : 0;
+  size_t outputFrames =
+      g_aecReferenceBuffer ? g_aecReferenceBuffer->getFramesWritten() : 0;
   size_t captureFrames = capture.getTotalFramesCaptured();
   AECCalibration::recordFrameCountersAtStart(outputFrames, captureFrames);
 }
 
-FFI_PLUGIN_EXPORT void flutter_recorder_aec_setCalibratedOffset(int64_t offset) {
+FFI_PLUGIN_EXPORT void
+flutter_recorder_aec_setCalibratedOffset(int64_t offset) {
   if (mFilters) {
     mFilters->setAecCalibratedOffset(offset);
   }
@@ -818,8 +914,8 @@ FFI_PLUGIN_EXPORT int64_t flutter_recorder_aec_getCalibratedOffset() {
 // These functions capture frame-aligned ref/mic from the AEC processAudio
 // callback for accurate delay estimation
 
-FFI_PLUGIN_EXPORT void flutter_recorder_aec_startAlignedCalibrationCapture(
-    size_t maxSamples) {
+FFI_PLUGIN_EXPORT void
+flutter_recorder_aec_startAlignedCalibrationCapture(size_t maxSamples) {
   if (mFilters) {
     mFilters->startAecCalibrationCapture(maxSamples);
   } else {
@@ -834,28 +930,24 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopAlignedCalibrationCapture() {
 }
 
 FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationAnalysis(
-    unsigned int sampleRate,
-    int *outDelaySamples,
-    float *outDelayMs,
-    float *outGain,
-    float *outCorrelation,
-    int64_t *outCalibratedOffset) {
+    unsigned int sampleRate, int *outDelaySamples, float *outDelayMs,
+    float *outGain, float *outCorrelation, int64_t *outCalibratedOffset) {
 
   if (!mFilters) {
     aecLog("[AEC] Cannot run aligned analysis: filters not initialized\n");
     return 0;
   }
 
-  const std::vector<float>& alignedRef = mFilters->getAecAlignedRef();
-  const std::vector<float>& alignedMic = mFilters->getAecAlignedMic();
+  const std::vector<float> &alignedRef = mFilters->getAecAlignedRef();
+  const std::vector<float> &alignedMic = mFilters->getAecAlignedMic();
 
   if (alignedRef.empty() || alignedMic.empty()) {
     aecLog("[AEC] Cannot run aligned analysis: no captured data\n");
     return 0;
   }
 
-  CalibrationResult result = AECCalibration::analyzeAligned(
-      alignedRef, alignedMic, sampleRate);
+  CalibrationResult result =
+      AECCalibration::analyzeAligned(alignedRef, alignedMic, sampleRate);
 
   *outDelaySamples = result.delaySamples;
   *outDelayMs = result.delayMs;
@@ -876,12 +968,8 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationAnalysis(
 }
 
 FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
-    unsigned int sampleRate,
-    int *outDelaySamples,
-    float *outDelayMs,
-    float *outGain,
-    float *outCorrelation,
-    int *outImpulseLength,
+    unsigned int sampleRate, int *outDelaySamples, float *outDelayMs,
+    float *outGain, float *outCorrelation, int *outImpulseLength,
     int64_t *outCalibratedOffset) {
 
   if (!mFilters) {
@@ -889,16 +977,16 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
     return 0;
   }
 
-  const std::vector<float>& alignedRef = mFilters->getAecAlignedRef();
-  const std::vector<float>& alignedMic = mFilters->getAecAlignedMic();
+  const std::vector<float> &alignedRef = mFilters->getAecAlignedRef();
+  const std::vector<float> &alignedMic = mFilters->getAecAlignedMic();
 
   if (alignedRef.empty() || alignedMic.empty()) {
     aecLog("[AEC] Cannot run aligned analysis: no captured data\n");
     return 0;
   }
 
-  CalibrationResult result = AECCalibration::analyzeAligned(
-      alignedRef, alignedMic, sampleRate);
+  CalibrationResult result =
+      AECCalibration::analyzeAligned(alignedRef, alignedMic, sampleRate);
 
   *outDelaySamples = result.delaySamples;
   *outDelayMs = result.delayMs;
@@ -909,8 +997,9 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
 
   // Store and apply impulse response
   if (result.success && !result.impulseResponse.empty()) {
-    mFilters->setAecImpulseResponse(result.impulseResponse.data(),
-                                     static_cast<int>(result.impulseResponse.size()));
+    mFilters->setAecImpulseResponse(
+        result.impulseResponse.data(),
+        static_cast<int>(result.impulseResponse.size()));
   }
 
   aecLog("[AEC Aligned Calibration] Result: delay=%.1fms gain=%.3f corr=%.3f "
@@ -921,3 +1010,4 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
 
   return result.success ? 1 : 0;
 }
+

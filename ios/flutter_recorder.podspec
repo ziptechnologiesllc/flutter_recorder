@@ -20,6 +20,7 @@ A new Flutter FFI plugin project.
   s.source           = { :path => '.' }
   s.source_files = 'Classes/**/*'
   s.dependency 'Flutter'
+  s.dependency 'TensorFlowLiteC'
   s.platform = :ios, '12.0'
 
   s.pod_target_xcconfig = { 
@@ -30,7 +31,7 @@ A new Flutter FFI plugin project.
     'OTHER_CPLUSPLUSFLAGS' => '-O3 -ffast-math -ffast-math -flto -funroll-loops -pthread',
     'GCC_OPTIMIZATION_LEVEL' => '3',
     # Add audio and threading optimization flags
-    'GCC_PREPROCESSOR_DEFINITIONS' => 'MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1',
+    'GCC_PREPROCESSOR_DEFINITIONS' => 'MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1 USE_TFLITE=1',
     'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/src'
   }
   s.swift_version = '5.0'

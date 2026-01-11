@@ -292,6 +292,30 @@ abstract class RecorderImpl {
   @mustBeOverridden
   void aecResetBuffer();
 
+  /// Set AEC Mode (0=Bypass, 1=Algo, 2=Neural, 3=Hybrid)
+  @mustBeOverridden
+  void aecSetMode(AecMode mode);
+
+  /// Get current AEC Mode
+  @mustBeOverridden
+  AecMode aecGetMode();
+
+  /// Load neural model by type
+  @mustBeOverridden
+  bool aecLoadNeuralModel(NeuralModelType type, String assetBasePath);
+
+  /// Get currently loaded neural model type
+  @mustBeOverridden
+  NeuralModelType aecGetLoadedNeuralModel();
+
+  /// Enable/disable neural post-filter
+  @mustBeOverridden
+  void aecSetNeuralEnabled(bool enabled);
+
+  /// Check if neural post-filter is enabled
+  @mustBeOverridden
+  bool aecIsNeuralEnabled();
+
   // ==================== AEC CALIBRATION ====================
 
   /// Generate calibration audio signal (white noise + sine sweep).
@@ -399,6 +423,16 @@ abstract class RecorderImpl {
   /// Get current VSS-NLMS smoothing factor.
   @mustBeOverridden
   double aecGetVssAlpha();
+
+  // ==================== AEC FILTER LENGTH CONTROL ====================
+
+  /// Set AEC filter length (2048, 4096, 8192 recommended).
+  @mustBeOverridden
+  void aecSetFilterLength(int length);
+
+  /// Get current AEC filter length.
+  @mustBeOverridden
+  int aecGetFilterLength();
 
   // ==================== AEC CALIBRATION LOGGING ====================
 

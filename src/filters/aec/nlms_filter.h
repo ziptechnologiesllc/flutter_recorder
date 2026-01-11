@@ -19,8 +19,8 @@ extern void aecLog(const char *fmt, ...);
  */
 class NLMSFilter {
 public:
-  // Filter length: ~42ms @ 48kHz for room impulse response
-  static constexpr int DEFAULT_FILTER_LENGTH = 2048;
+  // Filter length: ~170ms @ 48kHz for long reverb tails
+  static constexpr int DEFAULT_FILTER_LENGTH = 8192;
 
   NLMSFilter(int filterLength = DEFAULT_FILTER_LENGTH,
              float stepSize = 0.0f,       // Unused, kept for API compatibility
@@ -198,6 +198,30 @@ public:
     std::memset(mRefHistory, 0, mFilterLength * 2 * sizeof(float));
     mHistoryIndex = 0;
     mXNormSq = 0.0f;
+  }
+
+  /**
+   * Resize the filter to a new length.
+   * This reallocates internal buffers and resets state.
+   */
+  void resize(size_t newLength) {
+    if (newLength == static_cast<size_t>(mFilterLength)) {
+      return;
+    }
+
+    // Deallocate old buffers
+    delete[] mCoeffs;
+    delete[] mRefHistory;
+
+    // Allocate new buffers
+    mFilterLength = static_cast<int>(newLength);
+    mCoeffs = new float[mFilterLength]();
+    mRefHistory = new float[mFilterLength * 2]();
+
+    // Reset state
+    mHistoryIndex = 0;
+    mXNormSq = 0.0f;
+    mHasCoeffs = false;
   }
 
 private:

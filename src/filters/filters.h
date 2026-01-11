@@ -3,6 +3,7 @@
 
 #include "../enums.h"
 #include "generic_filter.h"
+#include "aec/neural_post_filter.h"
 
 #include <functional>
 #include <memory>
@@ -57,6 +58,10 @@ public:
   float getAecVssLeakage() const;
   float getAecVssAlpha() const;
 
+  // Filter length control
+  void setAecFilterLength(int length);
+  int getAecFilterLength() const;
+
   // Sample-accurate AEC synchronization
   // Call before processing filters with current capture frame count
   void setAecCaptureFrameCount(size_t captureFrameCount);
@@ -67,8 +72,18 @@ public:
   // Aligned calibration capture (for accurate delay estimation)
   void startAecCalibrationCapture(size_t maxSamples);
   void stopAecCalibrationCapture();
-  const std::vector<float>& getAecAlignedRef() const;
-  const std::vector<float>& getAecAlignedMic() const;
+  const std::vector<float> &getAecAlignedRef() const;
+  const std::vector<float> &getAecAlignedMic() const;
+
+  // AEC Mode Control
+  void setAecMode(AecMode mode);
+  AecMode getAecMode() const;
+
+  // Neural Model Control
+  bool loadNeuralModel(NeuralModelType modelType, const std::string &assetBasePath);
+  NeuralModelType getLoadedNeuralModel() const;
+  void setNeuralEnabled(bool enabled);
+  bool isNeuralEnabled() const;
 
   unsigned int mSamplerate;
   unsigned int mChannels;

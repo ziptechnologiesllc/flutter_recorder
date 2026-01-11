@@ -39,10 +39,23 @@ typedef enum RecorderFilterType {
   adaptiveEchoCancellation
 } FilterType_t;
 
+typedef enum AecMode {
+  aecModeBypass = 0,
+  aecModeAlgo = 1,
+  aecModeNeural = 2,
+  aecModeHybrid = 3
+} AecMode_t;
+
 typedef struct {
   float maxAttenuationDb;
   float correlation;
   float echoReturnLossDb;
+  // Debug display fields
+  int filterLength;         // Current filter length in samples
+  float muMax;              // Configured max step size
+  float muEffective;        // Last effective step size (runtime)
+  float lastErrorDb;        // Last error in dB
+  float instantCorrelation; // Instantaneous correlation metric
 } AecStats;
 
 #endif // ENUMS_H

@@ -62,4 +62,13 @@ android {
     defaultConfig {
         minSdk = 21
     }
+
+    buildFeatures {
+        prefab = true
+    }
+}
+
+dependencies {
+    // Google Play Services TFLite - provides Prefab support for native linking
+    implementation "com.google.android.gms:play-services-tflite-java:16.4.0"
 }

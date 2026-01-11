@@ -19,7 +19,7 @@
 static std::string getTempDir() {
 #ifdef __APPLE__
 #if TARGET_OS_MAC && !TARGET_OS_IPHONE
-  NSString* tempDir = NSTemporaryDirectory();
+  NSString *tempDir = NSTemporaryDirectory();
   if (tempDir) {
     return std::string([tempDir UTF8String]);
   }
@@ -182,10 +182,13 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
                                             unsigned int channels) {
   static int callCount = 0;
   callCount++;
-  // Log sparingly: first 5 calls, then every 500 calls (~5 seconds at typical buffer sizes)
+  // Log sparingly: first 5 calls, then every 500 calls (~5 seconds at typical
+  // buffer sizes)
   if (callCount <= 5 || callCount % 500 == 0) {
-    aecLog("[AEC processAudio] call #%d, frames=%u ch=%u enabled=%.1f refBuf=%p\n",
-           callCount, frameCount, channels, mValues[Enabled], g_aecReferenceBuffer);
+    aecLog(
+        "[AEC processAudio] call #%d, frames=%u ch=%u enabled=%.1f refBuf=%p\n",
+        callCount, frameCount, channels, mValues[Enabled],
+        g_aecReferenceBuffer);
   }
 
   T *input = static_cast<T *>(pInput);
@@ -212,8 +215,8 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
 
   if (mUsePositionSync && mCalibratedOffset != 0) {
     // NEW: Position-based sync using frame counters
-    // Calculate the output frame position that corresponds to this capture block
-    // captureFrame - offset = outputFrame
+    // Calculate the output frame position that corresponds to this capture
+    // block captureFrame - offset = outputFrame
     int64_t startOutputFrame =
         static_cast<int64_t>(mCaptureFrameCount) - mCalibratedOffset;
 
@@ -223,9 +226,10 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
 
       static int posReadDebugCount = 0;
       if (++posReadDebugCount % 500 == 0) {
-        aecLog("[AEC PosSync] capFrame=%zu offset=%lld outFrame=%lld read=%zu\n",
-               mCaptureFrameCount, (long long)mCalibratedOffset,
-               (long long)startOutputFrame, framesRead);
+        aecLog(
+            "[AEC PosSync] capFrame=%zu offset=%lld outFrame=%lld read=%zu\n",
+            mCaptureFrameCount, (long long)mCalibratedOffset,
+            (long long)startOutputFrame, framesRead);
       }
     }
   } else {
@@ -251,8 +255,8 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   }
 
   // DEBUG: Dump ref and mic to files for alignment verification
-  static FILE* refFile = nullptr;
-  static FILE* micFile = nullptr;
+  static FILE *refFile = nullptr;
+  static FILE *micFile = nullptr;
   static int dumpFrames = 0;
   static const int MAX_DUMP_FRAMES = 48000 * 5; // 5 seconds
   static std::string tempDir;
@@ -274,7 +278,8 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   if (refFile && micFile && dumpFrames < MAX_DUMP_FRAMES) {
     // Write channel 0 only (mono) for easier analysis
     for (ma_uint32 frame = 0; frame < frameCount; ++frame) {
-      float micSample = normalizeSample(static_cast<T*>(pInput)[frame * channels]);
+      float micSample =
+          normalizeSample(static_cast<T *>(pInput)[frame * channels]);
       float refSample = mRefBuffer[frame * channels];
       fwrite(&refSample, sizeof(float), 1, refFile);
       fwrite(&micSample, sizeof(float), 1, micFile);
@@ -292,10 +297,13 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
 
   // Calibration capture: save frame-aligned ref+mic for delay estimation
   // These are perfectly aligned since they come from the same callback
-  if (mCalibrationCaptureEnabled && mAlignedRefCapture.size() < mCalibrationMaxSamples) {
+  if (mCalibrationCaptureEnabled &&
+      mAlignedRefCapture.size() < mCalibrationMaxSamples) {
     for (ma_uint32 frame = 0; frame < frameCount; ++frame) {
-      if (mAlignedRefCapture.size() >= mCalibrationMaxSamples) break;
-      float micSample = normalizeSample(static_cast<T*>(pInput)[frame * channels]);
+      if (mAlignedRefCapture.size() >= mCalibrationMaxSamples)
+        break;
+      float micSample =
+          normalizeSample(static_cast<T *>(pInput)[frame * channels]);
       float refSample = mRefBuffer[frame * channels];
       mAlignedRefCapture.push_back(refSample);
       mAlignedMicCapture.push_back(micSample);
@@ -304,8 +312,8 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     // Log progress periodically
     static int calibCapLogCount = 0;
     if (++calibCapLogCount % 100 == 0) {
-      aecLog("[AEC CalibCapture] %zu/%zu samples\n",
-             mAlignedRefCapture.size(), mCalibrationMaxSamples);
+      aecLog("[AEC CalibCapture] %zu/%zu samples\n", mAlignedRefCapture.size(),
+             mCalibrationMaxSamples);
     }
   }
 
@@ -333,9 +341,17 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       // VSS-NLMS Adaptive Echo Cancellation (New Path):
       // 1. Estimate echo using adaptive filter
       // 2. Subtract from mic signal (happens inside processSample)
-      float error = mVssFilters[ch]->processSample(refSample, micSample);
+      float error = micSample; // Default to input (Bypass/Neural start)
 
-      // Store stage 1 result in float buffer for stage 2
+      if (mAecMode == aecModeAlgo || mAecMode == aecModeHybrid) {
+        error = mVssFilters[ch]->processSample(refSample, micSample);
+      }
+
+      // BYPASS VSS-NLMS (Neural Only Mode)
+      // We pass the raw mic signal (normalized) directly to the neural stage.
+      // The neural model will handle both linear alignment/reverb and
+      // non-linearities.
+
       mLinearOutputBuffer[idx] = error;
 
       // Capture samples for AEC test (channel 0 only to avoid duplicates)
@@ -349,8 +365,10 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   // This stage runs on the output of the NLMS filters to remove
   // residual echo and non-linearities.
   // We reuse mRefBuffer for the reference signal.
-  mNeuralFilter->process(mLinearOutputBuffer.data(), mRefBuffer.data(),
-                         mLinearOutputBuffer.data(), frameCount);
+  if (mAecMode == aecModeNeural || mAecMode == aecModeHybrid) {
+    mNeuralFilter->process(mLinearOutputBuffer.data(), mRefBuffer.data(),
+                           mLinearOutputBuffer.data(), frameCount);
+  }
 
   // Write final results back to the original input buffer
   for (unsigned int i = 0; i < totalSamples; ++i) {
@@ -391,10 +409,13 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
 
     float currentDelayMs = mValues[DelayMs];
 
-    aecLog("[AEC] delay=%.1fms ref=%.0fdB mic=%.0fdB ŷ=%.0fdB corr=%.2f "
-           "coef=%.4f | %s\n",
-           currentDelayMs, refDb, micDb, echoEstDb, correlation, coeffEnergy,
-           status);
+    static int aecLogCount = 0;
+    if (aecLogCount++ % 500 == 0) {
+      aecLog("[AEC] delay=%.1fms ref=%.0fdB mic=%.0fdB ŷ=%.0fdB corr=%.2f "
+             "coef=%.4f | %s\n",
+             currentDelayMs, refDb, micDb, echoEstDb, correlation, coeffEnergy,
+             status);
+    }
 
     // Reset accumulators
     totalRefEnergy = 0.0f;
@@ -548,7 +569,29 @@ void AdaptiveEchoCancellation::updateStats(float ref, float mic, float out) {
   mCurrentStats.correlation = 0.0f;
 }
 
-AecStats AdaptiveEchoCancellation::getStats() { return mCurrentStats; }
+AecStats AdaptiveEchoCancellation::getStats() {
+  // Populate debug fields from filter state
+  if (!mVssFilters.empty()) {
+    mCurrentStats.filterLength =
+        static_cast<int>(mVssFilters[0]->getFilterLength());
+    mCurrentStats.muMax = mVssFilters[0]->getMuMax();
+    mCurrentStats.muEffective = mVssFilters[0]->getLastStepSize();
+    mCurrentStats.instantCorrelation = mVssFilters[0]->getLastCorrelation();
+
+    // Convert last error to dB
+    float lastErr = mVssFilters[0]->getLastError();
+    mCurrentStats.lastErrorDb = std::abs(lastErr) > 1e-10f
+                                    ? 20.0f * std::log10(std::abs(lastErr))
+                                    : -100.0f;
+  } else {
+    mCurrentStats.filterLength = 0;
+    mCurrentStats.muMax = 0.0f;
+    mCurrentStats.muEffective = 0.0f;
+    mCurrentStats.lastErrorDb = -100.0f;
+    mCurrentStats.instantCorrelation = 0.0f;
+  }
+  return mCurrentStats;
+}
 
 // VSS-NLMS parameter control
 void AdaptiveEchoCancellation::setVssMuMax(float mu) {
@@ -586,13 +629,40 @@ float AdaptiveEchoCancellation::getVssAlpha() const {
   return mVssFilters.empty() ? 0.95f : mVssFilters[0]->getAlpha();
 }
 
+// Filter length control
+void AdaptiveEchoCancellation::setFilterLength(int length) {
+  // Validate power of 2 and reasonable range
+  if (length < 256 || length > 16384) {
+    aecLog("[AEC] Invalid filter length %d (must be 256-16384)\n", length);
+    return;
+  }
+
+  // Resize all VSS filters
+  for (auto &filter : mVssFilters) {
+    filter->resize(static_cast<size_t>(length));
+  }
+  // Also resize regular NLMS filters for consistency
+  for (auto &filter : mFilters) {
+    filter->resize(static_cast<size_t>(length));
+  }
+
+  aecLog("[AEC] Set filter length=%d for %zu filters\n", length,
+         mVssFilters.size());
+}
+
+int AdaptiveEchoCancellation::getFilterLength() const {
+  return mVssFilters.empty()
+             ? 0
+             : static_cast<int>(mVssFilters[0]->getFilterLength());
+}
+
 void AdaptiveEchoCancellation::setCaptureFrameCount(size_t captureFrameCount) {
   mCaptureFrameCount = captureFrameCount;
 }
 
 void AdaptiveEchoCancellation::setCalibratedOffset(int64_t offset) {
   mCalibratedOffset = offset;
-  mUsePositionSync = true;  // Enable position sync when offset is set
+  mUsePositionSync = true; // Enable position sync when offset is set
   aecLog("[AEC] Set calibrated offset=%lld, position sync enabled\n",
          (long long)offset);
 }
@@ -617,4 +687,25 @@ void AdaptiveEchoCancellation::stopCalibrationCapture() {
 bool AdaptiveEchoCancellation::isCalibrationCaptureComplete() const {
   return !mCalibrationCaptureEnabled &&
          mAlignedRefCapture.size() >= mCalibrationMaxSamples;
+}
+
+void AdaptiveEchoCancellation::setAecMode(AecMode mode) {
+  mAecMode = mode;
+  aecLog("[AEC] Mode set to %d (0=Bypass, 1=Algo, 2=Neural, 3=Hybrid)\n",
+         static_cast<int>(mode));
+
+  // Update neural filter state
+  bool neuralEnabled = (mode == aecModeNeural || mode == aecModeHybrid);
+  if (mNeuralFilter) {
+    mNeuralFilter->setEnabled(neuralEnabled);
+  }
+}
+
+AecMode AdaptiveEchoCancellation::getAecMode() const { return mAecMode; }
+
+bool AdaptiveEchoCancellation::loadNeuralModel(const std::string &modelPath) {
+  if (mNeuralFilter) {
+    return mNeuralFilter->loadModel(modelPath);
+  }
+  return false;
 }

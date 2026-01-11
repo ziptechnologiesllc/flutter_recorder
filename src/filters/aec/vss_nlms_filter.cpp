@@ -74,8 +74,25 @@ void VssNlmsFilter::reset() {
   mLastStep = 0.0f;
 }
 
+void VssNlmsFilter::resize(size_t newLength) {
+  // Round up to nearest multiple of 8 for SIMD
+  if (newLength % 8 != 0) {
+    newLength = ((newLength + 7) / 8) * 8;
+  }
+
+  filter_length = newLength;
+
+  // Resize and reinitialize vectors
+  weights.resize(filter_length);
+  x_history.resize(filter_length);
+
+  // Reset all state
+  reset();
+}
+
 void VssNlmsFilter::setStepSize(float mu) {
-  mu_max = std::max(0.0f, std::min(mu, 1.0f));
+  mu_max = std::max(
+      0.0f, std::min(mu, 2.0f)); // Allow up to 2.0 for aggressive tuning
 }
 
 void VssNlmsFilter::setSmoothingFactor(float a) {
@@ -176,7 +193,7 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   // 3. Calculate Error (Clean Signal)
   float e = mic_input - y_est;
   mLastE = e;
-  mLastYEst = y_est;  // Store for diagnostics
+  mLastYEst = y_est; // Store for diagnostics
 
   // 4. Update VSS Statistics
   // Is the error correlated with the reference?
@@ -213,7 +230,8 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   float final_step = step * e; // Pre-multiply error
 
   static int vssDebugCount = 0;
-  if (++vssDebugCount % 48000 == 0) { // Every ~1s at 48kHz
+  static int vssLogCount = 0;
+  if (vssLogCount++ % 500 == 0) {
     aecLog("[VSS_RT] mu_eff=%.6f p_est=%.6f var_e=%.6f var_x=%.6f corr=%.6f\n",
            mu_eff, p_est, var_e, var_x, correlation_metric);
   }
@@ -293,7 +311,7 @@ void VssNlmsFilter::warmStartWeights(const std::vector<float> &ref_signal,
 
   // Aggressive adaptation for warm start
   mu_max = 1.0f;
-  alpha = 0.9f; // Fast smoothing
+  alpha = 0.5f; // Fast smoothing for warm start
 
   aecLog(
       "[VSS_DEBUG] WarmStart: Set mu_max=%.2f alpha=%.2f. Starting loop...\n",

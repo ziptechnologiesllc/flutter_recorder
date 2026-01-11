@@ -118,6 +118,30 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_destroyReferenceBuffer();
 FFI_PLUGIN_EXPORT void *flutter_recorder_aec_getOutputCallback();
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_resetBuffer();
 
+// AEC Mode Control (A/B Testing)
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setMode(int mode);
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_getMode();
+
+/////////////////////////
+/// Neural Model Control
+/////////////////////////
+// Load neural model by type
+// modelType: 0=NONE, 1=DTLN_AEC_48K, 2=LSTM_V1
+// assetBasePath: Platform-specific path to assets directory
+// Returns: 1 if successful, 0 if failed
+FFI_PLUGIN_EXPORT int flutter_recorder_neural_loadModel(int modelType,
+                                                        const char *assetBasePath);
+
+// Get currently loaded neural model type
+// Returns: 0=NONE, 1=DTLN_AEC_48K, 2=LSTM_V1
+FFI_PLUGIN_EXPORT int flutter_recorder_neural_getLoadedModel();
+
+// Enable/disable neural post-filter
+FFI_PLUGIN_EXPORT void flutter_recorder_neural_setEnabled(int enabled);
+
+// Check if neural post-filter is enabled
+FFI_PLUGIN_EXPORT int flutter_recorder_neural_isEnabled();
+
 /////////////////////////
 /// AEC Calibration
 /////////////////////////
@@ -127,10 +151,9 @@ FFI_PLUGIN_EXPORT void
 flutter_recorder_aec_startCalibrationCapture(size_t maxSamples);
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopCalibrationCapture();
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_captureForAnalysis();
-FFI_PLUGIN_EXPORT int
-flutter_recorder_aec_runCalibrationAnalysis(unsigned int sampleRate,
-                                            float *outDelayMs, float *outEchoGain,
-                                            float *outCorrelation);
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_runCalibrationAnalysis(
+    unsigned int sampleRate, float *outDelayMs, float *outEchoGain,
+    float *outCorrelation);
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_resetCalibration();
 
 // Run calibration analysis with impulse response computation
@@ -186,17 +209,15 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopTestCapture();
 
 // Run test analysis and return metrics
 FFI_PLUGIN_EXPORT int flutter_recorder_aec_runTest(
-    unsigned int sampleRate,
-    float *outCancellationDb,
-    float *outCorrelationBefore,
-    float *outCorrelationAfter,
-    int *outPassed,
-    float *outMicEnergyDb,
-    float *outCancelledEnergyDb);
+    unsigned int sampleRate, float *outCancellationDb,
+    float *outCorrelationBefore, float *outCorrelationAfter, int *outPassed,
+    float *outMicEnergyDb, float *outCancelledEnergyDb);
 
 // Get captured test signals for visualization
-FFI_PLUGIN_EXPORT int flutter_recorder_aec_getTestMicSignal(float *dest, int maxLength);
-FFI_PLUGIN_EXPORT int flutter_recorder_aec_getTestCancelledSignal(float *dest, int maxLength);
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_getTestMicSignal(float *dest,
+                                                            int maxLength);
+FFI_PLUGIN_EXPORT int
+flutter_recorder_aec_getTestCancelledSignal(float *dest, int maxLength);
 
 // Reset test data
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_resetTest();
@@ -212,6 +233,10 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_setVssAlpha(float alpha);
 FFI_PLUGIN_EXPORT float flutter_recorder_aec_getVssMuMax();
 FFI_PLUGIN_EXPORT float flutter_recorder_aec_getVssLeakage();
 FFI_PLUGIN_EXPORT float flutter_recorder_aec_getVssAlpha();
+
+// Filter length control (2048, 4096, 8192 recommended)
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setFilterLength(int length);
+FFI_PLUGIN_EXPORT int flutter_recorder_aec_getFilterLength();
 
 // Position-based sync for sample-accurate AEC
 // Get total frames written to reference buffer (output side)
@@ -233,15 +258,12 @@ FFI_PLUGIN_EXPORT void flutter_recorder_ios_force_speaker_output(bool enabled);
 /////////////////////////
 /// Aligned Calibration Capture (frame-aligned signals from processAudio)
 /////////////////////////
-FFI_PLUGIN_EXPORT void flutter_recorder_aec_startAlignedCalibrationCapture(size_t maxSamples);
+FFI_PLUGIN_EXPORT void
+flutter_recorder_aec_startAlignedCalibrationCapture(size_t maxSamples);
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopAlignedCalibrationCapture();
 FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
-    unsigned int sampleRate,
-    int *outDelaySamples,
-    float *outDelayMs,
-    float *outGain,
-    float *outCorrelation,
-    int *outImpulseLength,
+    unsigned int sampleRate, int *outDelaySamples, float *outDelayMs,
+    float *outGain, float *outCorrelation, int *outImpulseLength,
     int64_t *outCalibratedOffset);
 
 #ifdef __cplusplus
