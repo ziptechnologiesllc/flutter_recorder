@@ -31,7 +31,7 @@ flutter_recorder_freeListCaptureDevices(char **devicesName, int **deviceId,
 
 FFI_PLUGIN_EXPORT enum CaptureErrors
 flutter_recorder_init(int deviceID, int pcmFormat, unsigned int sampleRate,
-                      unsigned int channels);
+                      unsigned int channels, int captureOnly);
 
 FFI_PLUGIN_EXPORT void flutter_recorder_deinit();
 

@@ -449,12 +449,18 @@ CalibrationResult AECCalibration::analyzeAligned(
   aecLog("[AEC Calibration] Aligned Result: delay=%.2fms gain=%.3f corr=%.4f\n",
          result.delayMs, result.echoGain, result.correlation);
 
-  // The calibrated offset for position-based sync is simply the estimated delay
-  // since the aligned signals are already synchronized at frame level
-  result.calibratedOffset = result.delaySamples;
+  // The calibrated offset for position-based sync must include BOTH:
+  // 1. The frame counter difference between capture and output devices (counterDiff)
+  // 2. The acoustic delay from speaker to microphone (delaySamples)
+  // Formula: captureFrame - calibratedOffset = outputFrame
+  // Note: The aligned signals are frame-aligned WITHIN the AEC callback, but the
+  // capture device and output device frame COUNTERS are independent and may differ.
+  int64_t counterDiff = static_cast<int64_t>(sCaptureFramesAtStart) -
+                        static_cast<int64_t>(sOutputFramesAtStart);
+  result.calibratedOffset = counterDiff + result.delaySamples;
 
-  aecLog("[AEC Calibration] Aligned calibratedOffset=%lld samples\n",
-         (long long)result.calibratedOffset);
+  aecLog("[AEC Calibration] Aligned calibratedOffset: counterDiff=%lld + acoustic=%d = %lld samples\n",
+         (long long)counterDiff, result.delaySamples, (long long)result.calibratedOffset);
 
   return result;
 }

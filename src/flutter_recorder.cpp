@@ -183,14 +183,15 @@ flutter_recorder_freeListCaptureDevices(char **devicesName, int **deviceId,
 
 FFI_PLUGIN_EXPORT enum CaptureErrors
 flutter_recorder_init(int deviceID, int pcmFormat, unsigned int sampleRate,
-                      unsigned int channels) {
+                      unsigned int channels, int captureOnly) {
   if (!mFilters || mFilters.get()->mSamplerate != sampleRate ||
       mFilters.get()->mChannels != channels) {
     mFilters.reset();
     mFilters = std::make_unique<Filters>(sampleRate, channels);
   }
   CaptureErrors res = capture.init(mFilters.get(), deviceID,
-                                   (PCMFormat)pcmFormat, sampleRate, channels);
+                                   (PCMFormat)pcmFormat, sampleRate, channels,
+                                   captureOnly != 0);
 
   return res;
 }

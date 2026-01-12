@@ -106,6 +106,11 @@ abstract class RecorderImpl {
 
   /// Initialize input device with [deviceID].
   ///
+  /// [captureOnly] - If true, use capture-only mode (no playback output).
+  /// Use this when SoLoud has its own playback device to avoid two competing
+  /// playback streams. If false, use duplex mode for slave mode where the
+  /// recorder drives SoLoud's output through its callback.
+  ///
   /// Thows [RecorderInitializeFailedException] if something goes wrong, ie. no
   /// device found with [deviceID] id.
   @mustBeOverridden
@@ -115,6 +120,7 @@ abstract class RecorderImpl {
     required PCMFormat format,
     required int sampleRate,
     required RecorderChannels channels,
+    bool captureOnly = false,
   }) {
     this.deviceID = deviceID;
     this.format = format;

@@ -7,6 +7,7 @@
 #include "miniaudio.h"
 
 #include <atomic>
+#include <mutex>
 #include <vector>
 #include <string>
 #include "filters/filters.h"
@@ -36,13 +37,17 @@ public:
     /// @param pcmFormat the PCM format
     /// @param sampleRate the sample rate
     /// @param channels the number of channels
+    /// @param captureOnly if true, use capture-only mode (no playback).
+    ///        Use this when SoLoud has its own playback device.
+    ///        If false, use duplex mode for slave mode where recorder drives output.
     /// @return `captureNoError` if no error or else `captureInitFailed`
     CaptureErrors init(
         Filters *filters,
         int deviceID,
         PCMFormat pcmFormat,
         unsigned int sampleRate,
-        unsigned int channels);
+        unsigned int channels,
+        bool captureOnly = false);
 
     /// @brief Must be called when there is no more need of the capture or when closing the app
     void dispose();

@@ -312,6 +312,10 @@ interface class Recorder {
   /// [format] PCM format. Default to [PCMFormat.s16le].
   /// [sampleRate] sample rate in Hz. Default to 22050.
   /// [channels] number of channels. Default to [RecorderChannels.mono].
+  /// [captureOnly] If true, use capture-only mode (no playback output).
+  /// Use this when SoLoud has its own playback device to avoid two competing
+  /// playback streams causing audio quality issues. If false (default), use
+  /// duplex mode for slave mode where the recorder drives SoLoud's output.
   ///
   /// Thows [RecorderInitializeFailedException] if something goes wrong, ie. no
   /// device found with [deviceID] id.
@@ -320,6 +324,7 @@ interface class Recorder {
     PCMFormat format = PCMFormat.s16le,
     int sampleRate = 22050,
     RecorderChannels channels = RecorderChannels.mono,
+    bool captureOnly = false,
   }) async {
     await _impl.setDartEventCallbacks();
     await _impl.setAecStatsCallback();
@@ -343,6 +348,7 @@ interface class Recorder {
       format: format,
       sampleRate: sampleRate,
       channels: channels,
+      captureOnly: captureOnly,
     );
     _recorderFormat = format;
     _isInitialized = true;

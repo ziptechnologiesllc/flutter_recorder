@@ -1,5 +1,7 @@
 #include "capture.h"
 #include "circular_buffer.h"
+#include "soloud_slave_bridge.h"
+#include "filters/aec/reference_buffer.h"
 
 #include "fft/soloud_fft.h"
 #include <atomic>
@@ -178,9 +180,68 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   // Process the captured audio data as needed.
   float *captured = (float *)(pInput); // Assuming float format
   Capture *userData = (Capture *)pDevice->pUserData;
+  int playbackChannels = userData->deviceConfig.playback.channels;
 
-  // NATIVE MONITORING: Direct passthrough input -> output (ZERO LATENCY!)
-  if (userData->monitoringEnabled && pOutput != nullptr && pInput != nullptr) {
+  // =========================================================================
+  // SLAVE MODE: SoLoud output driven by this callback (for AEC clock sync)
+  // =========================================================================
+  // In slave mode, we call SoLoud's mix function directly instead of SoLoud
+  // running its own audio device. This ensures perfect clock synchronization
+  // between capture and playback, fixing AEC drift issues on Linux.
+  if (soloud_isSlaveMode() && g_soloudSlaveMixCallback != nullptr &&
+      pOutput != nullptr) {
+    // Get SoLoud's mixed output directly into pOutput
+    g_soloudSlaveMixCallback((float *)pOutput, frameCount, playbackChannels);
+
+    // Write to AEC reference buffer IN THE SAME CALLBACK - guarantees sync!
+    // This is the whole point of slave mode: one callback, one clock.
+    if (g_aecReferenceBuffer != nullptr) {
+      g_aecReferenceBuffer->write((const float *)pOutput, frameCount);
+
+      // Debug logging (sparse to avoid spam)
+      static int slaveLogCount = 0;
+      if (slaveLogCount++ < 10 || slaveLogCount % 1000 == 0) {
+        aecLog("[Capture Slave] Wrote %u frames to AEC ref buffer, total=%zu\n",
+               frameCount, g_aecReferenceBuffer->getFramesWritten());
+      }
+    }
+
+    // If monitoring is enabled, ADD the captured input to the SoLoud output
+    // (This allows hearing yourself while SoLoud plays)
+    if (userData->monitoringEnabled && pInput != nullptr) {
+      float *outputFloat = (float *)pOutput;
+      float *inputFloat = (float *)pInput;
+      int captureChannels = userData->deviceConfig.capture.channels;
+
+      // Simple mix: add monitoring signal on top of SoLoud output
+      // Scale down monitoring to prevent clipping when both are active
+      float monitorGain = 0.8f;
+
+      if (captureChannels == playbackChannels) {
+        // Same channel count - direct mix
+        for (ma_uint32 i = 0; i < frameCount * playbackChannels; i++) {
+          outputFloat[i] += inputFloat[i] * monitorGain;
+        }
+      } else if (captureChannels == 1 && playbackChannels == 2) {
+        // Mono capture to stereo output
+        for (ma_uint32 i = 0; i < frameCount; i++) {
+          outputFloat[i * 2] += inputFloat[i] * monitorGain;
+          outputFloat[i * 2 + 1] += inputFloat[i] * monitorGain;
+        }
+      } else if (captureChannels == 2 && playbackChannels == 1) {
+        // Stereo capture to mono output
+        for (ma_uint32 i = 0; i < frameCount; i++) {
+          outputFloat[i] += (inputFloat[i * 2] + inputFloat[i * 2 + 1]) * 0.5f *
+                            monitorGain;
+        }
+      }
+    }
+  }
+  // =========================================================================
+  // NON-SLAVE MODE: Original monitoring passthrough (if not in slave mode)
+  // =========================================================================
+  else if (userData->monitoringEnabled && pOutput != nullptr &&
+           pInput != nullptr) {
     float *inputFloat = (float *)pInput;
     float *outputFloat = (float *)pOutput;
     int channels = userData->deviceConfig.capture.channels;
@@ -463,10 +524,11 @@ std::vector<CaptureDevice> Capture::listCaptureDevices() {
 }
 
 CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
-                            unsigned int sampleRate, unsigned int channels) {
+                            unsigned int sampleRate, unsigned int channels,
+                            bool captureOnly) {
   printf("[Capture::init] Starting init: deviceID=%d, sampleRate=%u, "
-         "channels=%u, mInited=%d\n",
-         deviceID, sampleRate, channels, mInited);
+         "channels=%u, captureOnly=%d, mInited=%d\n",
+         deviceID, sampleRate, channels, captureOnly, mInited);
   fflush(stdout);
 
   // Guard against double initialization
@@ -518,9 +580,19 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
     fflush(stdout);
   }
 
-  // Use duplex mode (capture + playback) to support monitoring
-  // This allows direct audio passthrough from input to output with zero latency
-  deviceConfig = ma_device_config_init(ma_device_type_duplex);
+  // Choose device mode based on captureOnly parameter:
+  // - captureOnly=true: Use capture-only mode when SoLoud has its own playback device
+  //   This prevents two playback devices from competing (which causes grainy audio)
+  // - captureOnly=false: Use duplex mode for slave mode where recorder drives SoLoud output
+  if (captureOnly) {
+    printf("[Capture::init] Using CAPTURE-ONLY mode (SoLoud has own playback)\n");
+    fflush(stdout);
+    deviceConfig = ma_device_config_init(ma_device_type_capture);
+  } else {
+    printf("[Capture::init] Using DUPLEX mode (slave mode for AEC)\n");
+    fflush(stdout);
+    deviceConfig = ma_device_config_init(ma_device_type_duplex);
+  }
   deviceConfig.periodSizeInFrames = BUFFER_SIZE;
 
 #ifdef _IS_WIN_

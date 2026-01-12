@@ -249,12 +249,14 @@ class RecorderFfi extends RecorderImpl {
     required PCMFormat format,
     required int sampleRate,
     required RecorderChannels channels,
+    bool captureOnly = false,
   }) {
     final error = _bindings.flutter_recorder_init(
       deviceID,
       format.value,
       sampleRate,
       channels.count,
+      captureOnly ? 1 : 0,
     );
     if (error != bindings_gen.CaptureErrors.captureNoError) {
       throw RecorderCppException.fromRecorderError(_toLocalCaptureError(error));
@@ -264,6 +266,7 @@ class RecorderFfi extends RecorderImpl {
       format: format,
       sampleRate: sampleRate,
       channels: channels,
+      captureOnly: captureOnly,
     );
   }
 

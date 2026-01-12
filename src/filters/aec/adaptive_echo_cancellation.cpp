@@ -224,6 +224,39 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       framesRead = g_aecReferenceBuffer->readFramesAtPosition(
           mRefBuffer.data(), frameCount, static_cast<size_t>(startOutputFrame));
 
+      // DRIFT COMPENSATION: If read failed due to buffer overrun, adjust offset
+      // This handles clock drift between capture and output devices
+      if (framesRead == 0 && g_aecReferenceBuffer != nullptr) {
+        size_t totalWritten = g_aecReferenceBuffer->getFramesWritten();
+        size_t bufferSize = g_aecReferenceBuffer->sizeInFrames();
+
+        // Calculate the oldest available frame
+        size_t oldestAvailable = (totalWritten > bufferSize) ?
+                                  (totalWritten - bufferSize + frameCount) : 0;
+
+        // If we're behind, adjust offset to catch up
+        if (static_cast<size_t>(startOutputFrame) < oldestAvailable) {
+          // Calculate new offset so we read from oldest available data
+          int64_t newOffset = static_cast<int64_t>(mCaptureFrameCount) -
+                              static_cast<int64_t>(oldestAvailable);
+
+          static int driftWarnCount = 0;
+          if (++driftWarnCount % 100 == 1) {
+            aecLog("[AEC DriftComp] Clock drift detected! Adjusting offset: %lld -> %lld "
+                   "(drift=%lld frames)\n",
+                   (long long)mCalibratedOffset, (long long)newOffset,
+                   (long long)(newOffset - mCalibratedOffset));
+          }
+
+          mCalibratedOffset = newOffset;
+          startOutputFrame = static_cast<int64_t>(mCaptureFrameCount) - mCalibratedOffset;
+
+          // Try reading again with adjusted offset
+          framesRead = g_aecReferenceBuffer->readFramesAtPosition(
+              mRefBuffer.data(), frameCount, static_cast<size_t>(startOutputFrame));
+        }
+      }
+
       static int posReadDebugCount = 0;
       if (++posReadDebugCount % 500 == 0) {
         aecLog(

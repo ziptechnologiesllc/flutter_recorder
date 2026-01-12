@@ -15,6 +15,7 @@ add_library(flutter_recorder SHARED
   "flutter_recorder.cpp"
   "analyzer.cpp"
   "capture.cpp"
+  "soloud_slave_bridge.cpp"
   "fft/soloud_fft.cpp"
   "filters/filters.cpp"
   "filters/autogain.cpp"
