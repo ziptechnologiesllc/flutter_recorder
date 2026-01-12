@@ -1,6 +1,7 @@
 #include "calibration.h"
 #include "delay_estimator.h"
 #include "vss_nlms_filter.h"
+#include "../../soloud_slave_bridge.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -143,29 +144,43 @@ CalibrationResult AECCalibration::analyze(unsigned int sampleRate) {
   aecLog("[AEC Calibration] Warm Start Analysis (Chirp method)...\n");
 
   // Step 0: Pre-align signals using frame counters
-  // The ref and mic signals are captured by independent threads with no
-  // synchronization. Use the recorded frame counters to align them.
-  int64_t counterDiff = static_cast<int64_t>(sCaptureFramesAtStart) -
-                        static_cast<int64_t>(sOutputFramesAtStart);
-
-  aecLog("[AEC Calibration] Frame counter diff: capture=%zu - output=%zu = %lld\n",
-         sCaptureFramesAtStart, sOutputFramesAtStart, (long long)counterDiff);
-
+  // In SLAVE MODE: ref and mic are captured in the same audio callback,
+  // so they're already perfectly aligned - skip pre-alignment.
+  // In NON-SLAVE MODE: The ref and mic signals are captured by independent
+  // threads with no synchronization. Use the recorded frame counters to align.
   std::vector<float> preAlignedRef, preAlignedMic;
-  if (counterDiff >= 0) {
-    // Capture started after output -> mic is "ahead" in time
-    // Trim mic start to align with ref start
-    size_t offset = std::min(static_cast<size_t>(counterDiff), sMicCapture.size());
-    preAlignedMic.assign(sMicCapture.begin() + offset, sMicCapture.end());
+  bool inSlaveMode = soloud_isSlaveMode();
+  int64_t counterDiff = 0;  // Used for calibratedOffset calculation at end
+
+  if (inSlaveMode) {
+    // Slave mode: signals are already aligned from the same callback
+    // counterDiff stays 0 - no timing offset between ref and mic
     preAlignedRef = sRefCapture;
-    aecLog("[AEC Calibration] Pre-aligned: trimmed %zu samples from mic start\n", offset);
-  } else {
-    // Output started after capture -> ref is "ahead" in time
-    // Trim ref start to align with mic start
-    size_t offset = std::min(static_cast<size_t>(-counterDiff), sRefCapture.size());
-    preAlignedRef.assign(sRefCapture.begin() + offset, sRefCapture.end());
     preAlignedMic = sMicCapture;
-    aecLog("[AEC Calibration] Pre-aligned: trimmed %zu samples from ref start\n", offset);
+    aecLog("[AEC Calibration] Slave mode: signals already aligned (same callback)\n");
+  } else {
+    // Non-slave mode: need to pre-align using frame counters
+    counterDiff = static_cast<int64_t>(sCaptureFramesAtStart) -
+                  static_cast<int64_t>(sOutputFramesAtStart);
+
+    aecLog("[AEC Calibration] Frame counter diff: capture=%zu - output=%zu = %lld\n",
+           sCaptureFramesAtStart, sOutputFramesAtStart, (long long)counterDiff);
+
+    if (counterDiff >= 0) {
+      // Capture started after output -> mic is "ahead" in time
+      // Trim mic start to align with ref start
+      size_t offset = std::min(static_cast<size_t>(counterDiff), sMicCapture.size());
+      preAlignedMic.assign(sMicCapture.begin() + offset, sMicCapture.end());
+      preAlignedRef = sRefCapture;
+      aecLog("[AEC Calibration] Pre-aligned: trimmed %zu samples from mic start\n", offset);
+    } else {
+      // Output started after capture -> ref is "ahead" in time
+      // Trim ref start to align with mic start
+      size_t offset = std::min(static_cast<size_t>(-counterDiff), sRefCapture.size());
+      preAlignedRef.assign(sRefCapture.begin() + offset, sRefCapture.end());
+      preAlignedMic = sMicCapture;
+      aecLog("[AEC Calibration] Pre-aligned: trimmed %zu samples from ref start\n", offset);
+    }
   }
 
   // Ensure we have enough data after alignment

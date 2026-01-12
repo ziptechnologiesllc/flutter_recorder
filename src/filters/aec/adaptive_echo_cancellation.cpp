@@ -2,6 +2,7 @@
 #include "aec_test.h"
 
 #include "neural_post_filter.h"
+#include "../../soloud_slave_bridge.h"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -266,12 +267,32 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       }
     }
   } else {
-    // LEGACY: Simple sample-based delay (for backwards compatibility)
-    float delayMs = mValues[DelayMs];
-    size_t delaySamples =
-        static_cast<size_t>((delayMs / 1000.0f) * mSampleRate) * channels;
-    framesRead = g_aecReferenceBuffer->readFrames(mRefBuffer.data(), frameCount,
-                                                  delaySamples);
+    // In SLAVE MODE during calibration: read the MOST RECENT frames
+    // (they were just written in the same callback, so they're perfectly aligned)
+    // In NON-SLAVE MODE: use legacy sample-based delay
+    if (soloud_isSlaveMode() && mCalibratedOffset == 0) {
+      // Slave mode during calibration: read frames that were just written
+      // Position = totalWritten - frameCount (the frames we just wrote)
+      size_t totalWritten = g_aecReferenceBuffer->getFramesWritten();
+      if (totalWritten >= frameCount) {
+        size_t startPos = totalWritten - frameCount;
+        framesRead = g_aecReferenceBuffer->readFramesAtPosition(
+            mRefBuffer.data(), frameCount, startPos);
+
+        static int slaveCalibLog = 0;
+        if (slaveCalibLog++ < 5 || slaveCalibLog % 500 == 0) {
+          aecLog("[AEC SlaveCalib] Reading most recent frames: pos=%zu read=%zu\n",
+                 startPos, framesRead);
+        }
+      }
+    } else {
+      // LEGACY: Simple sample-based delay (for backwards compatibility)
+      float delayMs = mValues[DelayMs];
+      size_t delaySamples =
+          static_cast<size_t>((delayMs / 1000.0f) * mSampleRate) * channels;
+      framesRead = g_aecReferenceBuffer->readFrames(mRefBuffer.data(), frameCount,
+                                                    delaySamples);
+    }
   }
 
   // Accumulators for smoothed metrics over multiple blocks

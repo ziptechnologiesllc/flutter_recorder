@@ -5,6 +5,7 @@
 
 #include "fft/soloud_fft.h"
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <memory.h>
@@ -181,6 +182,22 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   float *captured = (float *)(pInput); // Assuming float format
   Capture *userData = (Capture *)pDevice->pUserData;
   int playbackChannels = userData->deviceConfig.playback.channels;
+
+  // Debug: Track callback timing to detect sample rate issues
+  static size_t totalCallbackFrames = 0;
+  static auto startTime = std::chrono::steady_clock::now();
+  static int debugCallbackCount = 0;
+  totalCallbackFrames += frameCount;
+  debugCallbackCount++;
+
+  // Log every 5 seconds worth of frames (at expected 48kHz)
+  if (debugCallbackCount % 1875 == 0) { // ~5s at 128 frames/callback @ 48kHz
+    auto now = std::chrono::steady_clock::now();
+    double elapsedSec = std::chrono::duration<double>(now - startTime).count();
+    double actualRate = totalCallbackFrames / elapsedSec;
+    aecLog("[Capture CB TIMING] frames=%zu elapsed=%.2fs rate=%.0fHz (expected 48000)\n",
+           totalCallbackFrames, elapsedSec, actualRate);
+  }
 
   // =========================================================================
   // SLAVE MODE: SoLoud output driven by this callback (for AEC clock sync)
@@ -663,7 +680,18 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   }
 
   printf("[Capture::init] Device initialized successfully\n");
+  printf("[Capture::init] ACTUAL device params: sampleRate=%u, capture.channels=%u, playback.channels=%u, playback.format=%d\n",
+         device.sampleRate, device.capture.channels, device.playback.channels, device.playback.format);
+  printf("[Capture::init] REQUESTED: sampleRate=%u, capture.channels=%u, playback.channels=%u\n",
+         sampleRate, channels, channels);
   fflush(stdout);
+
+  // Warn if actual sample rate differs from requested
+  if (device.sampleRate != sampleRate) {
+    printf("[Capture::init] WARNING: Actual sample rate (%u) differs from requested (%u)!\n",
+           device.sampleRate, sampleRate);
+    fflush(stdout);
+  }
 
   mInited = true;
   mFilters = filters;

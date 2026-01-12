@@ -229,9 +229,8 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   float step = mu_eff / norm_factor;
   float final_step = step * e; // Pre-multiply error
 
-  static int vssDebugCount = 0;
   static int vssLogCount = 0;
-  if (vssLogCount++ % 500 == 0) {
+  if (vssLogCount++ % 48000 == 0) {  // Log once per second at 48kHz
     aecLog("[VSS_RT] mu_eff=%.6f p_est=%.6f var_e=%.6f var_x=%.6f corr=%.6f\n",
            mu_eff, p_est, var_e, var_x, correlation_metric);
   }
