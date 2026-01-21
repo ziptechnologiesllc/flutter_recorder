@@ -45,6 +45,38 @@ public:
         mLastWriteFrameCount(0), mReferenceTimePoint(Clock::now()) {}
 
   /**
+   * Reconfigure the buffer dimensions without reallocating.
+   * This allows pre-allocating a max-size buffer and then configuring
+   * it to match the actual device settings.
+   *
+   * @param sizeInFrames New size in frames
+   * @param channels New channel count
+   * @param sampleRate New sample rate
+   * @return true if successful, false if requested size exceeds allocation
+   */
+  bool configure(size_t sizeInFrames, unsigned int channels,
+                 unsigned int sampleRate) {
+    size_t requiredSamples = sizeInFrames * channels;
+    if (requiredSamples > mBuffer.size()) {
+      // Need to reallocate - resize the buffer
+      mBuffer.resize(requiredSamples, 0.0f);
+    }
+
+    mChannels = channels;
+    mSampleRate = sampleRate;
+    mSizeInFrames = sizeInFrames;
+
+    // Reset positions
+    mWritePos.store(0, std::memory_order_release);
+    mReadPos.store(0, std::memory_order_release);
+    mFramesWritten.store(0, std::memory_order_release);
+
+    aecLog("[AEC RefBuf] Configured: %zu frames @ %uHz, %u channels\n",
+           sizeInFrames, sampleRate, channels);
+    return true;
+  }
+
+  /**
    * Write audio frames to the buffer (called from SoLoud audio thread).
    * Also records the timestamp of this write for synchronization.
    *

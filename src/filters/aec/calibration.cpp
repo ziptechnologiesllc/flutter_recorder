@@ -8,6 +8,12 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <mutex>
+
+#ifdef __ANDROID__
+#include <android/log.h>
+#define AEC_LOG_TAG "AECCalibration"
+#endif
 
 // Log file for calibration debug output (visible to Flutter test)
 static std::ofstream sLogFile;
@@ -15,6 +21,7 @@ static bool sLogFileOpened = false;
 
 // Store log messages in memory so they can be retrieved via FFI
 static std::string sLogBuffer;
+static std::mutex sLogBufferMutex;  // Protects sLogBuffer for thread-safety
 static const size_t MAX_LOG_SIZE = 64 * 1024; // 64KB max
 
 void aecLog(const char *fmt, ...) {
@@ -25,43 +32,351 @@ void aecLog(const char *fmt, ...) {
   va_end(args);
 
   // Append to in-memory buffer (truncate if too large)
-  if (sLogBuffer.size() < MAX_LOG_SIZE) {
-    sLogBuffer += buffer;
+  {
+    std::lock_guard<std::mutex> lock(sLogBufferMutex);
+    if (sLogBuffer.size() < MAX_LOG_SIZE) {
+      sLogBuffer += buffer;
+    }
   }
 
+#ifdef __ANDROID__
+  // On Android, use logcat
+  __android_log_print(ANDROID_LOG_INFO, AEC_LOG_TAG, "%s", buffer);
+#else
   // Also print to stderr
   fprintf(stderr, "%s", buffer);
   fflush(stderr);
+#endif
 }
 
 // FFI export to retrieve log buffer
+// Note: Returns a copy to avoid dangling pointer issues with concurrent access
+static std::string sLogBufferCopy;  // Holds copy for FFI return
+
 extern "C" {
 const char *flutter_recorder_aec_getCalibrationLog() {
-  return sLogBuffer.c_str();
+  std::lock_guard<std::mutex> lock(sLogBufferMutex);
+  sLogBufferCopy = sLogBuffer;  // Copy under lock
+  return sLogBufferCopy.c_str();
 }
 
-void flutter_recorder_aec_clearCalibrationLog() { sLogBuffer.clear(); }
+void flutter_recorder_aec_clearCalibrationLog() {
+  std::lock_guard<std::mutex> lock(sLogBufferMutex);
+  sLogBuffer.clear();
+}
 }
 
 // Static member initialization
 std::vector<float> AECCalibration::sRefCapture;
 std::vector<float> AECCalibration::sMicCapture;
 std::vector<float> AECCalibration::sGeneratedSignal;
+CalibrationSignalType AECCalibration::sLastSignalType = CalibrationSignalType::Chirp;
 size_t AECCalibration::sOutputFramesAtStart = 0;
 size_t AECCalibration::sCaptureFramesAtStart = 0;
 
+// Helper: Generate chirp signal (log sweep)
+static void generateChirpSignal(std::vector<float>& signal, unsigned int sampleRate) {
+  const float DURATION_SEC = 0.5f;
+  size_t chirpSamples = static_cast<size_t>(sampleRate * DURATION_SEC);
+  size_t paddingFrames = sampleRate / 10;  // 100ms tail
+  size_t totalFrames = chirpSamples + paddingFrames;
+
+  signal.resize(totalFrames, 0.0f);
+
+  double f_start = 20.0;
+  double f_end = sampleRate / 2.0;
+  double k = std::pow(f_end / f_start, 1.0 / chirpSamples);
+  const float MAX_AMPLITUDE = 0.5f;
+
+  for (size_t i = 0; i < chirpSamples; ++i) {
+    double phase = 2.0 * M_PI * f_start * (std::pow(k, i) - 1.0) /
+                   (std::log(k) * sampleRate);
+    signal[i] = MAX_AMPLITUDE * std::sin(phase);
+
+    // Fade out last 50 samples to prevent popping
+    if (i > chirpSamples - 50) {
+      signal[i] *= (chirpSamples - i) / 50.0f;
+    }
+  }
+
+  aecLog("\n[AEC Calibration] Generated Log Chirp (%.2fs, %zu samples)\n",
+         DURATION_SEC, chirpSamples);
+}
+
+// Helper: Generate click train signal (impulses for direct IR measurement)
+static void generateClickSignal(std::vector<float>& signal, unsigned int sampleRate) {
+  // Use constants from AECCalibration class
+  size_t spacingSamples = (AECCalibration::CLICK_SPACING_MS * sampleRate) / 1000;
+  size_t tailSamples = (AECCalibration::TAIL_MS * sampleRate) / 1000;
+  size_t totalSamples = (AECCalibration::CLICK_COUNT - 1) * spacingSamples +
+                        AECCalibration::CLICK_SAMPLES + tailSamples;
+
+  signal.resize(totalSamples, 0.0f);
+
+  for (int click = 0; click < AECCalibration::CLICK_COUNT; click++) {
+    size_t clickStart = click * spacingSamples;
+    for (int i = 0; i < AECCalibration::CLICK_SAMPLES; i++) {
+      // Raised cosine pulse to reduce spectral splatter
+      float t = (float)i / (AECCalibration::CLICK_SAMPLES - 1);
+      float envelope = 0.5f * (1.0f - std::cos(2.0f * M_PI * t));
+      signal[clickStart + i] = AECCalibration::CLICK_AMPLITUDE * envelope;
+    }
+  }
+
+  float totalDurationMs = (float)totalSamples * 1000.0f / sampleRate;
+  aecLog("\n[AEC Calibration] Generated Click Train (%d clicks @ %dms spacing, %.1fms total, %zu samples)\n",
+         AECCalibration::CLICK_COUNT, AECCalibration::CLICK_SPACING_MS,
+         totalDurationMs, totalSamples);
+}
+
+// Helper: Find peaks above threshold in signal
+static std::vector<size_t> findPeaks(const std::vector<float>& signal,
+                                     float threshold,
+                                     size_t minSpacing) {
+  std::vector<size_t> peaks;
+
+  for (size_t i = 1; i < signal.size() - 1; ++i) {
+    float val = std::abs(signal[i]);
+    if (val > threshold &&
+        val >= std::abs(signal[i - 1]) &&
+        val >= std::abs(signal[i + 1])) {
+      // Check minimum spacing from last peak
+      if (peaks.empty() || (i - peaks.back()) >= minSpacing) {
+        peaks.push_back(i);
+      } else if (val > std::abs(signal[peaks.back()])) {
+        // Replace last peak if this one is larger
+        peaks.back() = i;
+      }
+    }
+  }
+
+  return peaks;
+}
+
+// Helper: Calculate median of vector
+static int medianValue(std::vector<int>& values) {
+  if (values.empty()) return 0;
+  std::sort(values.begin(), values.end());
+  return values[values.size() / 2];
+}
+
+// Click-specific calibration analysis
+static CalibrationResult analyzeClickCalibration(
+    const std::vector<float>& alignedRef,
+    const std::vector<float>& alignedMic,
+    unsigned int sampleRate) {
+
+  CalibrationResult result = {0, 0.0f, 0.0f, 0.0f, false, {}};
+
+  aecLog("[AEC Click Calibration] Starting click-based analysis...\n");
+
+  // Find click peaks in reference signal
+  // Minimum spacing between clicks: slightly less than CLICK_SPACING_MS
+  size_t minSpacing = (AECCalibration::CLICK_SPACING_MS * sampleRate / 1000) * 0.8;
+  std::vector<size_t> refPeaks = findPeaks(alignedRef, AECCalibration::MIN_PEAK_THRESHOLD, minSpacing);
+
+  aecLog("[AEC Click Calibration] Found %zu reference peaks\n", refPeaks.size());
+  for (size_t i = 0; i < refPeaks.size() && i < 10; ++i) {
+    aecLog("  Peak %zu: sample %zu (%.1fms), amplitude %.4f\n",
+           i, refPeaks[i], refPeaks[i] * 1000.0f / sampleRate,
+           alignedRef[refPeaks[i]]);
+  }
+
+  if (refPeaks.empty()) {
+    aecLog("[AEC Click Calibration] Error: No reference peaks found\n");
+    return result;
+  }
+
+  // Find peaks in mic signal with lower threshold (signal is attenuated through room)
+  float micThreshold = AECCalibration::MIN_PEAK_THRESHOLD * 0.1f;
+  std::vector<size_t> micPeaks = findPeaks(alignedMic, micThreshold, minSpacing);
+
+  aecLog("[AEC Click Calibration] Found %zu mic peaks\n", micPeaks.size());
+  for (size_t i = 0; i < micPeaks.size() && i < 10; ++i) {
+    aecLog("  Peak %zu: sample %zu (%.1fms), amplitude %.4f\n",
+           i, micPeaks[i], micPeaks[i] * 1000.0f / sampleRate,
+           alignedMic[micPeaks[i]]);
+  }
+
+  // Match ref peaks to mic peaks and calculate delays
+  // Store both refPeak and delay for each match
+  struct ClickMatch {
+    size_t refPeak;
+    int delay;
+  };
+  std::vector<ClickMatch> matches;
+  std::vector<int> delays;
+  size_t maxDelaySearch = sampleRate / 10;  // 100ms max delay
+
+  for (size_t refPeak : refPeaks) {
+    // Find closest mic peak after ref peak
+    int bestDelay = -1;
+    float bestAmp = 0.0f;
+
+    for (size_t micPeak : micPeaks) {
+      if (micPeak > refPeak && (micPeak - refPeak) < maxDelaySearch) {
+        float amp = std::abs(alignedMic[micPeak]);
+        if (amp > bestAmp) {
+          bestAmp = amp;
+          bestDelay = micPeak - refPeak;
+        }
+      }
+    }
+
+    if (bestDelay > 0) {
+      matches.push_back({refPeak, bestDelay});
+      delays.push_back(bestDelay);
+      aecLog("[AEC Click Calibration] Matched ref@%zu -> mic delay=%d samples (%.2fms)\n",
+             refPeak, bestDelay, bestDelay * 1000.0f / sampleRate);
+    }
+  }
+
+  int crossCorrDelay = 0;
+  bool usedCrossCorrelation = false;
+
+  if (delays.empty()) {
+    // Fallback: use cross-correlation
+    aecLog("[AEC Click Calibration] No peak matches, falling back to cross-correlation\n");
+    crossCorrDelay = DelayEstimator::estimateDelay(alignedRef, alignedMic);
+    aecLog("[AEC Click Calibration] Cross-correlation found delay: %d samples (%.2fms)\n",
+           crossCorrDelay, crossCorrDelay * 1000.0f / sampleRate);
+    // Store the raw delay (without causality offset) for reporting
+    // The causality margin is applied internally during IR extraction
+    result.delaySamples = std::max(0, crossCorrDelay);
+    usedCrossCorrelation = true;
+  } else {
+    // Use median delay (robust to outliers)
+    result.delaySamples = std::max(0, medianValue(delays) - 32);
+  }
+
+  result.delayMs = (float)(result.delaySamples * 1000) / (float)sampleRate;
+
+  aecLog("[AEC Click Calibration] Estimated delay: %d samples (%.2fms)\n",
+         result.delaySamples, result.delayMs);
+
+  // Extract averaged impulse response from each click
+  // Window size: enough to capture room reverb (use IR_LENGTH)
+  size_t irLen = AECCalibration::IR_LENGTH;
+  std::vector<float> avgIR(irLen, 0.0f);
+  int validClicks = 0;
+
+  if (usedCrossCorrelation) {
+    // Peak matching failed - extract IR using cross-correlation delay and reference peaks
+    aecLog("[AEC Click Calibration] Using cross-correlation delay for IR extraction\n");
+    int acousticDelay = crossCorrDelay; // Use the raw delay (includes causality margin)
+
+    for (size_t refPeak : refPeaks) {
+      // Extract IR starting from refPeak + acousticDelay - 32 (causality margin)
+      int irStartSigned = static_cast<int>(refPeak) + acousticDelay - 32;
+      if (irStartSigned < 0) continue;
+      size_t irStart = static_cast<size_t>(irStartSigned);
+      if (irStart + irLen > alignedMic.size()) continue;
+
+      // Accumulate IR from this click
+      for (size_t j = 0; j < irLen; ++j) {
+        avgIR[j] += alignedMic[irStart + j];
+      }
+      validClicks++;
+      aecLog("[AEC Click Calibration] Extracted IR at ref@%zu + delay=%d = mic@%zu\n",
+             refPeak, acousticDelay, irStart);
+    }
+  } else {
+    // Peak matching succeeded - use matched delays
+    int medianDelay = result.delaySamples + 32; // Add back the 32 we subtracted
+    int delayTolerance = std::max(48, medianDelay / 10); // 10% or 1ms minimum
+
+    for (const auto& match : matches) {
+      // Reject clicks with significantly different delay (outliers)
+      if (std::abs(match.delay - medianDelay) > delayTolerance) {
+        aecLog("[AEC Click Calibration] Rejecting click at ref@%zu: delay=%d too far from median=%d\n",
+               match.refPeak, match.delay, medianDelay);
+        continue;
+      }
+
+      // Use THIS click's individual delay for IR extraction (more precise)
+      size_t irStart = match.refPeak + match.delay - 32; // Subtract causality margin
+      if (irStart + irLen > alignedMic.size()) continue;
+
+      // Accumulate IR from this click
+      for (size_t j = 0; j < irLen; ++j) {
+        avgIR[j] += alignedMic[irStart + j];
+      }
+      validClicks++;
+    }
+  }
+
+  if (validClicks > 0) {
+    // Average
+    float scale = 1.0f / validClicks;
+    float energy = 0.0f;
+    float maxAmp = 0.0f;
+    size_t peakIdx = 0;
+    float peakVal = 0.0f;
+
+    for (size_t i = 0; i < irLen; ++i) {
+      avgIR[i] *= scale;
+      energy += avgIR[i] * avgIR[i];
+      if (std::abs(avgIR[i]) > maxAmp) {
+        maxAmp = std::abs(avgIR[i]);
+        peakVal = avgIR[i];
+        peakIdx = i;
+      }
+    }
+
+    // CRITICAL: Check polarity of IR
+    // The IR should have a POSITIVE peak for proper echo cancellation.
+    // If peak is negative (inverted microphone or acoustic path), invert the IR.
+    // This ensures: y_est = IR * ref produces a positive echo estimate
+    // that can be subtracted from the mic signal.
+    if (peakVal < 0) {
+      aecLog("[AEC Click Calibration] Detected INVERTED IR (peak=%.4f) - correcting polarity\n", peakVal);
+      for (size_t i = 0; i < irLen; ++i) {
+        avgIR[i] = -avgIR[i];
+      }
+      peakVal = -peakVal;
+    }
+
+    result.impulseResponse = avgIR;
+    result.echoGain = std::sqrt(energy);
+    result.success = (energy > 1e-6f);
+
+    aecLog("[AEC Click Calibration] Averaged IR from %d clicks: energy=%.4f, peak=%.4f at idx %zu\n",
+           validClicks, energy, maxAmp, peakIdx);
+  } else {
+    aecLog("[AEC Click Calibration] Warning: No valid clicks for IR extraction\n");
+    result.success = false;
+  }
+
+  aecLog("[AEC Click Calibration] First 10 IR samples: ");
+  for (int i = 0; i < 10 && i < (int)result.impulseResponse.size(); ++i)
+    aecLog("%.4f ", result.impulseResponse[i]);
+  aecLog("\n");
+
+  aecLog("[AEC Click Calibration] Result: delay=%.2fms gain=%.3f success=%d\n",
+         result.delayMs, result.echoGain, result.success);
+
+  return result;
+}
+
 uint8_t *AECCalibration::generateCalibrationWav(unsigned int sampleRate,
                                                 unsigned int channels,
-                                                size_t *outSize) {
-  // Use a Logarithmic Sine Sweep (Chirp) for Warm Start
-  // Duration: 0.5s
-  const float DURATION_SEC = 0.5f;
-  size_t totalFrames = static_cast<size_t>(sampleRate * DURATION_SEC);
+                                                size_t *outSize,
+                                                CalibrationSignalType signalType) {
+  // Store signal type for analysis
+  sLastSignalType = signalType;
 
-  // Add some padding silence at end?
-  // Let's add 100ms silence to let the room ring out
-  size_t paddingFrames = sampleRate / 10;
-  totalFrames += paddingFrames;
+  // Generate the appropriate signal type
+  switch (signalType) {
+    case CalibrationSignalType::Click:
+      generateClickSignal(sGeneratedSignal, sampleRate);
+      break;
+    case CalibrationSignalType::Chirp:
+    default:
+      generateChirpSignal(sGeneratedSignal, sampleRate);
+      break;
+  }
+
+  size_t totalFrames = sGeneratedSignal.size();
 
   // WAV format: 44 byte header + float32 samples
   size_t dataSize = totalFrames * channels * sizeof(float);
@@ -76,42 +391,12 @@ uint8_t *AECCalibration::generateCalibrationWav(unsigned int sampleRate,
   float *audioData = reinterpret_cast<float *>(buffer + 44);
   std::memset(audioData, 0, dataSize);
 
-  // Generate mono chirp
-  sGeneratedSignal.resize(totalFrames, 0.0f);
-
-  double f_start = 20.0;
-  double f_end = sampleRate / 2.0;
-  size_t chirpSamples = static_cast<size_t>(sampleRate * DURATION_SEC);
-  double k = std::pow(f_end / f_start, 1.0 / chirpSamples);
-
-  // CONSTANT: Max amplitude
-  const float MAX_AMPLITUDE = 0.5f;
-
-  for (size_t i = 0; i < chirpSamples; ++i) {
-    // Logarithmic frequency increase
-    // Phase phi(t) = 2*pi * f_start * (k^t - 1) / ln(k)
-    // where t is time in seconds? No, classic formula is discretized.
-    // Correct phase integration: division by sampleRate is required
-    // Phase = 2*pi * f_start * (k^i - 1) / (ln(k) * Fs)
-    double phase = 2.0 * M_PI * f_start * (std::pow(k, i) - 1.0) /
-                   (std::log(k) * sampleRate);
-    sGeneratedSignal[i] = MAX_AMPLITUDE * std::sin(phase);
-
-    // Fade out last 50 samples to prevent popping
-    if (i > chirpSamples - 50) {
-      sGeneratedSignal[i] *= (chirpSamples - i) / 50.0f;
-    }
-  }
-
   // Copy to all channels (interleaved)
   for (size_t frame = 0; frame < totalFrames; ++frame) {
     for (unsigned int ch = 0; ch < channels; ++ch) {
       audioData[frame * channels + ch] = sGeneratedSignal[frame];
     }
   }
-
-  aecLog("\n[AEC Calibration] Generated Log Chirp (%.2fs, %zu samples)\n",
-         DURATION_SEC, chirpSamples);
 
   *outSize = totalSize;
   return buffer;
@@ -349,7 +634,8 @@ CalibrationResult AECCalibration::analyze(unsigned int sampleRate) {
 CalibrationResult AECCalibration::analyzeAligned(
     const std::vector<float>& alignedRef,
     const std::vector<float>& alignedMic,
-    unsigned int sampleRate) {
+    unsigned int sampleRate,
+    CalibrationSignalType signalType) {
 
   CalibrationResult result = {0, 0.0f, 0.0f, 0.0f, false, {}};
 
@@ -359,8 +645,25 @@ CalibrationResult AECCalibration::analyzeAligned(
     return result;
   }
 
-  aecLog("[AEC Calibration] analyzeAligned: Using frame-aligned buffers (ref=%zu, mic=%zu)\n",
-         alignedRef.size(), alignedMic.size());
+  aecLog("[AEC Calibration] analyzeAligned: Using frame-aligned buffers (ref=%zu, mic=%zu), signalType=%d\n",
+         alignedRef.size(), alignedMic.size(), static_cast<int>(signalType));
+
+  // Use click-specific analysis for click signals
+  if (signalType == CalibrationSignalType::Click) {
+    result = analyzeClickCalibration(alignedRef, alignedMic, sampleRate);
+
+    // Add calibrated offset for position-based sync
+    int64_t counterDiff = static_cast<int64_t>(sCaptureFramesAtStart) -
+                          static_cast<int64_t>(sOutputFramesAtStart);
+    result.calibratedOffset = counterDiff + result.delaySamples;
+
+    aecLog("[AEC Click Calibration] calibratedOffset: counterDiff=%lld + acoustic=%d = %lld samples\n",
+           (long long)counterDiff, result.delaySamples, (long long)result.calibratedOffset);
+
+    return result;
+  }
+
+  // Original chirp analysis below
 
   // Step 1: Delay estimation directly on aligned signals
   // No frame counter pre-alignment needed - signals are already frame-aligned!

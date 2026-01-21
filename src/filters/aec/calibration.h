@@ -7,6 +7,12 @@
 #include <cmath>
 #include <random>
 
+// Calibration signal type selection
+enum class CalibrationSignalType {
+    Chirp = 0,  // Logarithmic sine sweep (current default)
+    Click = 1   // Impulse train (5 clicks for IR averaging)
+};
+
 /**
  * AEC Calibration System
  *
@@ -35,27 +41,30 @@ class AECCalibration {
 public:
     // Click-based calibration: 5 clicks averaged for noise reduction
     static constexpr int CLICK_COUNT = 5;              // Number of clicks to average
-    static constexpr int CLICK_SAMPLES = 5;            // Samples per click (short pulse)
+    static constexpr int CLICK_SAMPLES = 48;           // Samples per click (~1ms @ 48kHz, audible pulse)
     static constexpr int CLICK_SPACING_MS = 600;       // 600ms between clicks for full IR capture
-    static constexpr int IR_LENGTH = 8192;             // Impulse response taps (~170ms @ 48kHz)
-    static constexpr float CLICK_AMPLITUDE = 0.8f;     // Loud but not clipping
+    static constexpr int IR_LENGTH = 2048;             // Impulse response taps (~42ms @ 48kHz)
+    static constexpr float CLICK_AMPLITUDE = 1.0f;     // Full scale for max SNR
     static constexpr int TAIL_MS = 400;                // Silence after last click for full decay
-    static constexpr float MIN_PEAK_THRESHOLD = 0.01f; // Minimum peak to detect
+    static constexpr float MIN_PEAK_THRESHOLD = 0.005f; // Lower threshold for detection
 
     /**
      * Generate calibration WAV file in memory.
-     * Contains: 5 clicks spaced 400ms apart + 400ms tail
-     * Total duration: ~2.4s
+     *
+     * Chirp: Logarithmic sine sweep 20Hz-Nyquist, ~0.6s duration
+     * Click: 5 impulses spaced 600ms apart + 400ms tail, ~3s duration
      *
      * @param sampleRate Sample rate in Hz
      * @param channels Number of channels (1 or 2)
      * @param outSize Output: size of returned buffer in bytes
+     * @param signalType Signal type (Chirp or Click)
      * @return Pointer to WAV data (caller must free with delete[])
      */
     static uint8_t* generateCalibrationWav(
         unsigned int sampleRate,
         unsigned int channels,
-        size_t* outSize);
+        size_t* outSize,
+        CalibrationSignalType signalType = CalibrationSignalType::Chirp);
 
     /**
      * Capture reference and mic signals for analysis.
@@ -88,12 +97,14 @@ public:
      * @param alignedRef Reference signal from AEC processAudio (already aligned)
      * @param alignedMic Mic signal from AEC processAudio (already aligned)
      * @param sampleRate Sample rate for converting delay to milliseconds
+     * @param signalType Signal type used for calibration (affects analysis method)
      * @return Calibration results including optimal delay
      */
     static CalibrationResult analyzeAligned(
         const std::vector<float>& alignedRef,
         const std::vector<float>& alignedMic,
-        unsigned int sampleRate);
+        unsigned int sampleRate,
+        CalibrationSignalType signalType = CalibrationSignalType::Chirp);
 
     /**
      * Clear captured signal buffers.
@@ -141,6 +152,9 @@ private:
 
     // Generated calibration signal (stored for use as reference)
     static std::vector<float> sGeneratedSignal;
+
+    // Signal type used for last generation
+    static CalibrationSignalType sLastSignalType;
 
     // Frame counters recorded at calibration start
     static size_t sOutputFramesAtStart;

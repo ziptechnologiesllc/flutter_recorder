@@ -539,6 +539,31 @@ class RecorderFfi extends RecorderImpl {
   }
 
   @override
+  int getSampleRate() {
+    return _bindings.flutter_recorder_getSampleRate();
+  }
+
+  @override
+  int getCaptureChannels() {
+    return _bindings.flutter_recorder_getCaptureChannels();
+  }
+
+  @override
+  int getPlaybackChannels() {
+    return _bindings.flutter_recorder_getPlaybackChannels();
+  }
+
+  @override
+  int getCaptureFormat() {
+    return _bindings.flutter_recorder_getCaptureFormat();
+  }
+
+  @override
+  int getPlaybackFormat() {
+    return _bindings.flutter_recorder_getPlaybackFormat();
+  }
+
+  @override
   int isFilterActive(RecorderFilterType filterType) {
     return _bindings
         .flutter_recorder_isFilterActive(_toGenFilterType(filterType));
@@ -603,6 +628,15 @@ class RecorderFfi extends RecorderImpl {
   }
 
   // ///////////////////////
+  //   SLAVE MODE
+  // ///////////////////////
+
+  @override
+  bool isSlaveAudioReady() {
+    return _bindings.flutter_recorder_isSlaveAudioReady() == 1;
+  }
+
+  // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////
 
@@ -633,16 +667,17 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   void aecSetMode(AecMode mode) {
-    _bindings.flutter_recorder_aec_setMode(mode.index);
+    _bindings.flutter_recorder_aec_setMode(mode.value);
   }
 
   @override
   AecMode aecGetMode() {
-    final modeIndex = _bindings.flutter_recorder_aec_getMode();
-    if (modeIndex >= 0 && modeIndex < AecMode.values.length) {
-      return AecMode.values[modeIndex];
+    final modeValue = _bindings.flutter_recorder_aec_getMode();
+    try {
+      return AecMode.fromValue(modeValue);
+    } catch (_) {
+      return AecMode.hybrid;
     }
-    return AecMode.hybrid;
   }
 
   @override
@@ -678,13 +713,18 @@ class RecorderFfi extends RecorderImpl {
   // ==================== AEC CALIBRATION ====================
 
   @override
-  Uint8List aecGenerateCalibrationSignal(int sampleRate, int channels) {
+  Uint8List aecGenerateCalibrationSignal(
+    int sampleRate,
+    int channels, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  }) {
     final outSize = calloc<ffi.Size>();
     try {
       final ptr = _bindings.flutter_recorder_aec_generateCalibrationSignal(
         sampleRate,
         channels,
         outSize,
+        signalType.value,
       );
       final size = outSize.value;
       if (ptr.address == 0 || size == 0) {
@@ -1034,7 +1074,9 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(
-      int sampleRate) {
+    int sampleRate, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  }) {
     return using((arena) {
       final delaySamplesPtr = arena<ffi.Int>();
       final delayMsPtr = arena<ffi.Float>();
@@ -1052,6 +1094,7 @@ class RecorderFfi extends RecorderImpl {
         correlationPtr,
         impulseLengthPtr,
         calibratedOffsetPtr,
+        signalType.value,
       );
 
       return AecCalibrationResultWithImpulse(

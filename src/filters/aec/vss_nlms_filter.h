@@ -23,7 +23,7 @@
 class VssNlmsFilter {
 public:
   static constexpr int DEFAULT_FILTER_LENGTH =
-      8192; // ~170ms at 48kHz, covers long reverb tails
+      2048; // ~42ms at 48kHz, covers typical room acoustics
 
   /**
    * @param taps Filter length in samples. Will be rounded up to nearest
@@ -89,6 +89,14 @@ public:
   void setWeights(const float *coeffs, size_t count);
 
   /**
+   * Freeze/unfreeze weight adaptation.
+   * When frozen, the filter performs pure FIR convolution with no updates.
+   * Use after calibration for stable, predictable echo cancellation.
+   */
+  void setFrozen(bool frozen) { mFrozen = frozen; }
+  bool isFrozen() const { return mFrozen; }
+
+  /**
    * Get the current filter weights.
    * @return Copy of the weights vector.
    */
@@ -130,18 +138,26 @@ private:
   float var_x = 0.0f; // Power of Reference (smoothed)
   float var_e = 0.0f; // Power of Error (smoothed)
 
-  // Tuning Parameters (optimized via sweep test - 9.05dB cancellation)
+  // Tuning Parameters
   float alpha =
       0.05f; // Smoothing factor (lower = faster tracking for transients)
-  float mu_max = 1.2f;    // Max step size (higher = faster convergence)
+  float mu_max = 0.1f;    // Max step size (CONSERVATIVE - prevents oscillation)
   float epsilon = 1e-6f;  // Small constant to prevent division by zero
   float leakage = 0.9999f; // Leakage factor (slight decay for stability)
+
+  // Double-talk detection threshold
+  // Below this correlation, adaptation freezes completely to protect
+  // the filter from being corrupted by near-end speech (singing/guitar)
+  float mCorrelationThreshold = 0.3f;
 
   // Diagnostics
   float mLastE = 0.0f;
   float mLastStep = 0.0f;
   float mLastCorrelation = 0.0f;
   float mLastYEst = 0.0f; // Last echo estimate for diagnostics
+
+  // Freeze flag - when true, no weight updates occur (pure FIR mode)
+  bool mFrozen = false;
 
   // SIMD helper functions defined in cpp
   void updateHistory(float new_sample);

@@ -119,6 +119,29 @@ public:
   void setCalibratedOffset(int64_t offset);
   int64_t getCalibratedOffset() const { return mCalibratedOffset; }
 
+  // Set pure acoustic delay in samples (for slave mode where thread timing is irrelevant)
+  void setAcousticDelaySamples(size_t samples) { mAcousticDelaySamples = samples; }
+  size_t getAcousticDelaySamples() const { return mAcousticDelaySamples; }
+
+  // Set buffer configuration for theoretical delay calculation
+  void setBufferConfig(size_t bufferSizeFrames, size_t pipelinePeriods = 3) {
+    mBufferSizeFrames = bufferSizeFrames;
+    mPipelinePeriods = pipelinePeriods;
+  }
+
+  // Calculate theoretical delay based on buffer config
+  // Full round-trip delay = output buffering + acoustic path + input buffering
+  // For duplex device: both input and output have mPipelinePeriods of buffering
+  size_t getTheoreticalDelaySamples() const {
+    // Output buffering (DAC pipeline): N periods
+    size_t outputLatency = mPipelinePeriods * mBufferSizeFrames;
+    // Input buffering (ADC pipeline): typically same as output
+    size_t inputLatency = mPipelinePeriods * mBufferSizeFrames;
+    // Acoustic delay: speaker → air → mic (3-5ms typical for laptop)
+    size_t acousticDelay = (mSampleRate * 4) / 1000; // 4ms default
+    return outputLatency + inputLatency + acousticDelay;
+  }
+
   // Enable/disable position-based sync (vs legacy timestamp/delay based)
   void setUsePositionSync(bool enable) { mUsePositionSync = enable; }
   bool getUsePositionSync() const { return mUsePositionSync; }
@@ -180,6 +203,11 @@ private:
   size_t mCaptureFrameCount = 0; // Set before each process() call
   int64_t mCalibratedOffset = 0; // Capture frame - offset = output frame
   bool mUsePositionSync = false; // Use position-based sync vs legacy delay
+  size_t mAcousticDelaySamples = 0; // Pure acoustic delay (for slave mode)
+
+  // Buffer configuration for theoretical delay calculation
+  size_t mBufferSizeFrames = 128; // Default audio buffer size
+  size_t mPipelinePeriods = 3;    // Typical pipeline depth for PipeWire/ALSA
 
   // Calibration capture state (for frame-aligned delay estimation)
   bool mCalibrationCaptureEnabled = false;

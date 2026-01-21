@@ -83,11 +83,25 @@ FFI_PLUGIN_EXPORT float flutter_recorder_getTextureValue(int row, int column);
 
 FFI_PLUGIN_EXPORT void flutter_recorder_setFftSmoothing(float smooth);
 
+// Getters for actual device parameters (populated after init)
+FFI_PLUGIN_EXPORT unsigned int flutter_recorder_getSampleRate();
+FFI_PLUGIN_EXPORT unsigned int flutter_recorder_getCaptureChannels();
+FFI_PLUGIN_EXPORT unsigned int flutter_recorder_getPlaybackChannels();
+FFI_PLUGIN_EXPORT int flutter_recorder_getCaptureFormat();
+FFI_PLUGIN_EXPORT int flutter_recorder_getPlaybackFormat();
+
 /////////////////////////
 /// MONITORING
 /////////////////////////
 FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoring(bool enabled);
 FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoringMode(int mode);
+
+/////////////////////////
+/// SLAVE MODE
+/////////////////////////
+// Check if slave audio is ready (first callback has run successfully)
+// Used to wait for the audio pipeline to stabilize before calibration
+FFI_PLUGIN_EXPORT int flutter_recorder_isSlaveAudioReady();
 
 /////////////////////////
 /// FILTERS
@@ -145,8 +159,12 @@ FFI_PLUGIN_EXPORT int flutter_recorder_neural_isEnabled();
 /////////////////////////
 /// AEC Calibration
 /////////////////////////
+
+// Calibration signal types
+// 0 = Chirp (log sweep), 1 = Click (impulse train)
 FFI_PLUGIN_EXPORT uint8_t *flutter_recorder_aec_generateCalibrationSignal(
-    unsigned int sampleRate, unsigned int channels, size_t *outSize);
+    unsigned int sampleRate, unsigned int channels, size_t *outSize,
+    int signalType);
 FFI_PLUGIN_EXPORT void
 flutter_recorder_aec_startCalibrationCapture(size_t maxSamples);
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopCalibrationCapture();
@@ -264,7 +282,7 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopAlignedCalibrationCapture();
 FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
     unsigned int sampleRate, int *outDelaySamples, float *outDelayMs,
     float *outGain, float *outCorrelation, int *outImpulseLength,
-    int64_t *outCalibratedOffset);
+    int64_t *outCalibratedOffset, int signalType);
 
 #ifdef __cplusplus
 }

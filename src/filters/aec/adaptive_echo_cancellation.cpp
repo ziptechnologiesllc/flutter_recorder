@@ -18,7 +18,10 @@
 
 // Get sandbox-accessible temp directory
 static std::string getTempDir() {
-#ifdef __APPLE__
+#ifdef __ANDROID__
+  // Android doesn't have a writable /tmp/
+  return "";
+#elif defined(__APPLE__)
 #if TARGET_OS_MAC && !TARGET_OS_IPHONE
   NSString *tempDir = NSTemporaryDirectory();
   if (tempDir) {
@@ -214,10 +217,46 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   // Read reference signal
   size_t framesRead = 0;
 
-  if (mUsePositionSync && mCalibratedOffset != 0) {
-    // NEW: Position-based sync using frame counters
-    // Calculate the output frame position that corresponds to this capture
-    // block captureFrame - offset = outputFrame
+  if (soloud_isSlaveMode()) {
+    // SLAVE MODE: Reference was written in the SAME callback, perfectly time-aligned.
+    // We only need to apply the ACOUSTIC delay, not the full calibratedOffset
+    // (which includes thread timing differences that don't apply in slave mode).
+    size_t totalWritten = g_aecReferenceBuffer->getFramesWritten();
+
+    // During calibration (mAcousticDelaySamples == 0), always read the most recent frames
+    // This ensures we capture ref+mic for delay estimation even before calibration is complete
+    bool isCalibrating = mCalibrationCaptureEnabled || mAcousticDelaySamples == 0;
+
+    if (totalWritten >= frameCount) {
+      size_t readPos;
+      if (isCalibrating) {
+        // During calibration: read the most recent frames (just written in this callback)
+        readPos = totalWritten - frameCount;
+      } else {
+        // After calibration: apply acoustic delay compensation
+        if (totalWritten >= frameCount + mAcousticDelaySamples) {
+          readPos = totalWritten - frameCount - mAcousticDelaySamples;
+        } else {
+          // Not enough data yet for delay compensation
+          readPos = 0;
+          // Skip reading - framesRead stays 0
+          goto skip_slave_read;
+        }
+      }
+
+      framesRead = g_aecReferenceBuffer->readFramesAtPosition(
+          mRefBuffer.data(), frameCount, readPos);
+
+      static int slaveReadDebugCount = 0;
+      if (++slaveReadDebugCount % 500 == 0 || (isCalibrating && slaveReadDebugCount <= 10)) {
+        aecLog("[AEC Slave] totalWritten=%zu acousticDelay=%zu readPos=%zu read=%zu calib=%d\n",
+               totalWritten, mAcousticDelaySamples, readPos, framesRead, isCalibrating ? 1 : 0);
+      }
+    }
+    skip_slave_read:;
+  } else if (mUsePositionSync && mCalibratedOffset != 0) {
+    // NON-SLAVE MODE: Position-based sync using frame counters
+    // This handles separate devices with potential clock drift
     int64_t startOutputFrame =
         static_cast<int64_t>(mCaptureFrameCount) - mCalibratedOffset;
 
@@ -226,33 +265,25 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
           mRefBuffer.data(), frameCount, static_cast<size_t>(startOutputFrame));
 
       // DRIFT COMPENSATION: If read failed due to buffer overrun, adjust offset
-      // This handles clock drift between capture and output devices
       if (framesRead == 0 && g_aecReferenceBuffer != nullptr) {
         size_t totalWritten = g_aecReferenceBuffer->getFramesWritten();
         size_t bufferSize = g_aecReferenceBuffer->sizeInFrames();
 
-        // Calculate the oldest available frame
         size_t oldestAvailable = (totalWritten > bufferSize) ?
                                   (totalWritten - bufferSize + frameCount) : 0;
 
-        // If we're behind, adjust offset to catch up
         if (static_cast<size_t>(startOutputFrame) < oldestAvailable) {
-          // Calculate new offset so we read from oldest available data
           int64_t newOffset = static_cast<int64_t>(mCaptureFrameCount) -
                               static_cast<int64_t>(oldestAvailable);
 
           static int driftWarnCount = 0;
           if (++driftWarnCount % 100 == 1) {
-            aecLog("[AEC DriftComp] Clock drift detected! Adjusting offset: %lld -> %lld "
-                   "(drift=%lld frames)\n",
-                   (long long)mCalibratedOffset, (long long)newOffset,
-                   (long long)(newOffset - mCalibratedOffset));
+            aecLog("[AEC DriftComp] Clock drift detected! Adjusting offset: %lld -> %lld\n",
+                   (long long)mCalibratedOffset, (long long)newOffset);
           }
 
           mCalibratedOffset = newOffset;
           startOutputFrame = static_cast<int64_t>(mCaptureFrameCount) - mCalibratedOffset;
-
-          // Try reading again with adjusted offset
           framesRead = g_aecReferenceBuffer->readFramesAtPosition(
               mRefBuffer.data(), frameCount, static_cast<size_t>(startOutputFrame));
         }
@@ -260,16 +291,13 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
 
       static int posReadDebugCount = 0;
       if (++posReadDebugCount % 500 == 0) {
-        aecLog(
-            "[AEC PosSync] capFrame=%zu offset=%lld outFrame=%lld read=%zu\n",
-            mCaptureFrameCount, (long long)mCalibratedOffset,
-            (long long)startOutputFrame, framesRead);
+        aecLog("[AEC PosSync] capFrame=%zu offset=%lld outFrame=%lld read=%zu\n",
+               mCaptureFrameCount, (long long)mCalibratedOffset,
+               (long long)startOutputFrame, framesRead);
       }
     }
   } else {
-    // In SLAVE MODE during calibration: read the MOST RECENT frames
-    // (they were just written in the same callback, so they're perfectly aligned)
-    // In NON-SLAVE MODE: use legacy sample-based delay
+    // LEGACY MODE or calibration in progress
     if (soloud_isSlaveMode() && mCalibratedOffset == 0) {
       // Slave mode during calibration: read frames that were just written
       // Position = totalWritten - frameCount (the frames we just wrote)
@@ -315,6 +343,7 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   static const int MAX_DUMP_FRAMES = 48000 * 5; // 5 seconds
   static std::string tempDir;
 
+#ifndef __ANDROID__
   if (dumpFrames == 0 && refFile == nullptr) {
     tempDir = getTempDir();
     std::string refPath = tempDir + "aec_ref.raw";
@@ -328,6 +357,7 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       aecLog("[AEC DEBUG] Failed to open files in %s\n", tempDir.c_str());
     }
   }
+#endif
 
   if (refFile && micFile && dumpFrames < MAX_DUMP_FRAMES) {
     // Write channel 0 only (mono) for easier analysis
@@ -389,22 +419,17 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       totalRefEnergyForCorr += refSample * refSample;
       debugSamples++;
 
-      // Fixed FIR echo cancellation (Old Path):
-      // float error = mFilters[ch]->process(micSample, refSample);
+      // VSS-NLMS / Frozen FIR Echo Cancellation:
+      // - aecModeAlgo/aecModeHybrid: Adaptive filter (may cause transient artifacts)
+      // - aecModeFrozen/aecModeFrozenNeural: Pure FIR with calibrated IR (stable)
+      // - aecModeNeural/aecModeBypass: Skip linear stage
+      float error = micSample; // Default to input (Bypass/Neural only)
 
-      // VSS-NLMS Adaptive Echo Cancellation (New Path):
-      // 1. Estimate echo using adaptive filter
-      // 2. Subtract from mic signal (happens inside processSample)
-      float error = micSample; // Default to input (Bypass/Neural start)
-
-      if (mAecMode == aecModeAlgo || mAecMode == aecModeHybrid) {
+      if (mAecMode == aecModeAlgo || mAecMode == aecModeHybrid ||
+          mAecMode == aecModeFrozen || mAecMode == aecModeFrozenNeural) {
+        // processSample respects the frozen flag internally
         error = mVssFilters[ch]->processSample(refSample, micSample);
       }
-
-      // BYPASS VSS-NLMS (Neural Only Mode)
-      // We pass the raw mic signal (normalized) directly to the neural stage.
-      // The neural model will handle both linear alignment/reverb and
-      // non-linearities.
 
       mLinearOutputBuffer[idx] = error;
 
@@ -416,10 +441,10 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   }
 
   // SECOND STAGE: Neural Post-Filter
-  // This stage runs on the output of the NLMS filters to remove
+  // This stage runs on the output of the linear stage to remove
   // residual echo and non-linearities.
-  // We reuse mRefBuffer for the reference signal.
-  if (mAecMode == aecModeNeural || mAecMode == aecModeHybrid) {
+  if (mAecMode == aecModeNeural || mAecMode == aecModeHybrid ||
+      mAecMode == aecModeFrozenNeural) {
     mNeuralFilter->process(mLinearOutputBuffer.data(), mRefBuffer.data(),
                            mLinearOutputBuffer.data(), frameCount);
   }
@@ -463,13 +488,10 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
 
     float currentDelayMs = mValues[DelayMs];
 
-    static int aecLogCount = 0;
-    if (aecLogCount++ % 500 == 0) {
-      aecLog("[AEC] delay=%.1fms ref=%.0fdB mic=%.0fdB ŷ=%.0fdB corr=%.2f "
-             "coef=%.4f | %s\n",
-             currentDelayMs, refDb, micDb, echoEstDb, correlation, coeffEnergy,
-             status);
-    }
+    aecLog("[AEC] delay=%.1fms ref=%.0fdB mic=%.0fdB ŷ=%.0fdB corr=%.2f "
+           "coef=%.4f | %s\n",
+           currentDelayMs, refDb, micDb, echoEstDb, correlation, coeffEnergy,
+           status);
 
     // Reset accumulators
     totalRefEnergy = 0.0f;
@@ -504,6 +526,22 @@ void AdaptiveEchoCancellation::setImpulseResponse(const float *coeffs,
   }
   for (auto &filter : mVssFilters) {
     filter->setWeights(coeffs, length);
+
+    // Freeze state depends on AEC mode:
+    // - aecModeFrozen/aecModeFrozenNeural: Pure FIR, no adaptation
+    // - aecModeAlgo/aecModeHybrid: Adaptive NLMS (may cause transient artifacts)
+    bool shouldFreeze = (mAecMode == aecModeFrozen || mAecMode == aecModeFrozenNeural);
+    filter->setFrozen(shouldFreeze);
+
+    if (!shouldFreeze) {
+      // CONSERVATIVE step size - prevents oscillation that causes AM distortion
+      // The VSS correlation-based scaling will further reduce this during double-talk
+      filter->setStepSize(0.1f);
+      // Smoothing for VSS statistics (lower = faster response to transients)
+      filter->setSmoothingFactor(0.05f);
+      // Slight leakage for numerical stability (only applied when reference present)
+      filter->setLeakage(0.9999f);
+    }
   }
 
   // Calculate coefficient energy for debug output
@@ -511,8 +549,11 @@ void AdaptiveEchoCancellation::setImpulseResponse(const float *coeffs,
   for (int i = 0; i < length; ++i) {
     energy += coeffs[i] * coeffs[i];
   }
-  aecLog("[AEC] Set impulse response: %d coefficients, energy=%.4f\n", length,
-         energy);
+
+  bool shouldFreeze = (mAecMode == aecModeFrozen || mAecMode == aecModeFrozenNeural);
+  const char *modeStr = shouldFreeze ? "FROZEN (pure FIR)" : "ADAPTIVE (mu=0.1)";
+  aecLog("[AEC] Set impulse response: %d coefficients, energy=%.4f, mode=%s\n",
+         length, energy, modeStr);
 }
 
 float AdaptiveEchoCancellation::measureHardwareLatency(
@@ -745,11 +786,28 @@ bool AdaptiveEchoCancellation::isCalibrationCaptureComplete() const {
 
 void AdaptiveEchoCancellation::setAecMode(AecMode mode) {
   mAecMode = mode;
-  aecLog("[AEC] Mode set to %d (0=Bypass, 1=Algo, 2=Neural, 3=Hybrid)\n",
-         static_cast<int>(mode));
+
+  // Mode names for logging
+  const char *modeNames[] = {"Bypass", "Algo(Adaptive)", "Neural", "Hybrid(Adaptive+Neural)",
+                              "Frozen(FIR)", "FrozenNeural(FIR+Neural)"};
+  const char *modeName = (mode >= 0 && mode <= 5) ? modeNames[mode] : "Unknown";
+  aecLog("[AEC] Mode set to %d (%s)\n", static_cast<int>(mode), modeName);
+
+  // Update VSS filter frozen state
+  bool shouldFreeze = (mode == aecModeFrozen || mode == aecModeFrozenNeural);
+  for (auto &filter : mVssFilters) {
+    filter->setFrozen(shouldFreeze);
+    if (!shouldFreeze) {
+      // Restore adaptive settings
+      filter->setStepSize(0.1f);
+      filter->setSmoothingFactor(0.05f);
+      filter->setLeakage(0.9999f);
+    }
+  }
 
   // Update neural filter state
-  bool neuralEnabled = (mode == aecModeNeural || mode == aecModeHybrid);
+  bool neuralEnabled = (mode == aecModeNeural || mode == aecModeHybrid ||
+                        mode == aecModeFrozenNeural);
   if (mNeuralFilter) {
     mNeuralFilter->setEnabled(neuralEnabled);
   }

@@ -237,6 +237,40 @@ abstract class RecorderImpl {
   double getVolumeDb();
 
   // ///////////////////////
+  //   GETTERS
+  // ///////////////////////
+
+  /// Get the actual sample rate.
+  @mustBeOverridden
+  int getSampleRate() {
+    throw UnimplementedError();
+  }
+
+  /// Get the actual capture channels.
+  @mustBeOverridden
+  int getCaptureChannels() {
+    throw UnimplementedError();
+  }
+
+  /// Get the actual playback channels.
+  @mustBeOverridden
+  int getPlaybackChannels() {
+    throw UnimplementedError();
+  }
+
+  /// Get the actual capture format.
+  @mustBeOverridden
+  int getCaptureFormat() {
+    throw UnimplementedError();
+  }
+
+  /// Get the actual playback format.
+  @mustBeOverridden
+  int getPlaybackFormat() {
+    throw UnimplementedError();
+  }
+
+  // ///////////////////////
   //   FILTERS
   // ///////////////////////
 
@@ -275,6 +309,15 @@ abstract class RecorderImpl {
   /// Get filter param value.
   @mustBeOverridden
   double getFilterParamValue(RecorderFilterType filterType, int attributeId);
+
+  // ///////////////////////
+  //   SLAVE MODE
+  // ///////////////////////
+
+  /// Check if slave audio is ready (first callback has run successfully).
+  /// This is used to wait for the audio pipeline to stabilize before calibration.
+  @mustBeOverridden
+  bool isSlaveAudioReady();
 
   // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
@@ -324,10 +367,17 @@ abstract class RecorderImpl {
 
   // ==================== AEC CALIBRATION ====================
 
-  /// Generate calibration audio signal (white noise + sine sweep).
+  /// Generate calibration audio signal.
+  /// [signalType] determines the signal:
+  ///   - chirp: Logarithmic sine sweep (default)
+  ///   - click: Impulse train (better for transients)
   /// Returns WAV data as Uint8List that can be loaded into SoLoud.
   @mustBeOverridden
-  Uint8List aecGenerateCalibrationSignal(int sampleRate, int channels);
+  Uint8List aecGenerateCalibrationSignal(
+    int sampleRate,
+    int channels, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  });
 
   /// Start capturing microphone samples for calibration analysis.
   @mustBeOverridden
@@ -486,8 +536,11 @@ abstract class RecorderImpl {
   void aecStopAlignedCalibrationCapture();
 
   /// Run calibration analysis on aligned buffers and apply impulse response.
+  /// [signalType] should match what was used for generation.
   /// Returns the calibration result with delay and impulse info.
   @mustBeOverridden
   AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(
-      int sampleRate);
+    int sampleRate, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  });
 }

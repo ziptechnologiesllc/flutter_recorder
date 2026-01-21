@@ -41,6 +41,21 @@ public:
                            const std::vector<float> &mic_signal,
                            int max_lag = 0);
 
+  /**
+   * Estimate delay with a targeted search around a theoretical value.
+   * This is more robust than full-range search as it avoids false peaks.
+   *
+   * @param ref_signal       The reference (speaker) signal.
+   * @param mic_signal       The microphone signal.
+   * @param centerLag        Expected delay (theoretical or from previous calibration)
+   * @param searchWindow     How far to search on either side of centerLag (samples)
+   * @return                 The estimated lag in samples.
+   */
+  static int estimateDelayTargeted(const std::vector<float> &ref_signal,
+                                   const std::vector<float> &mic_signal,
+                                   int centerLag,
+                                   int searchWindow = 480); // ±10ms at 48kHz
+
 private:
   // Helper for SIMD dot product
   static float dotProduct(const float *a, const float *b, size_t length);

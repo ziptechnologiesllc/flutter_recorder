@@ -583,6 +583,10 @@ interface class Recorder {
   /// 0 is the max volume the capture device can handle.
   ///
   /// **NOTE**: use this only with format [PCMFormat.f32le].
+  /// Get the current volume in dB. Returns -100 if the capture is not inited.
+  /// 0 is the max volume the capture device can handle.
+  ///
+  /// **NOTE**: use this only with format [PCMFormat.f32le].
   double getVolumeDb() {
     if (!_isInitialized) {
       _log.warning(() => 'getVolumeDb: recorder is not initialized.');
@@ -599,6 +603,36 @@ interface class Recorder {
       return -100;
     }
     return _impl.getVolumeDb();
+  }
+
+  /// Get the actual sample rate configured on the device.
+  int getSampleRate() {
+    if (!_isInitialized) return 0;
+    return _impl.getSampleRate();
+  }
+
+  /// Get the actual capture channels configured on the device.
+  int getCaptureChannels() {
+    if (!_isInitialized) return 0;
+    return _impl.getCaptureChannels();
+  }
+
+  /// Get the actual playback channels configured on the device.
+  int getPlaybackChannels() {
+    if (!_isInitialized) return 0;
+    return _impl.getPlaybackChannels();
+  }
+
+  /// Get the actual capture format ID.
+  int getCaptureFormat() {
+    if (!_isInitialized) return 0;
+    return _impl.getCaptureFormat();
+  }
+
+  /// Get the actual playback format ID.
+  int getPlaybackFormat() {
+    if (!_isInitialized) return 0;
+    return _impl.getPlaybackFormat();
   }
 
   // ///////////////////////
@@ -645,6 +679,16 @@ interface class Recorder {
   /// Get filter param value.
   double getFilterParamValue(RecorderFilterType filterType, int attributeId) {
     return _impl.getFilterParamValue(filterType, attributeId);
+  }
+
+  // ///////////////////////
+  //   SLAVE MODE
+  // ///////////////////////
+
+  /// Check if slave audio is ready (first callback has run successfully).
+  /// This is used to wait for the audio pipeline to stabilize before calibration.
+  bool isSlaveAudioReady() {
+    return _impl.isSlaveAudioReady();
   }
 
   // ///////////////////////
@@ -709,10 +753,21 @@ interface class Recorder {
 
   // ==================== AEC CALIBRATION ====================
 
-  /// Generate calibration audio signal (white noise + sine sweep).
+  /// Generate calibration audio signal.
+  /// [signalType] determines the signal:
+  ///   - chirp: Logarithmic sine sweep (default)
+  ///   - click: Impulse train (better for transients)
   /// Returns WAV data as Uint8List that can be loaded into SoLoud.
-  Uint8List aecGenerateCalibrationSignal(int sampleRate, int channels) {
-    return _impl.aecGenerateCalibrationSignal(sampleRate, channels);
+  Uint8List aecGenerateCalibrationSignal(
+    int sampleRate,
+    int channels, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  }) {
+    return _impl.aecGenerateCalibrationSignal(
+      sampleRate,
+      channels,
+      signalType: signalType,
+    );
   }
 
   /// Start capturing microphone samples for calibration analysis.
@@ -921,11 +976,17 @@ interface class Recorder {
   }
 
   /// Run calibration analysis on aligned buffers and apply impulse response.
+  /// [signalType] should match what was used for generation.
   /// Returns the calibration result with delay and impulse info.
   /// This is more accurate than aecRunCalibrationWithImpulse because it uses
   /// frame-aligned signals captured from inside the AEC callback.
   AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(
-      int sampleRate) {
-    return _impl.aecRunAlignedCalibrationWithImpulse(sampleRate);
+    int sampleRate, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  }) {
+    return _impl.aecRunAlignedCalibrationWithImpulse(
+      sampleRate,
+      signalType: signalType,
+    );
   }
 }

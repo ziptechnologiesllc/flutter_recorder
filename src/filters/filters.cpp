@@ -53,6 +53,8 @@ Filters::getFilterParamNames(RecorderFilterType filterType) {
 }
 
 CaptureErrors Filters::addFilter(RecorderFilterType filterType) {
+  std::lock_guard<std::mutex> lock(mFiltersMutex);  // Thread-safe access
+
   // Check if the new filter is already here.
   // Only one kind of filter allowed.
   if (isFilterActive(filterType) >= 0)
@@ -87,6 +89,8 @@ CaptureErrors Filters::addFilter(RecorderFilterType filterType) {
 }
 
 CaptureErrors Filters::removeFilter(RecorderFilterType filterType) {
+  std::lock_guard<std::mutex> lock(mFiltersMutex);  // Thread-safe access
+
   int index = isFilterActive(filterType);
   if (index < 0)
     return CaptureErrors::filterNotFound;
@@ -97,6 +101,20 @@ CaptureErrors Filters::removeFilter(RecorderFilterType filterType) {
   filters.erase(filters.begin() + index);
 
   return CaptureErrors::captureNoError;
+}
+
+void Filters::processAllFilters(void* pInput, ma_uint32 frameCount,
+                                unsigned int channels, ma_format format) {
+  std::lock_guard<std::mutex> lock(mFiltersMutex);  // Thread-safe access
+
+  for (auto &filter : filters) {
+    filter->filter->process(pInput, frameCount, channels, format);
+  }
+}
+
+size_t Filters::getFilterCount() const {
+  std::lock_guard<std::mutex> lock(mFiltersMutex);  // Thread-safe access
+  return filters.size();
 }
 
 void Filters::setFilterParams(RecorderFilterType filterType, int attributeId,
@@ -253,6 +271,17 @@ void Filters::setAecCalibratedOffset(int64_t offset) {
   AdaptiveEchoCancellation *aec =
       static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
   aec->setCalibratedOffset(offset);
+}
+
+void Filters::setAecAcousticDelaySamples(size_t samples) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  aec->setAcousticDelaySamples(samples);
+  aecLog("[AEC] Set acoustic delay: %zu samples (%.2fms)\n",
+         samples, samples * 1000.0f / 48000.0f);
 }
 
 int64_t Filters::getAecCalibratedOffset() const {

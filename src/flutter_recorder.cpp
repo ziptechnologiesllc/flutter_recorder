@@ -8,6 +8,7 @@
 #include "filters/aec/reference_buffer.h"
 #include "filters/filters.h"
 #include "flutter_recorder.h"
+#include "soloud_slave_bridge.h"
 
 #include <cmath>
 #include <memory>
@@ -313,6 +314,32 @@ FFI_PLUGIN_EXPORT void flutter_recorder_getWave(float **wave,
   *wave = capture.getWave(isTheSameAsBefore);
 }
 
+// Getters for actual device parameters
+FFI_PLUGIN_EXPORT unsigned int flutter_recorder_getSampleRate() {
+  if (!capture.isInited()) return 0;
+  return capture.getSampleRate();
+}
+
+FFI_PLUGIN_EXPORT unsigned int flutter_recorder_getCaptureChannels() {
+  if (!capture.isInited()) return 0;
+  return capture.getCaptureChannels();
+}
+
+FFI_PLUGIN_EXPORT unsigned int flutter_recorder_getPlaybackChannels() {
+  if (!capture.isInited()) return 0;
+  return capture.getPlaybackChannels();
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_getCaptureFormat() {
+  if (!capture.isInited()) return 0;
+  return capture.getCaptureFormat();
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_getPlaybackFormat() {
+  if (!capture.isInited()) return 0;
+  return capture.getPlaybackFormat();
+}
+
 float capturedTexture[512];
 FFI_PLUGIN_EXPORT void flutter_recorder_getTexture(float **samples,
                                                    bool *isTheSameAsBefore) {
@@ -430,6 +457,16 @@ FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoringMode(int mode) {
 }
 
 /////////////////////////
+/// SLAVE MODE
+/////////////////////////
+
+// Check if slave audio is ready (first callback has run successfully)
+// This is used to wait for the audio pipeline to stabilize before calibration
+FFI_PLUGIN_EXPORT int flutter_recorder_isSlaveAudioReady() {
+  return soloud_isSlaveAudioReady() ? 1 : 0;
+}
+
+/////////////////////////
 /// AEC (Adaptive Echo Cancellation)
 /////////////////////////
 
@@ -483,7 +520,8 @@ static void aecOutputCallback(const float *data, size_t frameCount,
   }
 }
 
-// Create the AEC reference buffer with the given sample rate and channels
+// Configure the AEC reference buffer with the given sample rate and channels
+// Note: Buffer is pre-allocated at static init time, this just reconfigures dimensions
 FFI_PLUGIN_EXPORT void *
 flutter_recorder_aec_createReferenceBuffer(unsigned int sampleRate,
                                            unsigned int channels) {
@@ -492,23 +530,26 @@ flutter_recorder_aec_createReferenceBuffer(unsigned int sampleRate,
   // During normal AEC operation, only the most recent ~100ms is used
   size_t bufferSizeFrames = sampleRate * 2; // 2 seconds
 
-  // Destroy existing buffer if any
+  // The buffer is pre-allocated at static init time (reference_buffer.cpp)
+  // Just reconfigure its dimensions to match the actual device
   if (g_aecReferenceBuffer != nullptr) {
-    delete g_aecReferenceBuffer;
+    g_aecReferenceBuffer->configure(bufferSizeFrames, channels, sampleRate);
+    aecLog("[AEC] Reference buffer configured: %zu frames @ %uHz, %u channels\n",
+           bufferSizeFrames, sampleRate, channels);
+  } else {
+    aecLog("[AEC] ERROR: Pre-allocated reference buffer is null!\n");
   }
 
-  g_aecReferenceBuffer =
-      new AECReferenceBuffer(bufferSizeFrames, channels, sampleRate);
-  aecLog("[AEC] Reference buffer created: %zu frames @ %uHz, %u channels\n",
-         bufferSizeFrames, sampleRate, channels);
   return static_cast<void *>(g_aecReferenceBuffer);
 }
 
-// Destroy the AEC reference buffer
+// Reset the AEC reference buffer (don't destroy - it's statically allocated)
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_destroyReferenceBuffer() {
+  // Don't delete - the buffer is statically allocated
+  // Just reset its state
   if (g_aecReferenceBuffer != nullptr) {
-    delete g_aecReferenceBuffer;
-    g_aecReferenceBuffer = nullptr;
+    g_aecReferenceBuffer->reset();
+    aecLog("[AEC] Reference buffer reset (static allocation preserved)\n");
   }
 }
 
@@ -583,12 +624,17 @@ FFI_PLUGIN_EXPORT int flutter_recorder_neural_isEnabled() {
 /// AEC CALIBRATION
 /////////////////////////
 
-// Generate calibration WAV data (white noise only)
+// Generate calibration WAV data
+// signalType: 0 = Chirp (log sweep), 1 = Click (impulse train)
 // Returns pointer to WAV data that caller must free with
 // flutter_recorder_nativeFree
 FFI_PLUGIN_EXPORT uint8_t *flutter_recorder_aec_generateCalibrationSignal(
-    unsigned int sampleRate, unsigned int channels, size_t *outSize) {
-  return AECCalibration::generateCalibrationWav(sampleRate, channels, outSize);
+    unsigned int sampleRate, unsigned int channels, size_t *outSize,
+    int signalType) {
+  CalibrationSignalType type = (signalType == 1)
+      ? CalibrationSignalType::Click
+      : CalibrationSignalType::Chirp;
+  return AECCalibration::generateCalibrationWav(sampleRate, channels, outSize, type);
 }
 
 // Start capturing samples for calibration analysis
@@ -733,14 +779,42 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_applyImpulseResponse() {
 }
 
 // Get captured reference signal for visualization
+// Prioritizes aligned buffers (from aligned calibration) over static buffers
 FFI_PLUGIN_EXPORT int
 flutter_recorder_aec_getCalibrationRefSignal(float *dest, int maxLength) {
+  if (!dest || maxLength <= 0) return 0;
+
+  // First try aligned buffers from mFilters (used by aligned calibration)
+  if (mFilters) {
+    const std::vector<float>& aligned = mFilters->getAecAlignedRef();
+    if (!aligned.empty()) {
+      int copyLen = std::min(maxLength, static_cast<int>(aligned.size()));
+      std::memcpy(dest, aligned.data(), copyLen * sizeof(float));
+      return copyLen;
+    }
+  }
+
+  // Fall back to static buffers (old capture method)
   return AECCalibration::getRefSignal(dest, maxLength);
 }
 
 // Get captured mic signal for visualization
+// Prioritizes aligned buffers (from aligned calibration) over static buffers
 FFI_PLUGIN_EXPORT int
 flutter_recorder_aec_getCalibrationMicSignal(float *dest, int maxLength) {
+  if (!dest || maxLength <= 0) return 0;
+
+  // First try aligned buffers from mFilters (used by aligned calibration)
+  if (mFilters) {
+    const std::vector<float>& aligned = mFilters->getAecAlignedMic();
+    if (!aligned.empty()) {
+      int copyLen = std::min(maxLength, static_cast<int>(aligned.size()));
+      std::memcpy(dest, aligned.data(), copyLen * sizeof(float));
+      return copyLen;
+    }
+  }
+
+  // Fall back to static buffers (old capture method)
   return AECCalibration::getMicSignal(dest, maxLength);
 }
 
@@ -971,7 +1045,7 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationAnalysis(
 FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
     unsigned int sampleRate, int *outDelaySamples, float *outDelayMs,
     float *outGain, float *outCorrelation, int *outImpulseLength,
-    int64_t *outCalibratedOffset) {
+    int64_t *outCalibratedOffset, int signalType) {
 
   if (!mFilters) {
     aecLog("[AEC] Cannot run aligned analysis: filters not initialized\n");
@@ -986,8 +1060,11 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
     return 0;
   }
 
+  CalibrationSignalType type = (signalType == 1)
+      ? CalibrationSignalType::Click
+      : CalibrationSignalType::Chirp;
   CalibrationResult result =
-      AECCalibration::analyzeAligned(alignedRef, alignedMic, sampleRate);
+      AECCalibration::analyzeAligned(alignedRef, alignedMic, sampleRate, type);
 
   *outDelaySamples = result.delaySamples;
   *outDelayMs = result.delayMs;
@@ -1001,6 +1078,8 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
     mFilters->setAecImpulseResponse(
         result.impulseResponse.data(),
         static_cast<int>(result.impulseResponse.size()));
+    // Set acoustic delay for slave mode (pure room delay without thread timing)
+    mFilters->setAecAcousticDelaySamples(result.delaySamples);
   }
 
   aecLog("[AEC Aligned Calibration] Result: delay=%.1fms gain=%.3f corr=%.3f "

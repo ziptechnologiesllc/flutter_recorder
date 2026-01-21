@@ -98,7 +98,10 @@ enum PCMFormat {
   s32le(3),
 
   /// 32-bit float, little-endian.
-  f32le(4);
+  f32le(4),
+
+  /// Unknown format - let the system choose optimal (AAudio best practice).
+  unknown(5);
 
   final int value;
 
@@ -110,6 +113,7 @@ enum PCMFormat {
         2 => s24le,
         3 => s32le,
         4 => f32le,
+        5 => unknown,
         _ => throw ArgumentError('Unknown value for PCMFormat: $value'),
       };
 }
@@ -165,16 +169,35 @@ class AecStats {
 /// AEC Mode for A/B testing
 enum AecMode {
   /// Raw microphone input (no AEC)
-  bypass,
+  bypass(0),
 
-  /// Standard Algo (VSS-NLMS) only
-  algo,
+  /// Adaptive NLMS (may cause artifacts on transients)
+  algo(1),
 
   /// Neural (DTLN-AEC) only
-  neural,
+  neural(2),
 
-  /// Hybrid (VSS-NLMS + Neural Post-Filter)
-  hybrid;
+  /// Hybrid: Adaptive NLMS + Neural Post-Filter
+  hybrid(3),
+
+  /// Frozen FIR: Pure calibrated IR, no adaptation (stable for transients)
+  frozen(4),
+
+  /// Frozen FIR + Neural Post-Filter (best for transients with neural cleanup)
+  frozenNeural(5);
+
+  final int value;
+  const AecMode(this.value);
+
+  static AecMode fromValue(int value) => switch (value) {
+        0 => bypass,
+        1 => algo,
+        2 => neural,
+        3 => hybrid,
+        4 => frozen,
+        5 => frozenNeural,
+        _ => throw ArgumentError('Unknown value for AecMode: $value'),
+      };
 }
 
 /// Neural model types for AEC
@@ -197,4 +220,16 @@ enum NeuralModelType {
         2 => lstmV1,
         _ => throw ArgumentError('Unknown value for NeuralModelType: $value'),
       };
+}
+
+/// Calibration signal type for AEC
+enum CalibrationSignalType {
+  /// Logarithmic sine sweep (chirp) - good for frequency response
+  chirp(0),
+
+  /// Click train (impulse) - good for transient response, direct IR measurement
+  click(1);
+
+  final int value;
+  const CalibrationSignalType(this.value);
 }

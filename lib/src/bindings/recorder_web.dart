@@ -405,6 +405,16 @@ class RecorderWeb extends RecorderImpl {
   }
 
   // ///////////////////////
+  //   SLAVE MODE
+  // ///////////////////////
+
+  @override
+  bool isSlaveAudioReady() {
+    // On web, we don't use slave mode - always return true
+    return true;
+  }
+
+  // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////
 
@@ -464,7 +474,11 @@ class RecorderWeb extends RecorderImpl {
   // ==================== AEC CALIBRATION ====================
 
   @override
-  Uint8List aecGenerateCalibrationSignal(int sampleRate, int channels) {
+  Uint8List aecGenerateCalibrationSignal(
+    int sampleRate,
+    int channels, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  }) {
     throw UnsupportedError('AEC calibration is not supported on web platform');
   }
 
@@ -620,7 +634,9 @@ class RecorderWeb extends RecorderImpl {
 
   @override
   AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(
-      int sampleRate) {
+    int sampleRate, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  }) {
     throw UnsupportedError('AEC is not supported on web platform');
   }
 }

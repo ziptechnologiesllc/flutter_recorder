@@ -112,6 +112,10 @@ void VssNlmsFilter::setWeights(const float *coeffs, size_t count) {
   if (copy_len < filter_length) {
     std::fill(weights.begin() + copy_len, weights.end(), 0.0f);
   }
+  // Debug: verify weights were set
+  float energy = getCoeffEnergy();
+  aecLog("[VssNlmsFilter] setWeights: copied %zu/%zu coeffs, energy=%.4f\n",
+         copy_len, filter_length, energy);
 }
 
 float VssNlmsFilter::getCoeffEnergy() const {
@@ -213,9 +217,22 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
     correlation_metric = (p_est * p_est) / denominator;
   }
 
-  // Adapt step size: High correlation -> Large step. Low correlation -> Small
-  // step.
-  float mu_eff = mu_max * correlation_metric;
+  // DOUBLE-TALK DETECTION:
+  // When correlation is low, the error signal contains mostly near-end speech
+  // (singing/guitar), NOT echo. We must FREEZE adaptation to avoid corrupting
+  // the filter with non-echo content.
+  //
+  // correlation_threshold = 0.3 means:
+  // - Above 0.3: Error is mostly correlated with reference (echo) -> adapt
+  // - Below 0.3: Error is uncorrelated (near-end speech) -> freeze
+  float mu_eff = 0.0f;
+  if (correlation_metric > mCorrelationThreshold) {
+    // Scale step size by how much above threshold we are
+    float excess = correlation_metric - mCorrelationThreshold;
+    float scale = excess / (1.0f - mCorrelationThreshold + epsilon);
+    mu_eff = mu_max * scale;
+  }
+  // If below threshold, mu_eff stays 0 -> complete freeze
 
   // Clamp for stability
   if (mu_eff > mu_max)
@@ -223,16 +240,35 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   mLastStep = mu_eff;
   mLastCorrelation = correlation_metric;
 
-  // 6. Update Weights
+  // 6. Update Weights (skip if frozen - pure FIR mode)
+  if (mFrozen) {
+    // Pure FIR convolution - no weight updates
+    mLastStep = 0.0f;
+    return e;
+  }
+
   // NLMS rule: w[n+1] = w[n] + (mu / (||x||^2 + eps)) * e[n] * x[n]
   float norm_factor = energy_x_inst + epsilon;
   float step = mu_eff / norm_factor;
   float final_step = step * e; // Pre-multiply error
 
+  // CRITICAL: Only apply leakage when there's reference signal
+  // This preserves calibrated coefficients during silence
+  // Without this, coefficients decay to zero in ~2 seconds of no audio
+  float effective_leakage = (energy_x_inst > 1e-8f) ? leakage : 1.0f;
+
   static int vssLogCount = 0;
+  static float maxAbsError = 0.0f;
+  static float maxAbsYEst = 0.0f;
+  static float maxAbsMic = 0.0f;
+  if (std::abs(e) > maxAbsError) maxAbsError = std::abs(e);
+  if (std::abs(y_est) > maxAbsYEst) maxAbsYEst = std::abs(y_est);
+  if (std::abs(mic_input) > maxAbsMic) maxAbsMic = std::abs(mic_input);
+
   if (vssLogCount++ % 48000 == 0) {  // Log once per second at 48kHz
-    aecLog("[VSS_RT] mu_eff=%.6f p_est=%.6f var_e=%.6f var_x=%.6f corr=%.6f\n",
-           mu_eff, p_est, var_e, var_x, correlation_metric);
+    aecLog("[VSS_RT] mu_eff=%.6f corr=%.6f | maxE=%.3f maxYest=%.3f maxMic=%.3f\n",
+           mu_eff, correlation_metric, maxAbsError, maxAbsYEst, maxAbsMic);
+    maxAbsError = maxAbsYEst = maxAbsMic = 0.0f;  // Reset for next interval
   }
 
   // ============================================
@@ -241,7 +277,7 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
 
 #ifdef USE_NEON
   float32x4_t v_step = vdupq_n_f32(final_step);
-  float32x4_t v_leak = vdupq_n_f32(leakage);
+  float32x4_t v_leak = vdupq_n_f32(effective_leakage);
 
   for (size_t i = 0; i < filter_length; i += 4) {
     float32x4_t v_w = vld1q_f32(p_w + i);
@@ -256,7 +292,7 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
 
 #elif defined(USE_AVX)
   __m256 v_step = _mm256_set1_ps(final_step);
-  __m256 v_leak = _mm256_set1_ps(leakage);
+  __m256 v_leak = _mm256_set1_ps(effective_leakage);
 
   for (size_t i = 0; i < filter_length; i += 8) {
     __m256 v_w = _mm256_loadu_ps(p_w + i);
@@ -269,7 +305,7 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   }
 #else
   for (size_t i = 0; i < filter_length; i++) {
-    p_w[i] = (p_w[i] * leakage) + (final_step * p_x[i]);
+    p_w[i] = (p_w[i] * effective_leakage) + (final_step * p_x[i]);
   }
 #endif
 

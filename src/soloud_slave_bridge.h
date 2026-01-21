@@ -51,6 +51,16 @@ SLAVE_BRIDGE_EXPORT void soloud_unregisterSlaveMixCallback();
 // Check if slave mode is active
 SLAVE_BRIDGE_EXPORT bool soloud_isSlaveMode();
 
+// Check if slave audio is ready (at least one successful callback has run)
+// This is used to ensure the audio pipeline is flowing before starting calibration
+SLAVE_BRIDGE_EXPORT bool soloud_isSlaveAudioReady();
+
+// Reset the slave audio ready flag (called during deinit)
+SLAVE_BRIDGE_EXPORT void soloud_resetSlaveAudioReady();
+
+// Mark slave audio as ready (called from data_callback on first successful mix)
+SLAVE_BRIDGE_EXPORT void soloud_setSlaveAudioReady();
+
 #ifdef __cplusplus
 }
 #endif

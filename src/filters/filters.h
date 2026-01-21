@@ -7,6 +7,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -68,6 +69,8 @@ public:
   // Set calibrated offset for position-based sync
   void setAecCalibratedOffset(int64_t offset);
   int64_t getAecCalibratedOffset() const;
+  // Set acoustic delay for slave mode (pure room delay, no thread timing)
+  void setAecAcousticDelaySamples(size_t samples);
 
   // Aligned calibration capture (for accurate delay estimation)
   void startAecCalibrationCapture(size_t maxSamples);
@@ -89,6 +92,14 @@ public:
   unsigned int mChannels;
 
   std::vector<std::unique_ptr<FilterObject>> filters;
+  mutable std::mutex mFiltersMutex;  // Protects 'filters' vector for thread-safety
+
+  // Thread-safe method to process all filters (for use in audio callback)
+  void processAllFilters(void* pInput, ma_uint32 frameCount,
+                         unsigned int channels, ma_format format);
+
+  // Thread-safe method to get filter count (for use in audio callback)
+  size_t getFilterCount() const;
 };
 
 #endif // PLAYER_H

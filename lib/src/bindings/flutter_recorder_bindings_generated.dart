@@ -152,8 +152,8 @@ class FlutterRecorderBindings {
       ffi.NativeFunction<
           ffi.UnsignedInt Function(ffi.Int, ffi.Int, ffi.UnsignedInt,
               ffi.UnsignedInt, ffi.Int)>>('flutter_recorder_init');
-  late final _flutter_recorder_init =
-      _flutter_recorder_initPtr.asFunction<int Function(int, int, int, int, int)>();
+  late final _flutter_recorder_init = _flutter_recorder_initPtr
+      .asFunction<int Function(int, int, int, int, int)>();
 
   void flutter_recorder_deinit() {
     return _flutter_recorder_deinit();
@@ -443,9 +443,61 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_setFftSmoothing =
       _flutter_recorder_setFftSmoothingPtr.asFunction<void Function(double)>();
 
+
+
   /// //////////////////////
-  /// MONITORING
+  /// GETTERS
   /// //////////////////////
+
+  int flutter_recorder_getSampleRate() {
+    return _flutter_recorder_getSampleRate();
+  }
+
+  late final _flutter_recorder_getSampleRatePtr =
+      _lookup<ffi.NativeFunction<ffi.UnsignedInt Function()>>(
+          'flutter_recorder_getSampleRate');
+  late final _flutter_recorder_getSampleRate =
+      _flutter_recorder_getSampleRatePtr.asFunction<int Function()>();
+
+  int flutter_recorder_getCaptureChannels() {
+    return _flutter_recorder_getCaptureChannels();
+  }
+
+  late final _flutter_recorder_getCaptureChannelsPtr =
+      _lookup<ffi.NativeFunction<ffi.UnsignedInt Function()>>(
+          'flutter_recorder_getCaptureChannels');
+  late final _flutter_recorder_getCaptureChannels =
+      _flutter_recorder_getCaptureChannelsPtr.asFunction<int Function()>();
+
+  int flutter_recorder_getPlaybackChannels() {
+    return _flutter_recorder_getPlaybackChannels();
+  }
+
+  late final _flutter_recorder_getPlaybackChannelsPtr =
+      _lookup<ffi.NativeFunction<ffi.UnsignedInt Function()>>(
+          'flutter_recorder_getPlaybackChannels');
+  late final _flutter_recorder_getPlaybackChannels =
+      _flutter_recorder_getPlaybackChannelsPtr.asFunction<int Function()>();
+
+  int flutter_recorder_getCaptureFormat() {
+    return _flutter_recorder_getCaptureFormat();
+  }
+
+  late final _flutter_recorder_getCaptureFormatPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_getCaptureFormat');
+  late final _flutter_recorder_getCaptureFormat =
+      _flutter_recorder_getCaptureFormatPtr.asFunction<int Function()>();
+
+  int flutter_recorder_getPlaybackFormat() {
+    return _flutter_recorder_getPlaybackFormat();
+  }
+
+  late final _flutter_recorder_getPlaybackFormatPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_getPlaybackFormat');
+  late final _flutter_recorder_getPlaybackFormat =
+      _flutter_recorder_getPlaybackFormatPtr.asFunction<int Function()>();
   void flutter_recorder_setMonitoring(
     bool enabled,
   ) {
@@ -473,6 +525,21 @@ class FlutterRecorderBindings {
           'flutter_recorder_setMonitoringMode');
   late final _flutter_recorder_setMonitoringMode =
       _flutter_recorder_setMonitoringModePtr.asFunction<void Function(int)>();
+
+  /// //////////////////////
+  /// SLAVE MODE
+  /// //////////////////////
+  /// Check if slave audio is ready (first callback has run successfully)
+  /// Used to wait for the audio pipeline to stabilize before calibration
+  int flutter_recorder_isSlaveAudioReady() {
+    return _flutter_recorder_isSlaveAudioReady();
+  }
+
+  late final _flutter_recorder_isSlaveAudioReadyPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_isSlaveAudioReady');
+  late final _flutter_recorder_isSlaveAudioReady =
+      _flutter_recorder_isSlaveAudioReadyPtr.asFunction<int Function()>();
 
   /// //////////////////////
   /// FILTERS
@@ -717,48 +784,33 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_neural_isEnabled =
       _flutter_recorder_neural_isEnabledPtr.asFunction<int Function()>();
 
-  /// Load dual-stage model (for future DTLN 2-stage support)
-  int flutter_recorder_neural_loadDualStageModel(
-    ffi.Pointer<ffi.Char> model1Path,
-    ffi.Pointer<ffi.Char> model2Path,
-  ) {
-    return _flutter_recorder_neural_loadDualStageModel(
-      model1Path,
-      model2Path,
-    );
-  }
-
-  late final _flutter_recorder_neural_loadDualStageModelPtr = _lookup<
-          ffi.NativeFunction<
-              ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>>(
-      'flutter_recorder_neural_loadDualStageModel');
-  late final _flutter_recorder_neural_loadDualStageModel =
-      _flutter_recorder_neural_loadDualStageModelPtr.asFunction<
-          int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>)>();
-
-  /// //////////////////////
-  /// AEC Calibration
-  /// //////////////////////
+  /// Calibration signal types
+  /// 0 = Chirp (log sweep), 1 = Click (impulse train)
   ffi.Pointer<ffi.Uint8> flutter_recorder_aec_generateCalibrationSignal(
     int sampleRate,
     int channels,
     ffi.Pointer<ffi.Size> outSize,
+    int signalType,
   ) {
     return _flutter_recorder_aec_generateCalibrationSignal(
       sampleRate,
       channels,
       outSize,
+      signalType,
     );
   }
 
   late final _flutter_recorder_aec_generateCalibrationSignalPtr = _lookup<
-          ffi.NativeFunction<
-              ffi.Pointer<ffi.Uint8> Function(
-                  ffi.UnsignedInt, ffi.UnsignedInt, ffi.Pointer<ffi.Size>)>>(
-      'flutter_recorder_aec_generateCalibrationSignal');
+      ffi.NativeFunction<
+          ffi.Pointer<ffi.Uint8> Function(
+              ffi.UnsignedInt,
+              ffi.UnsignedInt,
+              ffi.Pointer<ffi.Size>,
+              ffi.Int)>>('flutter_recorder_aec_generateCalibrationSignal');
   late final _flutter_recorder_aec_generateCalibrationSignal =
       _flutter_recorder_aec_generateCalibrationSignalPtr.asFunction<
-          ffi.Pointer<ffi.Uint8> Function(int, int, ffi.Pointer<ffi.Size>)>();
+          ffi.Pointer<ffi.Uint8> Function(
+              int, int, ffi.Pointer<ffi.Size>, int)>();
 
   void flutter_recorder_aec_startCalibrationCapture(
     int maxSamples,
@@ -1344,6 +1396,7 @@ class FlutterRecorderBindings {
     ffi.Pointer<ffi.Float> outCorrelation,
     ffi.Pointer<ffi.Int> outImpulseLength,
     ffi.Pointer<ffi.Int64> outCalibratedOffset,
+    int signalType,
   ) {
     return _flutter_recorder_aec_runAlignedCalibrationWithImpulse(
       sampleRate,
@@ -1353,6 +1406,7 @@ class FlutterRecorderBindings {
       outCorrelation,
       outImpulseLength,
       outCalibratedOffset,
+      signalType,
     );
   }
 
@@ -1366,7 +1420,8 @@ class FlutterRecorderBindings {
                       ffi.Pointer<ffi.Float>,
                       ffi.Pointer<ffi.Float>,
                       ffi.Pointer<ffi.Int>,
-                      ffi.Pointer<ffi.Int64>)>>(
+                      ffi.Pointer<ffi.Int64>,
+                      ffi.Int)>>(
           'flutter_recorder_aec_runAlignedCalibrationWithImpulse');
   late final _flutter_recorder_aec_runAlignedCalibrationWithImpulse =
       _flutter_recorder_aec_runAlignedCalibrationWithImpulsePtr.asFunction<
@@ -1377,7 +1432,8 @@ class FlutterRecorderBindings {
               ffi.Pointer<ffi.Float>,
               ffi.Pointer<ffi.Float>,
               ffi.Pointer<ffi.Int>,
-              ffi.Pointer<ffi.Int64>)>();
+              ffi.Pointer<ffi.Int64>,
+              int)>();
 }
 
 typedef dartSilenceChangedCallback_t

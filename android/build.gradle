@@ -61,14 +61,15 @@ android {
 
     defaultConfig {
         minSdk = 21
+
+        // Only build for arm64 (LiteRT prebuilt available for arm64-v8a only)
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
     }
 
-    buildFeatures {
-        prefab = true
-    }
 }
 
 dependencies {
-    // Google Play Services TFLite - provides Prefab support for native linking
-    implementation "com.google.android.gms:play-services-tflite-java:16.4.0"
+    // LiteRT is linked directly via prebuilt .so files in CMakeLists.txt
 }

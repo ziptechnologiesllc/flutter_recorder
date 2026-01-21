@@ -91,7 +91,9 @@ int DelayEstimator::estimateDelay(const std::vector<float> &ref_signal,
     return 0; // Too short to estimate reliably
 
   if (max_lag <= 0) {
-    max_lag = 4800;  // 100ms @ 48kHz - reasonable max acoustic delay
+    // 500ms @ 48kHz - Android can have very high audio latency (300-400ms)
+    // This covers typical Android AAudio/OpenSL latency plus acoustic delay
+    max_lag = 24000;
   }
   if (max_lag > static_cast<int>(n) - 1) {
     max_lag = static_cast<int>(n) - 1;
@@ -184,6 +186,85 @@ int DelayEstimator::estimateDelay(const std::vector<float> &ref_signal,
 
   aecLog("[DelayEstimator] Best lag %d samples (%.2fms), correlation=%.4f (signed=%.4f)\n",
          bestLag, bestLag * 1000.0 / 48000.0, maxAbsCorr, bestCorrSigned);
+
+  return bestLag;
+}
+
+int DelayEstimator::estimateDelayTargeted(const std::vector<float> &ref_signal,
+                                          const std::vector<float> &mic_signal,
+                                          int centerLag,
+                                          int searchWindow) {
+  if (ref_signal.empty() || mic_signal.empty())
+    return centerLag;
+
+  size_t n = std::min(ref_signal.size(), mic_signal.size());
+  if (n < 256)
+    return centerLag;
+
+  // Define search range around center
+  int minLag = std::max(0, centerLag - searchWindow);
+  int maxLag = std::min(static_cast<int>(n) - 128, centerLag + searchWindow);
+
+  if (minLag >= maxLag)
+    return centerLag;
+
+  aecLog("[DelayEstimator Targeted] Searching around %d samples (±%d), range [%d, %d]\n",
+         centerLag, searchWindow, minLag, maxLag);
+
+  // Calculate means for normalization
+  double refMean = 0, micMean = 0;
+  for (size_t i = 0; i < n; ++i) {
+    refMean += ref_signal[i];
+    micMean += mic_signal[i];
+  }
+  refMean /= n;
+  micMean /= n;
+
+  // Calculate standard deviations
+  double refStd = 0, micStd = 0;
+  for (size_t i = 0; i < n; ++i) {
+    refStd += (ref_signal[i] - refMean) * (ref_signal[i] - refMean);
+    micStd += (mic_signal[i] - micMean) * (mic_signal[i] - micMean);
+  }
+  refStd = std::sqrt(refStd / n);
+  micStd = std::sqrt(micStd / n);
+
+  if (refStd < 1e-10 || micStd < 1e-10) {
+    aecLog("[DelayEstimator Targeted] Insufficient variance, returning center\n");
+    return centerLag;
+  }
+
+  // Create normalized copies
+  std::vector<float> refNorm(n), micNorm(n);
+  for (size_t i = 0; i < n; ++i) {
+    refNorm[i] = (ref_signal[i] - refMean) / refStd;
+    micNorm[i] = (mic_signal[i] - micMean) / micStd;
+  }
+
+  // Search only within window around center
+  double maxAbsCorr = 0;
+  int bestLag = centerLag;
+  double bestCorrSigned = 0;
+
+  for (int tau = minLag; tau <= maxLag; ++tau) {
+    size_t len = n - tau;
+    if (len < 128) continue;
+
+    double sum = 0;
+    for (size_t i = 0; i < len; ++i) {
+      sum += refNorm[i] * micNorm[i + tau];
+    }
+    double corr = sum / len;
+
+    if (std::abs(corr) > maxAbsCorr) {
+      maxAbsCorr = std::abs(corr);
+      bestCorrSigned = corr;
+      bestLag = tau;
+    }
+  }
+
+  aecLog("[DelayEstimator Targeted] Best lag %d samples (%.2fms), corr=%.4f, delta from center=%d\n",
+         bestLag, bestLag * 1000.0 / 48000.0, maxAbsCorr, bestLag - centerLag);
 
   return bestLag;
 }

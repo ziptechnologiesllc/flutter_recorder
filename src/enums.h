@@ -30,7 +30,8 @@ typedef enum PCMFormat {
   pcm_s16,
   pcm_s24,
   pcm_s32,
-  pcm_f32
+  pcm_f32,
+  pcm_unknown
 } PCMFormatInternal_t;
 
 typedef enum RecorderFilterType {
@@ -41,9 +42,11 @@ typedef enum RecorderFilterType {
 
 typedef enum AecMode {
   aecModeBypass = 0,
-  aecModeAlgo = 1,
-  aecModeNeural = 2,
-  aecModeHybrid = 3
+  aecModeAlgo = 1,       // Adaptive NLMS (legacy)
+  aecModeNeural = 2,     // Neural post-filter only
+  aecModeHybrid = 3,     // Adaptive NLMS + Neural
+  aecModeFrozen = 4,     // Frozen FIR (pure calibrated IR, no adaptation)
+  aecModeFrozenNeural = 5 // Frozen FIR + Neural post-filter
 } AecMode_t;
 
 typedef struct {

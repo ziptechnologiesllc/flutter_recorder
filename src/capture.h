@@ -60,6 +60,13 @@ public:
 
     void stop();
 
+    // Getters for actual device parameters (populated after init)
+    unsigned int getSampleRate() const { return device.sampleRate; }
+    unsigned int getCaptureChannels() const { return device.capture.channels; }
+    unsigned int getPlaybackChannels() const { return device.playback.channels; }
+    int getCaptureFormat() const { return (int)device.capture.format; }
+    int getPlaybackFormat() const { return (int)device.playback.format; }
+
     void startStreamingData();
     void stopStreamingData();
 
@@ -114,7 +121,7 @@ public:
     /// the number of bytes per sample
     int bytesPerSample;
 
-    Filters *mFilters;
+    Filters *mFilters = nullptr;  // Initialize to null for thread-safety
 
     /// @brief Start capturing samples for AEC calibration
     /// @param maxSamples Maximum number of mono samples to capture
@@ -152,6 +159,10 @@ public:
     /// Total frames captured since device started (for AEC sync)
     /// Atomic for lock-free access from data callback
     std::atomic<size_t> mTotalFramesCaptured{0};
+
+    /// Buffer for format conversion (e.g. S16 -> F32) used in data_callback
+    /// Defined here to avoid reallocating in the audio thread
+    std::vector<float> mConversionBuffer;
 
 private:
     ma_context context;

@@ -44,11 +44,50 @@ if (ANDROID)
   # Support Android 15 16k page size.
   target_link_options(flutter_recorder PRIVATE "-Wl,-z,max-page-size=16384,-O2")
 
-  # Google Play Services TFLite provides Prefab support
-  find_package(tensorflowlite_jni_gms_client REQUIRED CONFIG)
+  # LiteRT prebuilt library location
+  set(LITERT_PREBUILT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../prebuilt/android/${ANDROID_ABI}")
 
-  target_compile_definitions(flutter_recorder PRIVATE USE_TFLITE TFLITE_IN_GMSCORE TFLITE_WITH_STABLE_ABI)
-  target_link_libraries(flutter_recorder log tensorflowlite_jni_gms_client::tensorflowlite_jni_gms_client)
+  if (EXISTS "${LITERT_PREBUILT_DIR}/libLiteRt.so")
+    message(STATUS "[flutter_recorder] Using prebuilt LiteRT for Android ${ANDROID_ABI}")
+
+    # Include LiteRT headers and OpenCL headers (for GPU support)
+    target_include_directories(flutter_recorder SYSTEM PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../prebuilt/include")
+
+    # Link LiteRT runtime and Android libs
+    target_link_libraries(flutter_recorder log android EGL GLESv3 "${LITERT_PREBUILT_DIR}/libLiteRt.so")
+    target_compile_definitions(flutter_recorder PRIVATE USE_TFLITE)
+
+    # Copy libLiteRt.so to output for packaging
+    add_custom_command(TARGET flutter_recorder POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${LITERT_PREBUILT_DIR}/libLiteRt.so"
+        $<TARGET_FILE_DIR:flutter_recorder>)
+
+    # GPU accelerator (loaded dynamically at runtime)
+    if (EXISTS "${LITERT_PREBUILT_DIR}/libLiteRtGpuAccelerator.so")
+      message(STATUS "[flutter_recorder] GPU accelerator available")
+      target_compile_definitions(flutter_recorder PRIVATE USE_LITERT_GPU)
+      add_custom_command(TARGET flutter_recorder POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${LITERT_PREBUILT_DIR}/libLiteRtGpuAccelerator.so"
+          $<TARGET_FILE_DIR:flutter_recorder>)
+    endif()
+
+    # NPU accelerator - Qualcomm QNN HTP (loaded dynamically at runtime)
+    if (EXISTS "${LITERT_PREBUILT_DIR}/libQnnHtp.so")
+      message(STATUS "[flutter_recorder] Qualcomm NPU accelerator available")
+      target_compile_definitions(flutter_recorder PRIVATE USE_LITERT_NPU)
+      add_custom_command(TARGET flutter_recorder POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${LITERT_PREBUILT_DIR}/libQnnHtp.so"
+          $<TARGET_FILE_DIR:flutter_recorder>)
+    endif()
+
+  else()
+    message(STATUS "[flutter_recorder] LiteRT prebuilt not found at ${LITERT_PREBUILT_DIR}")
+    message(STATUS "[flutter_recorder] Run scripts/build_litert_android.sh to build LiteRT")
+    message(STATUS "[flutter_recorder] Neural post-filter will be disabled")
+  endif()
 endif()
 
 # iOS: TFLite linked via CocoaPods (TensorFlowLiteC) - podspec handles linking
