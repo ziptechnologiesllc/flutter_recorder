@@ -32,12 +32,36 @@ set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -O2 -Wall -Wno-error -fPIC -
 # This can be changed to accommodate different builds.
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../src" "${CMAKE_CURRENT_BINARY_DIR}/shared")
 
+# Determine architecture for prebuilt path
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|ARM64")
+  set(LINUX_ARCH "arm64")
+else()
+  set(LINUX_ARCH "x64")
+endif()
+
 # List of absolute paths to libraries that should be bundled with the plugin.
-# This list could contain prebuilt libraries, or libraries created by an
-# external build triggered from this build file.
-set(flutter_recorder_bundled_libraries
-  # Defined in ../src/CMakeLists.txt.
-  # This can be changed to accommodate different builds.
-  $<TARGET_FILE:flutter_recorder>
-  PARENT_SCOPE
-)
+set(LITERT_PREBUILT_ARCH "${CMAKE_CURRENT_SOURCE_DIR}/../prebuilt/linux/${LINUX_ARCH}/libLiteRt.so")
+set(LITERT_PREBUILT_LEGACY "${CMAKE_CURRENT_SOURCE_DIR}/../prebuilt/linux/libLiteRt.so")
+
+# Find LiteRT library (prefer arch-specific, fallback to legacy path)
+if (EXISTS "${LITERT_PREBUILT_ARCH}")
+  set(LITERT_PREBUILT "${LITERT_PREBUILT_ARCH}")
+elseif (EXISTS "${LITERT_PREBUILT_LEGACY}")
+  set(LITERT_PREBUILT "${LITERT_PREBUILT_LEGACY}")
+else()
+  set(LITERT_PREBUILT "")
+endif()
+
+# Bundle flutter_recorder and LiteRT
+if (LITERT_PREBUILT)
+  set(flutter_recorder_bundled_libraries
+    $<TARGET_FILE:flutter_recorder>
+    "${LITERT_PREBUILT}"
+    PARENT_SCOPE
+  )
+else()
+  set(flutter_recorder_bundled_libraries
+    $<TARGET_FILE:flutter_recorder>
+    PARENT_SCOPE
+  )
+endif()

@@ -205,19 +205,15 @@ enum NeuralModelType {
   /// No neural model loaded
   none(0),
 
-  /// DTLN-AEC 48kHz model
-  dtlnAec48k(1),
-
-  /// LSTM-based AEC model
-  lstmV1(2);
+  /// AEC mask v3 (1M params, 16-frame context)
+  aecMaskV3(1);
 
   final int value;
   const NeuralModelType(this.value);
 
   static NeuralModelType fromValue(int value) => switch (value) {
         0 => none,
-        1 => dtlnAec48k,
-        2 => lstmV1,
+        1 => aecMaskV3,
         _ => throw ArgumentError('Unknown value for NeuralModelType: $value'),
       };
 }

@@ -20,8 +20,7 @@
 // Neural model types for runtime selection
 enum class NeuralModelType {
   NONE = 0,         // No neural processing (bypass mode)
-  DTLN_AEC_48K = 1, // DTLN-AEC 48kHz model (2-stage or single-stage)
-  LSTM_V1 = 2       // LSTM-based AEC model (single-stage)
+  AEC_MASK_V3 = 1   // AEC mask v3 (1M params, 16-frame context)
 };
 
 /**
@@ -77,9 +76,10 @@ public:
   NeuralModelType getLoadedModelType() const { return mCurrentModelType; }
 
 private:
-  static constexpr int N_FFT = 2048;
-  static constexpr int HOP_SIZE = 512;
-  static constexpr int N_BINS = (N_FFT / 2 + 1);
+  static constexpr int N_FFT = 1024;
+  static constexpr int HOP_SIZE = 256;
+  static constexpr int N_BINS = (N_FFT / 2 + 1);      // 513
+  static constexpr int CONTEXT_FRAMES = 16;
 
   void processSingleStage(const float *micSignal, const float *refSignal,
                           float *output, unsigned int frameCount);
@@ -107,6 +107,11 @@ private:
   std::vector<float> mMagLpb;
 
   unsigned int mWindowPos = 0;
+
+  // v3 context buffer: ring buffer for 16 frames of [mic_mag, lpb_mag]
+  std::vector<float> mContextBuffer;  // [CONTEXT_FRAMES * N_BINS * 2]
+  size_t mContextWritePos = 0;
+  size_t mContextFrameCount = 0;
 
 #ifdef USE_TFLITE
   // LiteRT C API members

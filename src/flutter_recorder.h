@@ -140,14 +140,14 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_getMode();
 /// Neural Model Control
 /////////////////////////
 // Load neural model by type
-// modelType: 0=NONE, 1=DTLN_AEC_48K, 2=LSTM_V1
+// modelType: 0=NONE, 1=AEC_MASK_V3
 // assetBasePath: Platform-specific path to assets directory
 // Returns: 1 if successful, 0 if failed
 FFI_PLUGIN_EXPORT int flutter_recorder_neural_loadModel(int modelType,
                                                         const char *assetBasePath);
 
 // Get currently loaded neural model type
-// Returns: 0=NONE, 1=DTLN_AEC_48K, 2=LSTM_V1
+// Returns: 0=NONE, 1=AEC_MASK_V3
 FFI_PLUGIN_EXPORT int flutter_recorder_neural_getLoadedModel();
 
 // Enable/disable neural post-filter

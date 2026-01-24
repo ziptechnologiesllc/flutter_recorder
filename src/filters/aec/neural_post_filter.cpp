@@ -40,6 +40,11 @@ NeuralPostFilter::NeuralPostFilter(unsigned int sampleRate,
   mPhaseMic.resize(N_BINS);
   mMagLpb.resize(N_BINS);
 
+  // Initialize v3 context buffer: 16 frames × (513 mic + 513 lpb)
+  mContextBuffer.assign(CONTEXT_FRAMES * N_BINS * 2, 0.0f);
+  mContextWritePos = 0;
+  mContextFrameCount = 0;
+
 #ifdef USE_TFLITE
   // Initialize LiteRT Environment
   if (LiteRtCreateEnvironment(0, nullptr, &mEnv) != kLiteRtStatusOk) {
@@ -59,6 +64,11 @@ NeuralPostFilter::~NeuralPostFilter() {
 }
 
 void NeuralPostFilter::reset() {
+  // Reset context buffer state
+  std::fill(mContextBuffer.begin(), mContextBuffer.end(), 0.0f);
+  mContextWritePos = 0;
+  mContextFrameCount = 0;
+
 #ifdef USE_TFLITE
   // Destroy existing buffers and models
   for (auto &buffer : mInputBuffers) {
@@ -186,12 +196,8 @@ bool NeuralPostFilter::loadModelByType(NeuralModelType modelType,
     return loadModel(assetBasePath);
   }
 
-  std::string fileName;
-  if (modelType == NeuralModelType::DTLN_AEC_48K) {
-    fileName = "dtln_aec_48k_final.tflite";
-  } else if (modelType == NeuralModelType::LSTM_V1) {
-    fileName = "aec_lstm_v1.tflite";
-  }
+  // v3 is the only supported model
+  std::string fileName = "aec_mask_v3.tflite";
 
   std::string fullPath = assetBasePath;
   if (!fullPath.empty() && fullPath.back() != '/')
@@ -285,18 +291,47 @@ void NeuralPostFilter::processSingleStage(const float *micSignal,
   if (!mCompiledModel || mInputBuffers.empty() || mOutputBuffers.empty())
     return;
 
+  // 1. Store current frame's raw magnitudes in ring buffer
+  //    Format: [mic_mag(513), lpb_mag(513)] per frame
+  size_t frameOffset = mContextWritePos * N_BINS * 2;
+  for (int i = 0; i < N_BINS; ++i) {
+    mContextBuffer[frameOffset + i] = mMagMic[i];
+    mContextBuffer[frameOffset + N_BINS + i] = mMagLpb[i];
+  }
+
+  // Advance ring buffer position
+  mContextWritePos = (mContextWritePos + 1) % CONTEXT_FRAMES;
+  if (mContextFrameCount < CONTEXT_FRAMES) {
+    mContextFrameCount++;
+  }
+
+  // 2. Skip inference until we have 16 frames of context
+  if (mContextFrameCount < CONTEXT_FRAMES) {
+    return;  // Output will be unmodified (passthrough via mMagMic)
+  }
+
+  // 3. Prepare input tensor: [1, 16, 1026] in temporal order (oldest→newest)
+  //    Model has internal log compression: log1p(x*10)/3.0
   void *inputPtr = nullptr;
   if (LiteRtLockTensorBuffer(mInputBuffers[0], &inputPtr,
                              kLiteRtTensorBufferLockModeWrite) ==
       kLiteRtStatusOk) {
-    float eps = 1e-6f;
-    for (int i = 0; i < N_BINS; ++i) {
-      ((float *)inputPtr)[i] = std::log(mMagMic[i] + eps);
-      ((float *)inputPtr)[N_BINS + i] = std::log(mMagLpb[i] + eps);
+    float *inputData = (float *)inputPtr;
+
+    // Copy frames in temporal order: oldest first, newest (current) last
+    // mContextWritePos now points to the oldest frame (just wrapped)
+    for (int f = 0; f < CONTEXT_FRAMES; ++f) {
+      size_t srcFrame = (mContextWritePos + f) % CONTEXT_FRAMES;
+      size_t srcOffset = srcFrame * N_BINS * 2;
+      size_t dstOffset = f * N_BINS * 2;
+
+      std::memcpy(inputData + dstOffset, mContextBuffer.data() + srcOffset,
+                  N_BINS * 2 * sizeof(float));
     }
     LiteRtUnlockTensorBuffer(mInputBuffers[0]);
   }
 
+  // 4. Run inference
   if (LiteRtRunCompiledModel(mCompiledModel, 0, (uint32_t)mInputBuffers.size(),
                              mInputBuffers.data(),
                              (uint32_t)mOutputBuffers.size(),
@@ -304,6 +339,7 @@ void NeuralPostFilter::processSingleStage(const float *micSignal,
     return;
   }
 
+  // 5. Apply sigmoid mask to current frame magnitude
   void *outputPtr = nullptr;
   if (LiteRtLockTensorBuffer(mOutputBuffers[0], &outputPtr,
                              kLiteRtTensorBufferLockModeRead) ==

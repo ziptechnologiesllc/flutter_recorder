@@ -707,7 +707,7 @@ interface class Recorder {
   }
 
   /// Load neural model by type.
-  /// [type] the model type (DTLN_AEC_48K, LSTM_V1).
+  /// [type] the model type (aecMaskV3).
   /// [assetBasePath] path to the assets directory.
   bool aecLoadNeuralModel(NeuralModelType type, String assetBasePath) {
     return _impl.aecLoadNeuralModel(type, assetBasePath);
