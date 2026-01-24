@@ -273,7 +273,23 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
       __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
                           "[Capture Slave Mix] frames=%u ch=%d maxSample=%.4f",
                           frameCount, playbackChannels, maxSample);
+#else
+      printf("[Capture Slave Mix] frames=%u ch=%d maxSample=%.4f\n",
+             frameCount, playbackChannels, maxSample);
+      fflush(stdout);
 #endif
+    }
+
+    // Debug: Check captured input level
+    static int captureDebugCount = 0;
+    if (captureDebugCount++ < 10 && captured != nullptr) {
+      float maxInput = 0.0f;
+      for (ma_uint32 i = 0; i < frameCount * captureChannels; i++) {
+        if (fabsf(captured[i]) > maxInput) maxInput = fabsf(captured[i]);
+      }
+      printf("[Capture Input] frames=%u ch=%d maxInput=%.4f\n",
+             frameCount, captureChannels, maxInput);
+      fflush(stdout);
     }
 
     // Mark slave audio as ready after first successful callback

@@ -123,6 +123,7 @@ private:
   std::vector<float> mWorkingBuffer;
   std::vector<LiteRtTensorBuffer> mInputBuffers;
   std::vector<LiteRtTensorBuffer> mOutputBuffers;
+  std::vector<void*> mHostMemory;  // Zero-copy host memory allocations
 #endif // USE_TFLITE
 };
 

@@ -88,6 +88,10 @@ else
     docker build -t "${IMAGE_NAME}" -f docker_build/hermetic_build.Dockerfile docker_build/
 fi
 
+# Create output directory
+DEST_DIR="${PREBUILT_DIR}/linux/${LINUX_ARCH}"
+mkdir -p "${DEST_DIR}"
+
 # Run build inside Docker
 CONTAINER_NAME="litert_build_$(date +%s)"
 echo "Building libLiteRt.so inside Docker container..."
@@ -102,6 +106,7 @@ DOCKER_ARGS=(
     -e HOME=/litert_build
     -e USER="$(id -un)"
     -v "${LITERT_DIR}:/litert_build"
+    -v "${DEST_DIR}:/output"
     -v "${HOME}/.cache/bazel:/root/.cache/bazel"
 )
 
@@ -110,24 +115,15 @@ if [ -n "${MEMORY_LIMIT}" ]; then
     DOCKER_ARGS+=(--memory "${MEMORY_LIMIT}")
 fi
 
+# Build and copy inside container (bazel-bin is a symlink, must copy before exit)
 docker run "${DOCKER_ARGS[@]}" "${IMAGE_NAME}" \
-    bash -c "./configure && bazel build //litert/c:litert_runtime_c_api_so --jobs=${JOBS}"
+    bash -c "./configure && bazel build //litert/c:litert_runtime_c_api_so --jobs=${JOBS} && cp -L bazel-bin/litert/c/libLiteRt.so /output/"
 
-# Find and copy the built library
-BAZEL_BIN="${LITERT_DIR}/bazel-bin"
-BUILT_LIB="${BAZEL_BIN}/litert/c/libLiteRt.so"
-
-if [ ! -f "${BUILT_LIB}" ]; then
-    echo "Error: Built library not found at ${BUILT_LIB}"
-    echo "Searching for libLiteRt.so in bazel-bin..."
-    find "${BAZEL_BIN}" -name "libLiteRt.so" 2>/dev/null || echo "Not found"
+# Verify the output
+if [ ! -f "${DEST_DIR}/libLiteRt.so" ]; then
+    echo "Error: Built library not found at ${DEST_DIR}/libLiteRt.so"
     exit 1
 fi
-
-# Copy to prebuilt directory
-DEST_DIR="${PREBUILT_DIR}/linux/${LINUX_ARCH}"
-mkdir -p "${DEST_DIR}"
-cp "${BUILT_LIB}" "${DEST_DIR}/libLiteRt.so"
 
 echo ""
 echo "Success! LiteRT library built and cached."

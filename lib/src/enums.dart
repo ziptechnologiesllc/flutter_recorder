@@ -205,15 +205,24 @@ enum NeuralModelType {
   /// No neural model loaded
   none(0),
 
-  /// AEC mask v3 (1M params, 16-frame context)
-  aecMaskV3(1);
+  /// AEC mask v2 (full precision) - aec_mask.tflite
+  aecMaskV2(1),
+
+  /// AEC mask v2 FP16 (half precision, faster) - aec_mask_fp16.tflite
+  aecMaskV2Fp16(2),
+
+  /// AEC mask v3 - BROKEN, do not use (kept for backwards compatibility)
+  @Deprecated('v3 model is broken, use aecMaskV2 or aecMaskV2Fp16')
+  aecMaskV3(3);
 
   final int value;
   const NeuralModelType(this.value);
 
   static NeuralModelType fromValue(int value) => switch (value) {
         0 => none,
-        1 => aecMaskV3,
+        1 => aecMaskV2,
+        2 => aecMaskV2Fp16,
+        3 => aecMaskV3,
         _ => throw ArgumentError('Unknown value for NeuralModelType: $value'),
       };
 }
