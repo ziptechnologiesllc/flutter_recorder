@@ -1219,6 +1219,20 @@ class RecorderFfi extends RecorderImpl {
     _bindings.flutter_recorder_injectPreroll(frameCount);
   }
 
+  @override
+  void setLooperBridge(int funcAddress) {
+    final funcPtr = ffi.Pointer<
+        ffi.NativeFunction<
+            ffi.UnsignedInt Function(ffi.Pointer<ffi.Uint8>, ffi.Size,
+                ffi.Pointer<ffi.UnsignedInt>)>>.fromAddress(funcAddress);
+    _bindings.flutter_recorder_setLooperBridge(funcPtr);
+  }
+
+  @override
+  void clearLooperBridge() {
+    _bindings.flutter_recorder_clearLooperBridge();
+  }
+
   // ==================== NATIVE SCHEDULER ====================
 
   @override
@@ -1386,5 +1400,33 @@ class RecorderFfi extends RecorderImpl {
   @override
   void resetRingBuffer() {
     _bindings.flutter_recorder_resetRingBuffer();
+  }
+
+  @override
+  Uint8List? getRecordedWav() {
+    final sizePtr = calloc<ffi.Size>();
+    try {
+      final dataPtr = _bindings.flutter_recorder_getRecordedWav(sizePtr);
+      if (dataPtr == ffi.nullptr) return null;
+
+      final size = sizePtr.value;
+      if (size == 0) return null;
+
+      // Return a VIEW of native memory - no copy!
+      // Pointer is valid until next recording or freeRecordedAudio
+      return dataPtr.asTypedList(size);
+    } finally {
+      calloc.free(sizePtr);
+    }
+  }
+
+  @override
+  int getRecordedWavSize() {
+    return _bindings.flutter_recorder_getRecordedWavSize();
+  }
+
+  @override
+  void freeRecordedAudio() {
+    _bindings.flutter_recorder_freeRecordedAudio();
   }
 }

@@ -17,6 +17,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <thread>
+#include <atomic>
 
 #include "enums.h"
 
@@ -46,6 +48,96 @@ typedef void (*NativeAudioSinkCallback)(const unsigned char* data, unsigned int 
 static NativeAudioSinkCallback g_nativeAudioSink = nullptr;
 static void* g_nativeAudioSinkUserData = nullptr;
 static std::atomic<bool> g_nativeAudioSinkEnabled{false};
+
+// Looper bridge - direct native-to-SoLoud playback (raw PCM, no WAV)
+static LooperLoadAndPlayRawFunc g_looperBridge = nullptr;
+
+// Worker thread for looper bridge (avoids blocking audio thread)
+static std::thread g_looperWorkerThread;
+static std::atomic<bool> g_looperWorkReady{false};
+static std::atomic<bool> g_looperWorkerRunning{false};
+
+// Forward declarations for recorded audio storage (defined later in file)
+extern float* g_lastRecordedAudio;
+extern size_t g_lastRecordedFrameCount;
+extern unsigned int g_lastRecordedChannels;
+extern unsigned int g_lastRecordedSampleRate;
+
+// Worker thread function - waits for work, calls looper bridge
+static void looperWorkerThreadFunc() {
+  fprintf(stderr, "[Looper Worker] Thread started\n");
+
+  while (g_looperWorkerRunning.load(std::memory_order_acquire)) {
+    // Spin-wait for work (low latency, no syscalls)
+    if (g_looperWorkReady.load(std::memory_order_acquire)) {
+      g_looperWorkReady.store(false, std::memory_order_release);
+
+      // Do the actual work - this can block, we're not on audio thread
+      if (g_looperBridge != nullptr &&
+          g_lastRecordedAudio != nullptr &&
+          g_lastRecordedFrameCount > 0) {
+
+        unsigned int numSamples = g_lastRecordedFrameCount * g_lastRecordedChannels;
+        fprintf(stderr, "[Looper Worker] Starting playback: %u samples (%zu frames, %u ch @ %u Hz)\n",
+                numSamples, g_lastRecordedFrameCount, g_lastRecordedChannels, g_lastRecordedSampleRate);
+
+        unsigned int handle = 0;
+        // Pass raw float samples directly - no WAV container!
+        // copy=false: SoLoud uses our buffer directly (zero copy)
+        // takeOwnership=true: SoLoud will free the buffer when sound is disposed
+        unsigned int soundHash = g_looperBridge(
+            g_lastRecordedAudio,
+            numSamples,
+            (float)g_lastRecordedSampleRate,
+            g_lastRecordedChannels,
+            false,  // copy - NO COPY, use buffer directly
+            true,   // takeOwnership - SoLoud frees when done
+            &handle
+        );
+
+        if (soundHash != 0) {
+          // SoLoud now owns the buffer - clear our pointer
+          g_lastRecordedAudio = nullptr;
+          g_lastRecordedFrameCount = 0;
+          fprintf(stderr, "[Looper Worker] Playback started: hash=%u handle=%u (buffer ownership transferred)\n",
+                  soundHash, handle);
+        } else {
+          fprintf(stderr, "[Looper Worker] Failed to start playback\n");
+        }
+      }
+    }
+
+    // Brief sleep to avoid burning CPU when idle
+    // 500us is still very low latency for playback start
+    std::this_thread::sleep_for(std::chrono::microseconds(500));
+  }
+
+  fprintf(stderr, "[Looper Worker] Thread exiting\n");
+}
+
+// Start the looper worker thread
+static void startLooperWorkerThread() {
+  if (g_looperWorkerRunning.load(std::memory_order_acquire)) {
+    return; // Already running
+  }
+
+  g_looperWorkerRunning.store(true, std::memory_order_release);
+  g_looperWorkerThread = std::thread(looperWorkerThreadFunc);
+  fprintf(stderr, "[Looper Worker] Thread launched\n");
+}
+
+// Stop the looper worker thread
+static void stopLooperWorkerThread() {
+  if (!g_looperWorkerRunning.load(std::memory_order_acquire)) {
+    return; // Not running
+  }
+
+  g_looperWorkerRunning.store(false, std::memory_order_release);
+  if (g_looperWorkerThread.joinable()) {
+    g_looperWorkerThread.join();
+  }
+  fprintf(stderr, "[Looper Worker] Thread stopped\n");
+}
 
 // Set AEC stats callback for Dart FFI
 FFI_PLUGIN_EXPORT void
@@ -214,6 +306,24 @@ FFI_PLUGIN_EXPORT void flutter_recorder_disableNativeAudioSink() {
   g_nativeAudioSink = nullptr;
   g_nativeAudioSinkUserData = nullptr;
   fprintf(stderr, "[Recorder] Native audio sink disabled\n");
+}
+
+/// Set the looper bridge function pointer for direct native-to-SoLoud playback
+FFI_PLUGIN_EXPORT void flutter_recorder_setLooperBridge(LooperLoadAndPlayRawFunc func) {
+  g_looperBridge = func;
+  fprintf(stderr, "[Recorder] Looper bridge %s\n", func ? "set" : "cleared");
+
+  // Start worker thread when bridge is set
+  if (func != nullptr) {
+    startLooperWorkerThread();
+  }
+}
+
+/// Clear the looper bridge
+FFI_PLUGIN_EXPORT void flutter_recorder_clearLooperBridge() {
+  g_looperBridge = nullptr;
+  stopLooperWorkerThread();
+  fprintf(stderr, "[Recorder] Looper bridge cleared\n");
 }
 
 /// Inject preroll audio from ring buffer directly into SoLoud stream.
@@ -1506,5 +1616,152 @@ FFI_PLUGIN_EXPORT size_t flutter_recorder_getRingBufferAvailable() {
 FFI_PLUGIN_EXPORT void flutter_recorder_resetRingBuffer() {
   if (g_nativeRingBuffer != nullptr) {
     g_nativeRingBuffer->reset();
+  }
+}
+
+// Storage for last recorded audio (accessed by worker thread via extern)
+float* g_lastRecordedAudio = nullptr;
+size_t g_lastRecordedFrameCount = 0;
+unsigned int g_lastRecordedChannels = 2;
+unsigned int g_lastRecordedSampleRate = 48000;
+
+// WAV in native memory (built on demand)
+static uint8_t* g_recordedWavData = nullptr;
+static size_t g_recordedWavSize = 0;
+
+// Build WAV data in native memory from recorded float samples
+static void buildRecordedWav() {
+  if (g_recordedWavData != nullptr) {
+    delete[] g_recordedWavData;
+    g_recordedWavData = nullptr;
+    g_recordedWavSize = 0;
+  }
+
+  if (g_lastRecordedAudio == nullptr || g_lastRecordedFrameCount == 0) {
+    return;
+  }
+
+  const size_t numSamples = g_lastRecordedFrameCount * g_lastRecordedChannels;
+  const size_t audioBytes = numSamples * sizeof(float);
+  const size_t wavSize = 44 + audioBytes;  // WAV header is 44 bytes
+
+  g_recordedWavData = new uint8_t[wavSize];
+  g_recordedWavSize = wavSize;
+
+  // Build WAV header (44 bytes, F32LE format)
+  uint8_t* p = g_recordedWavData;
+
+  // RIFF header
+  memcpy(p, "RIFF", 4); p += 4;
+  uint32_t chunkSize = (uint32_t)(wavSize - 8);
+  memcpy(p, &chunkSize, 4); p += 4;
+  memcpy(p, "WAVE", 4); p += 4;
+
+  // fmt subchunk
+  memcpy(p, "fmt ", 4); p += 4;
+  uint32_t subchunk1Size = 16;
+  memcpy(p, &subchunk1Size, 4); p += 4;
+  uint16_t audioFormat = 3;  // IEEE float
+  memcpy(p, &audioFormat, 2); p += 2;
+  uint16_t numChannels = (uint16_t)g_lastRecordedChannels;
+  memcpy(p, &numChannels, 2); p += 2;
+  uint32_t sampleRate = g_lastRecordedSampleRate;
+  memcpy(p, &sampleRate, 4); p += 4;
+  uint32_t byteRate = sampleRate * numChannels * sizeof(float);
+  memcpy(p, &byteRate, 4); p += 4;
+  uint16_t blockAlign = (uint16_t)(numChannels * sizeof(float));
+  memcpy(p, &blockAlign, 2); p += 2;
+  uint16_t bitsPerSample = 32;
+  memcpy(p, &bitsPerSample, 2); p += 2;
+
+  // data subchunk
+  memcpy(p, "data", 4); p += 4;
+  uint32_t subchunk2Size = (uint32_t)audioBytes;
+  memcpy(p, &subchunk2Size, 4); p += 4;
+
+  // Audio data (float samples)
+  memcpy(p, g_lastRecordedAudio, audioBytes);
+
+  fprintf(stderr, "[Recorder] Built WAV in memory: %zu bytes (%zu frames @ %uHz, %u ch)\n",
+          wavSize, g_lastRecordedFrameCount, g_lastRecordedSampleRate, g_lastRecordedChannels);
+}
+
+// Get recorded audio as WAV - returns pointer and size
+// Builds WAV on first call after recording stops
+// Pointer valid until next recording or freeRecordedAudio
+FFI_PLUGIN_EXPORT const uint8_t* flutter_recorder_getRecordedWav(size_t* outSize) {
+  if (g_recordedWavData == nullptr && g_lastRecordedAudio != nullptr) {
+    buildRecordedWav();
+  }
+  if (outSize) {
+    *outSize = g_recordedWavSize;
+  }
+  return g_recordedWavData;
+}
+
+// Get just the WAV size (for pre-allocating view)
+FFI_PLUGIN_EXPORT size_t flutter_recorder_getRecordedWavSize() {
+  if (g_recordedWavData == nullptr && g_lastRecordedAudio != nullptr) {
+    buildRecordedWav();
+  }
+  return g_recordedWavSize;
+}
+
+// Free the recorded audio and WAV buffers
+FFI_PLUGIN_EXPORT void flutter_recorder_freeRecordedAudio() {
+  if (g_lastRecordedAudio != nullptr) {
+    delete[] g_lastRecordedAudio;
+    g_lastRecordedAudio = nullptr;
+    g_lastRecordedFrameCount = 0;
+  }
+  if (g_recordedWavData != nullptr) {
+    delete[] g_recordedWavData;
+    g_recordedWavData = nullptr;
+    g_recordedWavSize = 0;
+  }
+  fprintf(stderr, "[Recorder] Freed recorded audio buffers\n");
+}
+
+// Internal: Store recorded audio from native ring buffer stopRecording
+// Called by native_scheduler.cpp when recording stops
+void storeRecordedAudio(float* data, size_t frameCount) {
+  // Free previous recording if any
+  if (g_lastRecordedAudio != nullptr) {
+    delete[] g_lastRecordedAudio;
+  }
+  if (g_recordedWavData != nullptr) {
+    delete[] g_recordedWavData;
+    g_recordedWavData = nullptr;
+    g_recordedWavSize = 0;
+  }
+
+  g_lastRecordedAudio = data;
+  g_lastRecordedFrameCount = frameCount;
+
+  // Cache device config for WAV building
+  if (g_nativeRingBuffer != nullptr) {
+    g_lastRecordedChannels = g_nativeRingBuffer->channels();
+    g_lastRecordedSampleRate = g_nativeRingBuffer->sampleRate();
+  }
+
+  size_t totalSamples = frameCount * g_lastRecordedChannels;
+  fprintf(stderr, "[Recorder] Stored recorded audio: %zu frames, %zu totalSamples @ %uHz, %u ch\n",
+          frameCount, totalSamples, g_lastRecordedSampleRate, g_lastRecordedChannels);
+
+  // Debug: Print first few samples to verify stereo interleaving
+  if (data != nullptr && frameCount > 10) {
+    fprintf(stderr, "[Recorder] First 8 samples (L R L R...): ");
+    for (int i = 0; i < 8 && i < (int)totalSamples; i++) {
+      fprintf(stderr, "%.4f ", data[i]);
+    }
+    fprintf(stderr, "\n");
+  }
+
+  // LOOPER BRIDGE: Signal worker thread to build WAV and start playback
+  // IMPORTANT: Audio thread does NO allocations, NO locks, NO syscalls
+  // Just set atomic flag - worker thread does the heavy lifting
+  if (g_looperBridge != nullptr && frameCount > 0) {
+    fprintf(stderr, "[Recorder] Signaling looper worker thread\n");
+    g_looperWorkReady.store(true, std::memory_order_release);
   }
 }

@@ -133,6 +133,25 @@ FFI_PLUGIN_EXPORT void flutter_recorder_disableNativeAudioSink();
 FFI_PLUGIN_EXPORT void flutter_recorder_injectPreroll(size_t frameCount);
 
 /////////////////////////
+/// LOOPER BRIDGE (native-to-SoLoud direct playback)
+/////////////////////////
+// Function pointer type matching looper_loadAndPlayRaw from flutter_soloud
+// Takes raw PCM float samples directly - no WAV container overhead
+typedef unsigned int (*LooperLoadAndPlayRawFunc)(float* samples,
+                                                  unsigned int numSamples,
+                                                  float sampleRate,
+                                                  unsigned int channels,
+                                                  bool copy,
+                                                  bool takeOwnership,
+                                                  unsigned int* outHandle);
+
+// Set the looper function pointer (called from Dart during init)
+FFI_PLUGIN_EXPORT void flutter_recorder_setLooperBridge(LooperLoadAndPlayRawFunc func);
+
+// Clear the looper bridge
+FFI_PLUGIN_EXPORT void flutter_recorder_clearLooperBridge();
+
+/////////////////////////
 /// FILTERS
 /////////////////////////
 FFI_PLUGIN_EXPORT int
@@ -420,6 +439,17 @@ FFI_PLUGIN_EXPORT size_t flutter_recorder_getRingBufferAvailable();
 
 // Reset the ring buffer (clear all data)
 FFI_PLUGIN_EXPORT void flutter_recorder_resetRingBuffer();
+
+// Get recorded audio as WAV data in native memory
+// Returns pointer to WAV data (header + samples) - builds on first call
+// Pointer valid until next recording or freeRecordedAudio
+FFI_PLUGIN_EXPORT const uint8_t* flutter_recorder_getRecordedWav(size_t* outSize);
+
+// Get WAV size without building (for checking if data available)
+FFI_PLUGIN_EXPORT size_t flutter_recorder_getRecordedWavSize();
+
+// Free the recorded audio and WAV buffers
+FFI_PLUGIN_EXPORT void flutter_recorder_freeRecordedAudio();
 
 #ifdef __cplusplus
 }

@@ -614,6 +614,37 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_disableNativeAudioSink =
       _flutter_recorder_disableNativeAudioSinkPtr.asFunction<void Function()>();
 
+  /// Set looper bridge function pointer for direct native-to-SoLoud playback
+  void flutter_recorder_setLooperBridge(ffi.Pointer<ffi.NativeFunction<ffi.UnsignedInt Function(ffi.Pointer<ffi.Uint8>, ffi.Size, ffi.Pointer<ffi.UnsignedInt>)>> func) {
+    return _flutter_recorder_setLooperBridge(func);
+  }
+
+  late final _flutter_recorder_setLooperBridgePtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Void Function(
+              ffi.Pointer<
+                  ffi.NativeFunction<
+                      ffi.UnsignedInt Function(ffi.Pointer<ffi.Uint8>, ffi.Size,
+                          ffi.Pointer<ffi.UnsignedInt>)>>)>>('flutter_recorder_setLooperBridge');
+  late final _flutter_recorder_setLooperBridge =
+      _flutter_recorder_setLooperBridgePtr.asFunction<
+          void Function(
+              ffi.Pointer<
+                  ffi.NativeFunction<
+                      ffi.UnsignedInt Function(ffi.Pointer<ffi.Uint8>, ffi.Size,
+                          ffi.Pointer<ffi.UnsignedInt>)>>)>();
+
+  /// Clear looper bridge
+  void flutter_recorder_clearLooperBridge() {
+    return _flutter_recorder_clearLooperBridge();
+  }
+
+  late final _flutter_recorder_clearLooperBridgePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_clearLooperBridge');
+  late final _flutter_recorder_clearLooperBridge =
+      _flutter_recorder_clearLooperBridgePtr.asFunction<void Function()>();
+
   void flutter_recorder_injectPreroll(int frameCount) {
     return _flutter_recorder_injectPreroll(frameCount);
   }
@@ -1924,6 +1955,45 @@ class FlutterRecorderBindings {
           'flutter_recorder_resetRingBuffer');
   late final _flutter_recorder_resetRingBuffer =
       _flutter_recorder_resetRingBufferPtr.asFunction<void Function()>();
+
+  /// Get recorded audio as WAV data in native memory
+  /// Returns pointer to WAV data (header + samples) - builds on first call
+  /// Pointer valid until next recording or freeRecordedAudio
+  ffi.Pointer<ffi.Uint8> flutter_recorder_getRecordedWav(
+    ffi.Pointer<ffi.Size> outSize,
+  ) {
+    return _flutter_recorder_getRecordedWav(outSize);
+  }
+
+  late final _flutter_recorder_getRecordedWavPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Pointer<ffi.Uint8> Function(
+              ffi.Pointer<ffi.Size>)>>('flutter_recorder_getRecordedWav');
+  late final _flutter_recorder_getRecordedWav =
+      _flutter_recorder_getRecordedWavPtr
+          .asFunction<ffi.Pointer<ffi.Uint8> Function(ffi.Pointer<ffi.Size>)>();
+
+  /// Get WAV size without building (for checking if data available)
+  int flutter_recorder_getRecordedWavSize() {
+    return _flutter_recorder_getRecordedWavSize();
+  }
+
+  late final _flutter_recorder_getRecordedWavSizePtr =
+      _lookup<ffi.NativeFunction<ffi.Size Function()>>(
+          'flutter_recorder_getRecordedWavSize');
+  late final _flutter_recorder_getRecordedWavSize =
+      _flutter_recorder_getRecordedWavSizePtr.asFunction<int Function()>();
+
+  /// Free the recorded audio and WAV buffers
+  void flutter_recorder_freeRecordedAudio() {
+    return _flutter_recorder_freeRecordedAudio();
+  }
+
+  late final _flutter_recorder_freeRecordedAudioPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_freeRecordedAudio');
+  late final _flutter_recorder_freeRecordedAudio =
+      _flutter_recorder_freeRecordedAudioPtr.asFunction<void Function()>();
 }
 
 typedef dartSilenceChangedCallback_t

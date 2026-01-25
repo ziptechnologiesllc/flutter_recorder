@@ -1123,6 +1123,19 @@ interface class Recorder {
     _impl.injectPreroll(frameCount);
   }
 
+  /// Set the looper bridge function pointer for direct native-to-SoLoud playback.
+  /// When recording stops, native code will immediately load and play the audio
+  /// through SoLoud without going through Dart.
+  /// [funcAddress] is the address of the looper_loadAndPlayLoop function from SoLoud.
+  void setLooperBridge(int funcAddress) {
+    _impl.setLooperBridge(funcAddress);
+  }
+
+  /// Clear the looper bridge.
+  void clearLooperBridge() {
+    _impl.clearLooperBridge();
+  }
+
   // ==================== NATIVE SCHEDULER ====================
   // Sample-accurate timing for recording start/stop in audio callback
 
@@ -1281,5 +1294,23 @@ interface class Recorder {
   /// Reset the ring buffer (clear all data).
   void resetRingBuffer() {
     _impl.resetRingBuffer();
+  }
+
+  /// Get recorded audio as WAV data from native memory.
+  /// Returns a VIEW of native memory - no copy! Very fast.
+  /// Pointer valid until next recording or freeRecordedAudio.
+  Uint8List? getRecordedWav() {
+    return _impl.getRecordedWav();
+  }
+
+  /// Get WAV size (for checking if data available).
+  int getRecordedWavSize() {
+    return _impl.getRecordedWavSize();
+  }
+
+  /// Free the recorded audio and WAV buffers in native memory.
+  /// Call this after you're done with the audio data to release memory.
+  void freeRecordedAudio() {
+    _impl.freeRecordedAudio();
   }
 }

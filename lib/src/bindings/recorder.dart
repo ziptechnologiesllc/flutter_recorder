@@ -604,6 +604,15 @@ abstract class RecorderImpl {
   @mustBeOverridden
   void injectPreroll(int frameCount);
 
+  /// Set the looper bridge function pointer for direct native-to-SoLoud playback.
+  /// [funcAddress] is the address of the looper_loadAndPlayLoop function.
+  @mustBeOverridden
+  void setLooperBridge(int funcAddress);
+
+  /// Clear the looper bridge.
+  @mustBeOverridden
+  void clearLooperBridge();
+
   // ==================== NATIVE SCHEDULER ====================
   // Sample-accurate timing for recording start/stop in audio callback
 
@@ -715,4 +724,19 @@ abstract class RecorderImpl {
   /// Reset the ring buffer (clear all data).
   @mustBeOverridden
   void resetRingBuffer();
+
+  /// Get recorded audio as WAV data from native memory.
+  /// Returns a VIEW of native memory - no copy! Very fast.
+  /// Pointer valid until next recording or freeRecordedAudio.
+  @mustBeOverridden
+  Uint8List? getRecordedWav();
+
+  /// Get WAV size (for checking if data available).
+  @mustBeOverridden
+  int getRecordedWavSize();
+
+  /// Free the recorded audio and WAV buffers in native memory.
+  /// Call this after you're done with the audio data to release memory.
+  @mustBeOverridden
+  void freeRecordedAudio();
 }

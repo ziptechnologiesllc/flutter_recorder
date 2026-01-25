@@ -270,9 +270,10 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   // =========================================================================
   // NATIVE RING BUFFER: Continuous capture for latency compensation (pre-roll)
   // Write immediately after format conversion, before any processing
+  // IMPORTANT: Pass actual capture channels to auto-reconfigure if mismatched
   // =========================================================================
   if (g_nativeRingBuffer != nullptr && captured != nullptr) {
-    g_nativeRingBuffer->write(captured, frameCount);
+    g_nativeRingBuffer->write(captured, frameCount, captureChannels);
   }
 
   // =========================================================================

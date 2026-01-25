@@ -55,8 +55,10 @@ public:
    *
    * @param data Interleaved float samples
    * @param frameCount Number of frames to write
+   * @param actualChannels Actual number of channels in the data (for auto-reconfigure)
+   *                       If 0, uses configured mChannels (legacy behavior)
    */
-  void write(const float *data, size_t frameCount);
+  void write(const float *data, size_t frameCount, unsigned int actualChannels = 0);
 
   /**
    * Read frames with latency compensation (pre-roll).

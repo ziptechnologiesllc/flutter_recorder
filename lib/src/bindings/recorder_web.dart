@@ -695,6 +695,16 @@ class RecorderWeb extends RecorderImpl {
     // No-op on web - preroll handled differently
   }
 
+  @override
+  void setLooperBridge(int funcAddress) {
+    // No-op on web - looper bridge not available
+  }
+
+  @override
+  void clearLooperBridge() {
+    // No-op on web
+  }
+
   // ==================== NATIVE SCHEDULER ====================
   // Not supported on web - scheduling uses JavaScript timers
 
@@ -816,6 +826,22 @@ class RecorderWeb extends RecorderImpl {
 
   @override
   void resetRingBuffer() {
+    // No-op on web
+  }
+
+  @override
+  Uint8List? getRecordedWav() {
+    // Not supported on web
+    return null;
+  }
+
+  @override
+  int getRecordedWavSize() {
+    return 0;
+  }
+
+  @override
+  void freeRecordedAudio() {
     // No-op on web
   }
 }

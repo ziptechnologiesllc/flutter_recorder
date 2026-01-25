@@ -130,12 +130,31 @@ bool NativeRingBuffer::configure(size_t capacityFrames, unsigned int channels,
   return true;
 }
 
-void NativeRingBuffer::write(const float *data, size_t frameCount) {
+void NativeRingBuffer::write(const float *data, size_t frameCount, unsigned int actualChannels) {
   if (data == nullptr || frameCount == 0 || mCapacityFrames == 0) {
     return;
   }
 
-  const size_t samplesToWrite = frameCount * mChannels;
+  // Use actualChannels if provided (non-zero), otherwise use configured mChannels
+  unsigned int channelsToUse = (actualChannels > 0) ? actualChannels : mChannels;
+
+  // Check for channel mismatch and auto-reconfigure
+  // Always update mChannels to match actual - this happens on first few callbacks
+  // before recording starts, so the channel count will be correct when we record
+  if (actualChannels > 0 && actualChannels != mChannels) {
+    static int channelMismatchLogCount = 0;
+    if (channelMismatchLogCount < 3) {
+      printf("[RingBuffer] Channel mismatch: configured=%u, actual=%u - auto-reconfiguring\n",
+             mChannels, actualChannels);
+      channelMismatchLogCount++;
+    }
+    mChannels = actualChannels;
+    // Note: buffer size is already allocated, just change the interpretation
+    // Any pre-existing data in ring buffer will be interpreted with new channel count,
+    // but this only matters for pre-roll which will refill quickly
+  }
+
+  const size_t samplesToWrite = frameCount * channelsToUse;
 
   // Calculate RMS level for level meter
   float sumSquares = 0.0f;
@@ -160,6 +179,14 @@ void NativeRingBuffer::write(const float *data, size_t frameCount) {
     size_t samplePos = writePos * mChannels;
     size_t requiredSize = samplePos + samplesToWrite;
 
+    // Debug logging disabled for production - causes audio glitches
+    // Uncomment for debugging interleaving issues:
+    // static int recordWriteDebugCount = 0;
+    // if (recordWriteDebugCount < 5) {
+    //   printf("[RingBuffer RECORDING] writePos=%zu, frameCount=%zu\n", writePos, frameCount);
+    //   recordWriteDebugCount++;
+    // }
+
     // Check if we'd exceed pre-allocated buffer (cap recording, don't resize from audio thread!)
     if (requiredSize > mBuffer.size()) {
       // Recording exceeds max capacity - stop accepting new data
@@ -175,16 +202,18 @@ void NativeRingBuffer::write(const float *data, size_t frameCount) {
     // Update write position (linear, no modulo)
     mWritePos.store(writePos + frameCount, std::memory_order_release);
   } else {
-    // Normal ring buffer mode: wrap around
+    // Normal ring buffer mode: wrap around using mCapacityFrames (NOT mBuffer.size()!)
+    // CRITICAL: After pre-allocation, mBuffer.size() can be huge (10 min recording buffer)
+    // but ring mode should only use the first mCapacityFrames worth of data
+    const size_t ringCapacitySamples = mCapacityFrames * mChannels;
     size_t samplePos = writePos * mChannels;
-    const size_t bufferSize = mBuffer.size();
 
-    if (samplePos + samplesToWrite <= bufferSize) {
+    if (samplePos + samplesToWrite <= ringCapacitySamples) {
       // No wrap - single copy
       std::memcpy(mBuffer.data() + samplePos, data, samplesToWrite * sizeof(float));
     } else {
       // Wrap around - two copies
-      size_t firstPart = bufferSize - samplePos;
+      size_t firstPart = ringCapacitySamples - samplePos;
       size_t secondPart = samplesToWrite - firstPart;
 
       std::memcpy(mBuffer.data() + samplePos, data, firstPart * sizeof(float));
@@ -230,7 +259,8 @@ size_t NativeRingBuffer::readPreRoll(float *dest, size_t frameCount,
     return 0;
   }
 
-  const size_t bufferSize = mBuffer.size();
+  // CRITICAL: Use ring capacity, not full buffer size (which can be huge after pre-allocation)
+  const size_t ringCapacitySamples = mCapacityFrames * mChannels;
   const size_t samplesToRead = framesToRead * mChannels;
 
   // Calculate read start position
@@ -240,14 +270,14 @@ size_t NativeRingBuffer::readPreRoll(float *dest, size_t frameCount,
       mCapacityFrames;
   size_t readStartSample = readStartFrame * mChannels;
 
-  // Read from circular buffer
-  if (readStartSample + samplesToRead <= bufferSize) {
+  // Read from circular buffer (ring region only)
+  if (readStartSample + samplesToRead <= ringCapacitySamples) {
     // No wrap - single copy
     std::memcpy(dest, mBuffer.data() + readStartSample,
                 samplesToRead * sizeof(float));
   } else {
     // Wrap around - two copies
-    size_t firstPart = bufferSize - readStartSample;
+    size_t firstPart = ringCapacitySamples - readStartSample;
     size_t secondPart = samplesToRead - firstPart;
 
     std::memcpy(dest, mBuffer.data() + readStartSample,
@@ -266,7 +296,8 @@ size_t NativeRingBuffer::readRange(float *dest, size_t startTotalFrame,
 
   const size_t totalWritten =
       mTotalFramesWritten.load(std::memory_order_acquire);
-  const size_t bufferSize = mBuffer.size();
+  // CRITICAL: Use ring capacity, not full buffer size
+  const size_t ringCapacitySamples = mCapacityFrames * mChannels;
 
   // Check if the requested range is still available in the buffer
   // Data is overwritten after mCapacityFrames
@@ -299,14 +330,14 @@ size_t NativeRingBuffer::readRange(float *dest, size_t startTotalFrame,
   size_t readStartFrame = startTotalFrame % mCapacityFrames;
   size_t readStartSample = readStartFrame * mChannels;
 
-  // Read from circular buffer
-  if (readStartSample + samplesToRead <= bufferSize) {
+  // Read from circular buffer (ring region only)
+  if (readStartSample + samplesToRead <= ringCapacitySamples) {
     // No wrap - single copy
     std::memcpy(dest, mBuffer.data() + readStartSample,
                 samplesToRead * sizeof(float));
   } else {
     // Wrap around - two copies
-    size_t firstPart = bufferSize - readStartSample;
+    size_t firstPart = ringCapacitySamples - readStartSample;
     size_t secondPart = samplesToRead - firstPart;
 
     std::memcpy(dest, mBuffer.data() + readStartSample,
@@ -342,6 +373,7 @@ void NativeRingBuffer::reset() {
 }
 
 void NativeRingBuffer::startRecording(size_t latencyCompFrames) {
+
   size_t writePos = mWritePos.load(std::memory_order_acquire);
   size_t currentTotal = mTotalFramesWritten.load(std::memory_order_acquire);
 
@@ -385,8 +417,8 @@ float* NativeRingBuffer::stopRecording(size_t* outFrameCount) {
   size_t frameCount = currentWritePos - startWritePos;
   size_t sampleCount = frameCount * mChannels;
 
-  printf("[RingBuffer] stopRecording: extracting %zu frames (%zu samples), startPos=%zu, endPos=%zu\n",
-         frameCount, sampleCount, startWritePos, currentWritePos);
+  printf("[RingBuffer] stopRecording: extracting %zu frames (%zu samples), startPos=%zu, endPos=%zu, mChannels=%u\n",
+         frameCount, sampleCount, startWritePos, currentWritePos, mChannels);
 
   // Allocate output buffer
   float* output = new float[sampleCount];
@@ -399,6 +431,12 @@ float* NativeRingBuffer::stopRecording(size_t* outFrameCount) {
   // Extract directly from buffer (linear during recording, no wrap)
   size_t startSamplePos = startWritePos * mChannels;
   std::memcpy(output, mBuffer.data() + startSamplePos, sampleCount * sizeof(float));
+
+  // Debug: Print first few extracted samples to verify interleaving
+  if (sampleCount >= 4) {
+    printf("[RingBuffer] stopRecording: First 4 extracted samples: %.4f %.4f %.4f %.4f\n",
+           output[0], output[1], output[2], output[3]);
+  }
 
   // =========================================================================
   // CROSSFADE: Apply fade-in at start and fade-out at end to prevent clicks
@@ -436,6 +474,14 @@ float* NativeRingBuffer::stopRecording(size_t* outFrameCount) {
   // DON'T resize buffer - it stays pre-allocated to avoid reallocations
   mWritePos.store(0, std::memory_order_release);
   mTotalFramesWritten.store(0, std::memory_order_release);  // Reset for new ring cycle
+
+  // CRITICAL: Clear the ring buffer region to prevent stale data from being read
+  // as pre-roll in subsequent recordings. Only clear up to mCapacityFrames (the ring portion).
+  size_t ringBufferSamples = mCapacityFrames * mChannels;
+  if (ringBufferSamples <= mBuffer.size()) {
+    std::fill(mBuffer.begin(), mBuffer.begin() + ringBufferSamples, 0.0f);
+    printf("[RingBuffer] stopRecording: cleared ring buffer region (%zu samples)\n", ringBufferSamples);
+  }
 
   printf("[RingBuffer] stopRecording: tape rewound to start (buffer size unchanged: %zu samples)\n",
          mBuffer.size());

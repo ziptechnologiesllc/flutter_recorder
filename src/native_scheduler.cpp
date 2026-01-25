@@ -8,6 +8,9 @@
 // External flag from flutter_recorder.cpp for idempotency
 extern std::atomic<bool> g_recordingScheduledOrActive;
 
+// External function from flutter_recorder.cpp to store recorded audio
+extern void storeRecordedAudio(float* data, size_t frameCount);
+
 #ifdef _IS_ANDROID_
 #include <android/log.h>
 #define SCHED_LOG(fmt, ...) __android_log_print(ANDROID_LOG_INFO, "NativeScheduler", fmt, ##__VA_ARGS__)
@@ -150,6 +153,8 @@ uint32_t NativeScheduler::scheduleQuantizedStart(const char* recordingPath) {
     // If we have a base loop AND auto-stop is enabled, also schedule the STOP event upfront
     bool autoStop = mAutoStopEnabled.load(std::memory_order_acquire);
     if (startEventId != 0 && loopFrames > 0 && autoStop) {
+        // In loop mode, no latency compensation is applied (quantized start/stop)
+        // so STOP is simply START + loopFrames
         int64_t targetStopFrame = targetStartFrame + loopFrames;
         uint32_t stopEventId = scheduleEvent(SchedulerAction::StopRecording, targetStopFrame, recordingPath);
         SCHED_LOG("scheduleQuantizedStart: auto-scheduled STOP at frame %lld (startEventId=%u, stopEventId=%u)",
@@ -168,12 +173,13 @@ uint32_t NativeScheduler::scheduleQuantizedStop(int64_t recordingStartFrame) {
 
     int64_t targetFrame;
     if (loopFrames <= 0) {
-        // No base loop - stop immediately (next buffer boundary)
+        // No base loop (free mode) - stop immediately (next buffer boundary)
         targetFrame = currentFrame;
         SCHED_DEBUG("scheduleQuantizedStop: no base loop, immediate stop at %lld",
                     (long long)targetFrame);
     } else {
-        // Calculate how many frames recorded so far
+        // Loop mode - find next loop boundary
+        // No latency compensation in loop mode (quantized start/stop)
         int64_t framesRecorded = currentFrame - recordingStartFrame;
 
         // Find next loop multiple
@@ -293,13 +299,20 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                 mRecordingStartFrame = currentFrame;
 
                 // Start recording on ring buffer - it will track the start position
-                // with latency compensation applied
+                // Only apply latency compensation in FREE MODE (no base loop).
+                // In loop mode, start/stop are quantized to loop boundaries - no human latency to compensate.
                 if (g_nativeRingBuffer != nullptr) {
-                    int64_t latencyFrames = mLatencyCompensationFrames.load(std::memory_order_acquire);
+                    int64_t loopFrames = mBaseLoopFrames.load(std::memory_order_acquire);
+                    int64_t latencyFrames = 0;
+                    if (loopFrames <= 0) {
+                        // Free mode: apply latency compensation for touch/bluetooth latency
+                        latencyFrames = mLatencyCompensationFrames.load(std::memory_order_acquire);
+                    }
                     g_nativeRingBuffer->startRecording(latencyFrames > 0 ? (size_t)latencyFrames : 0);
                     mRecordingStartTotalFrame = g_nativeRingBuffer->getRecordingStartFrame();
-                    SCHED_LOG("Ring buffer recording started, startTotalFrame=%zu, latencyComp=%lld",
-                              mRecordingStartTotalFrame, (long long)latencyFrames);
+                    SCHED_LOG("Ring buffer recording started, startTotalFrame=%zu, latencyComp=%lld, loopMode=%s",
+                              mRecordingStartTotalFrame, (long long)latencyFrames,
+                              loopFrames > 0 ? "yes" : "no");
 
                     // Notify Dart that recording has started
                     if (dartRecordingStartedCallback != nullptr) {
@@ -341,26 +354,31 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                     size_t frameCount = 0;
                     float* audioData = g_nativeRingBuffer->stopRecording(&frameCount);
 
-                    if (audioData != nullptr && frameCount > 0 && wavPath[0] != '\0') {
+                    if (audioData != nullptr && frameCount > 0) {
                         recordedFrames = (int64_t)frameCount;
-                        SCHED_LOG("Extracted %zu frames from ring buffer, writing to WAV: %s",
-                                  frameCount, wavPath);
 
-                        // Initialize WAV and write all at once
-                        CaptureErrors err = capture->startRecording(wavPath);
-                        if (err == captureNoError) {
-                            capture->wav.write((void*)audioData, frameCount);
-                            capture->stopRecording();
-                            SCHED_LOG("WAV file written successfully");
-                        } else {
-                            SCHED_LOG("Failed to create WAV file: error %d", (int)err);
+                        // Store audio for Dart access (transfers ownership - do NOT delete audioData)
+                        // Dart can access this via flutter_recorder_getRecordedAudio()
+                        storeRecordedAudio(audioData, frameCount);
+                        SCHED_LOG("Stored %zu frames for Dart access", frameCount);
+
+                        // Also write to WAV file if path provided
+                        if (wavPath[0] != '\0') {
+                            SCHED_LOG("Writing to WAV: %s", wavPath);
+
+                            // Initialize WAV and write all at once
+                            CaptureErrors err = capture->startRecording(wavPath);
+                            if (err == captureNoError) {
+                                capture->wav.write((void*)audioData, frameCount);
+                                capture->stopRecording();
+                                SCHED_LOG("WAV file written successfully");
+                            } else {
+                                SCHED_LOG("Failed to create WAV file: error %d", (int)err);
+                            }
                         }
-
-                        // Free the extracted audio buffer
-                        delete[] audioData;
+                        // Note: audioData ownership transferred to storeRecordedAudio - do NOT delete here
                     } else {
-                        SCHED_LOG("No audio data extracted or no path (frames=%zu, path=%s)",
-                                  frameCount, wavPath);
+                        SCHED_LOG("No audio data extracted (frames=%zu)", frameCount);
                         if (audioData) delete[] audioData;
                     }
                 } else {
