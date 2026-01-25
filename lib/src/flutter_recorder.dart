@@ -77,6 +77,51 @@ class AecCalibrationResultWithImpulse extends AecCalibrationResult {
       'calibratedOffset: $calibratedOffset)';
 }
 
+/// Scheduler action type (matches native SchedulerAction enum).
+enum SchedulerAction {
+  none(0),
+  startRecording(1),
+  stopRecording(2),
+  startPlayback(3),
+  stopPlayback(4);
+
+  const SchedulerAction(this.value);
+  final int value;
+
+  static SchedulerAction fromValue(int value) {
+    return SchedulerAction.values.firstWhere(
+      (e) => e.value == value,
+      orElse: () => SchedulerAction.none,
+    );
+  }
+}
+
+/// Notification from native scheduler when an event fires.
+class SchedulerNotification {
+  /// Unique event ID (assigned when event was scheduled).
+  final int eventId;
+
+  /// Action that was executed.
+  final SchedulerAction action;
+
+  /// Global frame when event fired.
+  final int firedAtFrame;
+
+  /// How many frames late the event fired (0 = perfect, positive = late).
+  final int latencyFrames;
+
+  const SchedulerNotification({
+    required this.eventId,
+    required this.action,
+    required this.firedAtFrame,
+    required this.latencyFrames,
+  });
+
+  @override
+  String toString() =>
+      'SchedulerNotification(id: $eventId, action: $action, frame: $firedAtFrame, latency: $latencyFrames)';
+}
+
 /// Result of AEC test analysis.
 /// Used to validate echo cancellation quality after calibration.
 class AecTestResult {
@@ -241,6 +286,14 @@ interface class Recorder {
   /// Stream of AEC statistics (max attenuation, correlation, ERL).
   Stream<AecStats> get aecStatsStream => _impl.aecStatsStream;
 
+  /// Stream of recording stopped events (fired from native when auto-stop occurs).
+  Stream<RecordingStoppedEvent> get recordingStoppedStream =>
+      _impl.recordingStoppedStream;
+
+  /// Stream of recording started events (fired from native when recording starts).
+  Stream<RecordingStartedEvent> get recordingStartedStream =>
+      _impl.recordingStartedStream;
+
   /// Enable or disable silence detection.
   ///
   /// [enable] wheter to enable or disable silence detection. Default to false.
@@ -328,6 +381,8 @@ interface class Recorder {
   }) async {
     await _impl.setDartEventCallbacks();
     await _impl.setAecStatsCallback();
+    await _impl.setRecordingStoppedCallback();
+    await _impl.setRecordingStartedCallback();
 
     // Sets the [_isInitialized].
     // Usefult when the consumer use the hot restart and that flag
@@ -350,8 +405,26 @@ interface class Recorder {
       channels: channels,
       captureOnly: captureOnly,
     );
-    _recorderFormat = format;
     _isInitialized = true;
+
+    // Update _recorderFormat to actual format chosen by the system
+    // This is important for Android auto mode where format=unknown
+    if (format == PCMFormat.unknown) {
+      final actualFormat = _impl.getCaptureFormat();
+      // Map miniaudio format ID to PCMFormat
+      // miniaudio: unknown=0, u8=1, s16=2, s24=3, s32=4, f32=5
+      _recorderFormat = switch (actualFormat) {
+        1 => PCMFormat.u8,
+        2 => PCMFormat.s16le,
+        3 => PCMFormat.s24le,
+        4 => PCMFormat.s32le,
+        5 => PCMFormat.f32le,
+        _ => PCMFormat.unknown,
+      };
+      _log.info(() => 'Auto-detected format: $actualFormat -> $_recorderFormat');
+    } else {
+      _recorderFormat = format;
+    }
   }
 
   /// Dispose capture device.
@@ -493,6 +566,28 @@ interface class Recorder {
   /// - 3: Mono (mix both channels to both outputs)
   void setMonitoringMode(int mode) {
     _impl.setMonitoringMode(mode);
+  }
+
+  // ==================== FILTER DEBUG STATS ====================
+
+  /// Get the number of times filter processing was skipped due to lock contention.
+  /// High values indicate audio thread is being blocked by UI thread.
+  int getFilterMissCount() => _impl.getFilterMissCount();
+
+  /// Get the number of times filter processing completed successfully.
+  int getFilterProcessCount() => _impl.getFilterProcessCount();
+
+  /// Reset filter stats counters. Call at session start.
+  void resetFilterStats() => _impl.resetFilterStats();
+
+  /// Get the filter miss rate as a percentage (0-100).
+  /// Returns 0 if no processing has occurred.
+  double getFilterMissRate() {
+    final miss = getFilterMissCount();
+    final process = getFilterProcessCount();
+    final total = miss + process;
+    if (total == 0) return 0.0;
+    return (miss / total) * 100.0;
   }
 
   /// Conveninet way to get FFT data. Return a 256 float array containing
@@ -751,6 +846,17 @@ interface class Recorder {
     _impl.aecResetBuffer();
   }
 
+  /// Enable or disable AEC reference buffer writes.
+  /// When disabled, saves CPU when AEC is not needed.
+  void aecSetEnabled(bool enabled) {
+    _impl.aecSetEnabled(enabled);
+  }
+
+  /// Check if AEC reference buffer is enabled.
+  bool aecIsEnabled() {
+    return _impl.aecIsEnabled();
+  }
+
   // ==================== AEC CALIBRATION ====================
 
   /// Generate calibration audio signal.
@@ -988,5 +1094,179 @@ interface class Recorder {
       sampleRate,
       signalType: signalType,
     );
+  }
+
+  // ==================== NATIVE AUDIO SINK ====================
+
+  /// Set native audio sink for direct recorder-to-player streaming.
+  /// This bypasses Dart's main thread for audio data.
+  /// [callbackAddress] and [userDataAddress] should come from SoLoud's
+  /// configureNativeAudioSinkRaw().
+  void setNativeAudioSink(int callbackAddress, int userDataAddress) {
+    _impl.setNativeAudioSink(callbackAddress, userDataAddress);
+  }
+
+  /// Check if native audio sink is currently active.
+  bool isNativeAudioSinkActive() {
+    return _impl.isNativeAudioSinkActive();
+  }
+
+  /// Disable native audio sink. Audio data will flow through Dart again.
+  void disableNativeAudioSink() {
+    _impl.disableNativeAudioSink();
+  }
+
+  /// Inject preroll audio from ring buffer into SoLoud stream via native path.
+  /// This reads [frameCount] frames from the ring buffer and sends them
+  /// directly to the native audio sink callback, keeping everything native.
+  void injectPreroll(int frameCount) {
+    _impl.injectPreroll(frameCount);
+  }
+
+  // ==================== NATIVE SCHEDULER ====================
+  // Sample-accurate timing for recording start/stop in audio callback
+
+  /// Reset the native scheduler state.
+  /// Call this when starting a new session or when timing state should be cleared.
+  void schedulerReset() {
+    _impl.schedulerReset();
+  }
+
+  /// Set base loop parameters for quantization.
+  /// [loopFrames] is the loop length in frames.
+  /// [loopStartFrame] is the global frame when the loop started.
+  /// After setting, scheduled events will align to loop boundaries.
+  void schedulerSetBaseLoop(int loopFrames, int loopStartFrame) {
+    _impl.schedulerSetBaseLoop(loopFrames, loopStartFrame);
+  }
+
+  /// Clear base loop (free recording mode).
+  /// Events will fire at next buffer boundary instead of loop boundary.
+  void schedulerClearBaseLoop() {
+    _impl.schedulerClearBaseLoop();
+  }
+
+  /// Schedule quantized recording start.
+  /// Recording will start at the next loop boundary (or immediately if no base loop).
+  /// [path] is the complete file path for the WAV recording.
+  /// Returns event ID (0 if failed to schedule).
+  int schedulerScheduleStart(String path) {
+    return _impl.schedulerScheduleStart(path);
+  }
+
+  /// Schedule quantized recording stop.
+  /// Recording will stop at the next loop boundary that completes a whole loop multiple.
+  /// [startFrame] is when recording started (for multi-loop calculation).
+  /// Returns event ID (0 if failed to schedule).
+  int schedulerScheduleStop(int startFrame) {
+    return _impl.schedulerScheduleStop(startFrame);
+  }
+
+  /// Cancel a scheduled event by ID.
+  /// Returns true if event was found and cancelled.
+  bool schedulerCancelEvent(int eventId) {
+    return _impl.schedulerCancelEvent(eventId);
+  }
+
+  /// Cancel all pending events.
+  void schedulerCancelAll() {
+    _impl.schedulerCancelAll();
+  }
+
+  /// Poll for fired event notification.
+  /// Returns null if no notification available.
+  /// Call this periodically (e.g., every 10-100ms) to get notified when events fire.
+  SchedulerNotification? schedulerPollNotification() {
+    return _impl.schedulerPollNotification();
+  }
+
+  /// Check if there are pending notifications.
+  bool schedulerHasNotifications() {
+    return _impl.schedulerHasNotifications();
+  }
+
+  /// Get current global frame position.
+  /// This is updated by the audio callback and represents the last processed frame.
+  int schedulerGetGlobalFrame() {
+    return _impl.schedulerGetGlobalFrame();
+  }
+
+  /// Get base loop length in frames.
+  /// Returns 0 if no base loop is set.
+  int schedulerGetBaseLoopFrames() {
+    return _impl.schedulerGetBaseLoopFrames();
+  }
+
+  /// Get next loop boundary frame.
+  /// Returns the frame number of the next loop boundary from current position.
+  int schedulerGetNextLoopBoundary() {
+    return _impl.schedulerGetNextLoopBoundary();
+  }
+
+  /// Set latency compensation in frames.
+  /// This is applied at recording start - the ring buffer will include
+  /// audio from [frames] frames before the start event.
+  void schedulerSetLatencyCompensation(int frames) {
+    _impl.schedulerSetLatencyCompensation(frames);
+  }
+
+  /// Get latency compensation in frames.
+  int schedulerGetLatencyCompensation() {
+    return _impl.schedulerGetLatencyCompensation();
+  }
+
+  // ==================== NATIVE RING BUFFER ====================
+  // Latency compensation via continuous capture with pre-roll
+
+  /// Create/configure the native ring buffer for latency compensation.
+  /// The ring buffer continuously captures audio in the native layer,
+  /// allowing "pre-roll" reads to capture audio from before the record
+  /// button was pressed (compensating for input latency).
+  ///
+  /// [capacitySeconds] How many seconds of audio to keep (typically 5).
+  /// [sampleRate] Sample rate in Hz.
+  /// [channels] Number of channels (1=mono, 2=stereo).
+  void createRingBuffer(int capacitySeconds, int sampleRate, int channels) {
+    _impl.createRingBuffer(capacitySeconds, sampleRate, channels);
+  }
+
+  /// Destroy/reset the native ring buffer.
+  void destroyRingBuffer() {
+    _impl.destroyRingBuffer();
+  }
+
+  /// Read pre-roll samples for latency compensation.
+  /// This reads audio from the past to compensate for control latency
+  /// (touchscreen ~50ms, Bluetooth ~35ms, USB MIDI ~15ms).
+  ///
+  /// [frameCount] Number of frames to read.
+  /// [rewindFrames] How many frames back in time to start reading.
+  /// Returns Float32List with interleaved samples.
+  Float32List readPreRoll(int frameCount, int rewindFrames) {
+    return _impl.readPreRoll(frameCount, rewindFrames);
+  }
+
+  /// Get current audio level in dB (RMS).
+  /// This is calculated continuously in the native audio callback,
+  /// enabling efficient level metering without Dart overhead.
+  double getAudioLevelDb() {
+    return _impl.getAudioLevelDb();
+  }
+
+  /// Get total frames written to the ring buffer.
+  /// Useful for synchronization with other components.
+  int getRingBufferFramesWritten() {
+    return _impl.getRingBufferFramesWritten();
+  }
+
+  /// Get available frames in the ring buffer.
+  /// Returns the number of valid frames (up to capacity after wrap).
+  int getRingBufferAvailable() {
+    return _impl.getRingBufferAvailable();
+  }
+
+  /// Reset the ring buffer (clear all data).
+  void resetRingBuffer() {
+    _impl.resetRingBuffer();
   }
 }

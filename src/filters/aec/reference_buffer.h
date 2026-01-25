@@ -77,6 +77,18 @@ public:
   }
 
   /**
+   * Enable or disable the reference buffer.
+   * When disabled, writes are skipped to save CPU when AEC is not in use.
+   */
+  void setEnabled(bool enabled) {
+    mEnabled.store(enabled, std::memory_order_release);
+  }
+
+  bool isEnabled() const {
+    return mEnabled.load(std::memory_order_acquire);
+  }
+
+  /**
    * Write audio frames to the buffer (called from SoLoud audio thread).
    * Also records the timestamp of this write for synchronization.
    *
@@ -84,26 +96,19 @@ public:
    * @param frameCount Number of frames to write
    */
   void write(const float *data, size_t frameCount) {
+    // Skip writes if AEC is disabled
+    if (!mEnabled.load(std::memory_order_relaxed))
+      return;
+
     if (data == nullptr || frameCount == 0)
       return;
 
     size_t samplesToWrite = frameCount * mChannels;
     size_t writePos = mWritePos.load(std::memory_order_relaxed);
 
-    // Calculate energy of incoming data for debug
-    float energy = 0.0f;
+    // Copy data to ring buffer
     for (size_t i = 0; i < samplesToWrite; ++i) {
       mBuffer[(writePos + i) % mBuffer.size()] = data[i];
-      energy += data[i] * data[i];
-    }
-
-    // Debug: Periodic logging of write activity
-    static int writeDebugCount = 0;
-    if (++writeDebugCount % 4800 == 0) { // Every ~1s
-      float rms =
-          samplesToWrite > 0 ? std::sqrt(energy / samplesToWrite) : 0.0f;
-      aecLog("[AEC RefBuf W] pos=%zu frames=%zu energy=%.5f rms=%.5f\n",
-             writePos, frameCount, energy, rms);
     }
 
     // During calibration: PROGRESSIVELY copy data as it arrives
@@ -538,6 +543,9 @@ private:
   std::atomic<size_t> mWritePos;
   std::atomic<size_t> mReadPos;
   std::atomic<size_t> mFramesWritten;
+
+  // Enabled flag - when false, writes are skipped to save CPU
+  std::atomic<bool> mEnabled{false};
 
   // Calibration capture tracking
   std::atomic<size_t> mCalibrationStartPos{0};

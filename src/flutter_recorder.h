@@ -18,6 +18,14 @@ FFI_PLUGIN_EXPORT void flutter_recorder_setDartEventCallback(
     dartSilenceChangedCallback_t silence_changed_callback,
     dartStreamDataCallback_t stream_data_callback);
 
+// Set callback for when recording stops (auto-stop at loop boundary)
+FFI_PLUGIN_EXPORT void flutter_recorder_setRecordingStoppedCallback(
+    dartRecordingStoppedCallback_t callback);
+
+// Set callback for when recording starts (native scheduler fires StartRecording)
+FFI_PLUGIN_EXPORT void flutter_recorder_setRecordingStartedCallback(
+    dartRecordingStartedCallback_t callback);
+
 FFI_PLUGIN_EXPORT void flutter_recorder_nativeFree(void *pointer);
 
 FFI_PLUGIN_EXPORT void flutter_recorder_listCaptureDevices(char **devicesName,
@@ -104,6 +112,27 @@ FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoringMode(int mode);
 FFI_PLUGIN_EXPORT int flutter_recorder_isSlaveAudioReady();
 
 /////////////////////////
+/// NATIVE AUDIO SINK
+/////////////////////////
+// Direct native-to-native streaming (bypasses Dart main thread)
+// Callback type matches flutter_soloud's expected signature
+typedef void (*NativeAudioSinkCallback)(const unsigned char* data,
+                                        unsigned int dataLen, void* userData);
+
+// Set native audio sink for direct recorder-to-player streaming
+FFI_PLUGIN_EXPORT void flutter_recorder_setNativeAudioSink(
+    NativeAudioSinkCallback callback, void* userData);
+
+// Check if native audio sink is active
+FFI_PLUGIN_EXPORT bool flutter_recorder_isNativeAudioSinkActive();
+
+// Disable native audio sink
+FFI_PLUGIN_EXPORT void flutter_recorder_disableNativeAudioSink();
+
+// Inject preroll audio from ring buffer into SoLoud stream via native path
+FFI_PLUGIN_EXPORT void flutter_recorder_injectPreroll(size_t frameCount);
+
+/////////////////////////
 /// FILTERS
 /////////////////////////
 FFI_PLUGIN_EXPORT int
@@ -122,6 +151,11 @@ FFI_PLUGIN_EXPORT float
 flutter_recorder_getFilterParams(enum RecorderFilterType filterType,
                                  int attributeId);
 
+// Filter lock stats (for debug overlay)
+FFI_PLUGIN_EXPORT uint64_t flutter_recorder_getFilterMissCount();
+FFI_PLUGIN_EXPORT uint64_t flutter_recorder_getFilterProcessCount();
+FFI_PLUGIN_EXPORT void flutter_recorder_resetFilterStats();
+
 /////////////////////////
 /// AEC (Acoustic Echo Cancellation)
 /////////////////////////
@@ -131,6 +165,10 @@ flutter_recorder_aec_createReferenceBuffer(unsigned int sampleRate,
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_destroyReferenceBuffer();
 FFI_PLUGIN_EXPORT void *flutter_recorder_aec_getOutputCallback();
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_resetBuffer();
+
+// AEC Enable/Disable (controls reference buffer writes)
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setEnabled(bool enabled);
+FFI_PLUGIN_EXPORT bool flutter_recorder_aec_isEnabled();
 
 // AEC Mode Control (A/B Testing)
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_setMode(int mode);
@@ -283,6 +321,99 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
     unsigned int sampleRate, int *outDelaySamples, float *outDelayMs,
     float *outGain, float *outCorrelation, int *outImpulseLength,
     int64_t *outCalibratedOffset, int signalType);
+
+/////////////////////////
+/// Native Scheduler
+/// Sample-accurate timing for recording start/stop in audio callback
+/////////////////////////
+
+// Reset the native scheduler state
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_reset();
+
+// Set base loop parameters for quantization
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setBaseLoop(int64_t loopFrames,
+                                                               int64_t loopStartFrame);
+
+// Clear base loop (free recording mode)
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_clearBaseLoop();
+
+// Schedule quantized recording start
+// Returns event ID (0 if failed)
+FFI_PLUGIN_EXPORT uint32_t flutter_recorder_scheduler_scheduleStart(const char* path);
+
+// Schedule quantized recording stop
+// Returns event ID (0 if failed)
+FFI_PLUGIN_EXPORT uint32_t flutter_recorder_scheduler_scheduleStop(int64_t startFrame);
+
+// Schedule event at specific frame
+// action: 0=None, 1=StartRecording, 2=StopRecording, 3=StartPlayback, 4=StopPlayback
+FFI_PLUGIN_EXPORT uint32_t flutter_recorder_scheduler_scheduleEvent(
+    int action, int64_t targetFrame, const char* path);
+
+// Cancel a scheduled event by ID
+// Returns 1 if cancelled, 0 if not found
+FFI_PLUGIN_EXPORT int flutter_recorder_scheduler_cancelEvent(uint32_t eventId);
+
+// Cancel all pending events
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_cancelAll();
+
+// Poll for fired event notification
+// Returns 1 if notification available, 0 if queue empty
+FFI_PLUGIN_EXPORT int flutter_recorder_scheduler_pollNotification(
+    uint32_t* outEventId, int* outAction, int64_t* outFiredFrame, int32_t* outLatency);
+
+// Check if there are pending notifications
+FFI_PLUGIN_EXPORT int flutter_recorder_scheduler_hasNotifications();
+
+// Get current global frame position
+FFI_PLUGIN_EXPORT int64_t flutter_recorder_scheduler_getGlobalFrame();
+
+// Get base loop length in frames
+FFI_PLUGIN_EXPORT int64_t flutter_recorder_scheduler_getBaseLoopFrames();
+
+// Get next loop boundary frame
+FFI_PLUGIN_EXPORT int64_t flutter_recorder_scheduler_getNextLoopBoundary();
+
+// Set latency compensation in frames (applied at recording start)
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setLatencyCompensation(int64_t frames);
+
+// Get latency compensation in frames
+FFI_PLUGIN_EXPORT int64_t flutter_recorder_scheduler_getLatencyCompensation();
+
+/////////////////////////
+/// Native Ring Buffer
+/// Latency compensation via continuous capture with pre-roll
+/////////////////////////
+
+// Create/configure the native ring buffer
+// capacitySeconds: How many seconds of audio to keep (typically 5)
+// sampleRate: Sample rate in Hz
+// channels: Number of channels (1=mono, 2=stereo)
+FFI_PLUGIN_EXPORT void flutter_recorder_createRingBuffer(
+    size_t capacitySeconds, unsigned int sampleRate, unsigned int channels);
+
+// Destroy/reset the native ring buffer
+FFI_PLUGIN_EXPORT void flutter_recorder_destroyRingBuffer();
+
+// Read pre-roll samples for latency compensation
+// dest: Destination buffer (must be pre-allocated)
+// frameCount: Number of frames to read
+// rewindFrames: How many frames back in time to start reading
+// Returns: Number of frames actually read
+FFI_PLUGIN_EXPORT size_t flutter_recorder_readPreRoll(
+    float* dest, size_t frameCount, size_t rewindFrames);
+
+// Get current audio level in dB (RMS)
+FFI_PLUGIN_EXPORT float flutter_recorder_getAudioLevelDb();
+
+// Get total frames written to the ring buffer
+FFI_PLUGIN_EXPORT size_t flutter_recorder_getRingBufferFramesWritten();
+
+// Get available frames in the ring buffer
+FFI_PLUGIN_EXPORT size_t flutter_recorder_getRingBufferAvailable();
+
+// Reset the ring buffer (clear all data)
+FFI_PLUGIN_EXPORT void flutter_recorder_resetRingBuffer();
 
 #ifdef __cplusplus
 }

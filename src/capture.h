@@ -82,6 +82,11 @@ public:
 
     void stopRecording();
 
+    /// Write preroll data directly to the WAV file (for latency compensation)
+    /// @param samples Float samples (interleaved if stereo)
+    /// @param numSamples Total number of samples (frames * channels)
+    void writePrerollToWav(const float* samples, size_t numSamples);
+
     float *getWave(bool *isTheSameAsBefore);
 
     float getVolumeDb();
@@ -163,6 +168,11 @@ public:
     /// Buffer for format conversion (e.g. S16 -> F32) used in data_callback
     /// Defined here to avoid reallocating in the audio thread
     std::vector<float> mConversionBuffer;
+
+    /// Buffer for playback format conversion (F32 -> S16)
+    /// SoLoud outputs f32, but device may need s16 for low-latency fast path
+    /// All processing (AEC, monitoring) happens in f32, then converted at the end
+    std::vector<float> mPlaybackBuffer;
 
 private:
     ma_context context;

@@ -20,6 +20,8 @@ add_library(flutter_recorder SHARED
   "flutter_recorder.cpp"
   "analyzer.cpp"
   "capture.cpp"
+  "native_ring_buffer.cpp"
+  "native_scheduler.cpp"
   "soloud_slave_bridge.cpp"
   "fft/soloud_fft.cpp"
   "filters/filters.cpp"

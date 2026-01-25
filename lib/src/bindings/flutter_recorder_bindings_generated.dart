@@ -60,6 +60,38 @@ class FlutterRecorderBindings {
           void Function(
               dartSilenceChangedCallback_t, dartStreamDataCallback_t)>();
 
+  void flutter_recorder_setRecordingStoppedCallback(
+    ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>> callback,
+  ) {
+    return _flutter_recorder_setRecordingStoppedCallback(callback);
+  }
+
+  late final _flutter_recorder_setRecordingStoppedCallbackPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Void Function(
+              ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>>)>>(
+      'flutter_recorder_setRecordingStoppedCallback');
+  late final _flutter_recorder_setRecordingStoppedCallback =
+      _flutter_recorder_setRecordingStoppedCallbackPtr.asFunction<
+          void Function(
+              ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>>)>();
+
+  void flutter_recorder_setRecordingStartedCallback(
+    ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>> callback,
+  ) {
+    return _flutter_recorder_setRecordingStartedCallback(callback);
+  }
+
+  late final _flutter_recorder_setRecordingStartedCallbackPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Void Function(
+              ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>>)>>(
+      'flutter_recorder_setRecordingStartedCallback');
+  late final _flutter_recorder_setRecordingStartedCallback =
+      _flutter_recorder_setRecordingStartedCallbackPtr.asFunction<
+          void Function(
+              ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>>)>();
+
   void flutter_recorder_nativeFree(
     ffi.Pointer<ffi.Void> pointer,
   ) {
@@ -443,12 +475,7 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_setFftSmoothing =
       _flutter_recorder_setFftSmoothingPtr.asFunction<void Function(double)>();
 
-
-
-  /// //////////////////////
-  /// GETTERS
-  /// //////////////////////
-
+  /// Getters for actual device parameters (populated after init)
   int flutter_recorder_getSampleRate() {
     return _flutter_recorder_getSampleRate();
   }
@@ -498,6 +525,10 @@ class FlutterRecorderBindings {
           'flutter_recorder_getPlaybackFormat');
   late final _flutter_recorder_getPlaybackFormat =
       _flutter_recorder_getPlaybackFormatPtr.asFunction<int Function()>();
+
+  /// //////////////////////
+  /// MONITORING
+  /// //////////////////////
   void flutter_recorder_setMonitoring(
     bool enabled,
   ) {
@@ -540,6 +571,58 @@ class FlutterRecorderBindings {
           'flutter_recorder_isSlaveAudioReady');
   late final _flutter_recorder_isSlaveAudioReady =
       _flutter_recorder_isSlaveAudioReadyPtr.asFunction<int Function()>();
+
+  /// Set native audio sink for direct recorder-to-player streaming
+  void flutter_recorder_setNativeAudioSink(
+    NativeAudioSinkCallback callback,
+    ffi.Pointer<ffi.Void> userData,
+  ) {
+    return _flutter_recorder_setNativeAudioSink(
+      callback,
+      userData,
+    );
+  }
+
+  late final _flutter_recorder_setNativeAudioSinkPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Void Function(NativeAudioSinkCallback,
+              ffi.Pointer<ffi.Void>)>>('flutter_recorder_setNativeAudioSink');
+  late final _flutter_recorder_setNativeAudioSink =
+      _flutter_recorder_setNativeAudioSinkPtr.asFunction<
+          void Function(NativeAudioSinkCallback, ffi.Pointer<ffi.Void>)>();
+
+  /// Check if native audio sink is active
+  bool flutter_recorder_isNativeAudioSinkActive() {
+    return _flutter_recorder_isNativeAudioSinkActive();
+  }
+
+  late final _flutter_recorder_isNativeAudioSinkActivePtr =
+      _lookup<ffi.NativeFunction<ffi.Bool Function()>>(
+          'flutter_recorder_isNativeAudioSinkActive');
+  late final _flutter_recorder_isNativeAudioSinkActive =
+      _flutter_recorder_isNativeAudioSinkActivePtr
+          .asFunction<bool Function()>();
+
+  /// Disable native audio sink
+  void flutter_recorder_disableNativeAudioSink() {
+    return _flutter_recorder_disableNativeAudioSink();
+  }
+
+  late final _flutter_recorder_disableNativeAudioSinkPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_disableNativeAudioSink');
+  late final _flutter_recorder_disableNativeAudioSink =
+      _flutter_recorder_disableNativeAudioSinkPtr.asFunction<void Function()>();
+
+  void flutter_recorder_injectPreroll(int frameCount) {
+    return _flutter_recorder_injectPreroll(frameCount);
+  }
+
+  late final _flutter_recorder_injectPrerollPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Size)>>(
+          'flutter_recorder_injectPreroll');
+  late final _flutter_recorder_injectPreroll =
+      _flutter_recorder_injectPrerollPtr.asFunction<void Function(int)>();
 
   /// //////////////////////
   /// FILTERS
@@ -644,6 +727,37 @@ class FlutterRecorderBindings {
       _flutter_recorder_getFilterParamsPtr
           .asFunction<double Function(int, int)>();
 
+  /// Filter lock stats (for debug overlay)
+  int flutter_recorder_getFilterMissCount() {
+    return _flutter_recorder_getFilterMissCount();
+  }
+
+  late final _flutter_recorder_getFilterMissCountPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint64 Function()>>(
+          'flutter_recorder_getFilterMissCount');
+  late final _flutter_recorder_getFilterMissCount =
+      _flutter_recorder_getFilterMissCountPtr.asFunction<int Function()>();
+
+  int flutter_recorder_getFilterProcessCount() {
+    return _flutter_recorder_getFilterProcessCount();
+  }
+
+  late final _flutter_recorder_getFilterProcessCountPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint64 Function()>>(
+          'flutter_recorder_getFilterProcessCount');
+  late final _flutter_recorder_getFilterProcessCount =
+      _flutter_recorder_getFilterProcessCountPtr.asFunction<int Function()>();
+
+  void flutter_recorder_resetFilterStats() {
+    return _flutter_recorder_resetFilterStats();
+  }
+
+  late final _flutter_recorder_resetFilterStatsPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_resetFilterStats');
+  late final _flutter_recorder_resetFilterStats =
+      _flutter_recorder_resetFilterStatsPtr.asFunction<void Function()>();
+
   /// //////////////////////
   /// AEC (Acoustic Echo Cancellation)
   /// //////////////////////
@@ -696,6 +810,31 @@ class FlutterRecorderBindings {
           'flutter_recorder_aec_resetBuffer');
   late final _flutter_recorder_aec_resetBuffer =
       _flutter_recorder_aec_resetBufferPtr.asFunction<void Function()>();
+
+  /// AEC Enable/Disable (controls reference buffer writes)
+  void flutter_recorder_aec_setEnabled(
+    bool enabled,
+  ) {
+    return _flutter_recorder_aec_setEnabled(
+      enabled,
+    );
+  }
+
+  late final _flutter_recorder_aec_setEnabledPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Bool)>>(
+          'flutter_recorder_aec_setEnabled');
+  late final _flutter_recorder_aec_setEnabled =
+      _flutter_recorder_aec_setEnabledPtr.asFunction<void Function(bool)>();
+
+  bool flutter_recorder_aec_isEnabled() {
+    return _flutter_recorder_aec_isEnabled();
+  }
+
+  late final _flutter_recorder_aec_isEnabledPtr =
+      _lookup<ffi.NativeFunction<ffi.Bool Function()>>(
+          'flutter_recorder_aec_isEnabled');
+  late final _flutter_recorder_aec_isEnabled =
+      _flutter_recorder_aec_isEnabledPtr.asFunction<bool Function()>();
 
   /// AEC Mode Control (A/B Testing)
   void flutter_recorder_aec_setMode(
@@ -1434,6 +1573,333 @@ class FlutterRecorderBindings {
               ffi.Pointer<ffi.Int>,
               ffi.Pointer<ffi.Int64>,
               int)>();
+
+  /// Reset the native scheduler state
+  void flutter_recorder_scheduler_reset() {
+    return _flutter_recorder_scheduler_reset();
+  }
+
+  late final _flutter_recorder_scheduler_resetPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_scheduler_reset');
+  late final _flutter_recorder_scheduler_reset =
+      _flutter_recorder_scheduler_resetPtr.asFunction<void Function()>();
+
+  /// Set base loop parameters for quantization
+  void flutter_recorder_scheduler_setBaseLoop(
+    int loopFrames,
+    int loopStartFrame,
+  ) {
+    return _flutter_recorder_scheduler_setBaseLoop(
+      loopFrames,
+      loopStartFrame,
+    );
+  }
+
+  late final _flutter_recorder_scheduler_setBaseLoopPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int64, ffi.Int64)>>(
+          'flutter_recorder_scheduler_setBaseLoop');
+  late final _flutter_recorder_scheduler_setBaseLoop =
+      _flutter_recorder_scheduler_setBaseLoopPtr
+          .asFunction<void Function(int, int)>();
+
+  /// Clear base loop (free recording mode)
+  void flutter_recorder_scheduler_clearBaseLoop() {
+    return _flutter_recorder_scheduler_clearBaseLoop();
+  }
+
+  late final _flutter_recorder_scheduler_clearBaseLoopPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_scheduler_clearBaseLoop');
+  late final _flutter_recorder_scheduler_clearBaseLoop =
+      _flutter_recorder_scheduler_clearBaseLoopPtr
+          .asFunction<void Function()>();
+
+  /// Schedule quantized recording start
+  /// Returns event ID (0 if failed)
+  int flutter_recorder_scheduler_scheduleStart(
+    ffi.Pointer<ffi.Char> path,
+  ) {
+    return _flutter_recorder_scheduler_scheduleStart(
+      path,
+    );
+  }
+
+  late final _flutter_recorder_scheduler_scheduleStartPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint32 Function(ffi.Pointer<ffi.Char>)>>(
+          'flutter_recorder_scheduler_scheduleStart');
+  late final _flutter_recorder_scheduler_scheduleStart =
+      _flutter_recorder_scheduler_scheduleStartPtr
+          .asFunction<int Function(ffi.Pointer<ffi.Char>)>();
+
+  /// Schedule quantized recording stop
+  /// Returns event ID (0 if failed)
+  int flutter_recorder_scheduler_scheduleStop(
+    int startFrame,
+  ) {
+    return _flutter_recorder_scheduler_scheduleStop(
+      startFrame,
+    );
+  }
+
+  late final _flutter_recorder_scheduler_scheduleStopPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint32 Function(ffi.Int64)>>(
+          'flutter_recorder_scheduler_scheduleStop');
+  late final _flutter_recorder_scheduler_scheduleStop =
+      _flutter_recorder_scheduler_scheduleStopPtr
+          .asFunction<int Function(int)>();
+
+  /// Schedule event at specific frame
+  /// action: 0=None, 1=StartRecording, 2=StopRecording, 3=StartPlayback, 4=StopPlayback
+  int flutter_recorder_scheduler_scheduleEvent(
+    int action,
+    int targetFrame,
+    ffi.Pointer<ffi.Char> path,
+  ) {
+    return _flutter_recorder_scheduler_scheduleEvent(
+      action,
+      targetFrame,
+      path,
+    );
+  }
+
+  late final _flutter_recorder_scheduler_scheduleEventPtr = _lookup<
+          ffi.NativeFunction<
+              ffi.Uint32 Function(ffi.Int, ffi.Int64, ffi.Pointer<ffi.Char>)>>(
+      'flutter_recorder_scheduler_scheduleEvent');
+  late final _flutter_recorder_scheduler_scheduleEvent =
+      _flutter_recorder_scheduler_scheduleEventPtr
+          .asFunction<int Function(int, int, ffi.Pointer<ffi.Char>)>();
+
+  /// Cancel a scheduled event by ID
+  /// Returns 1 if cancelled, 0 if not found
+  int flutter_recorder_scheduler_cancelEvent(
+    int eventId,
+  ) {
+    return _flutter_recorder_scheduler_cancelEvent(
+      eventId,
+    );
+  }
+
+  late final _flutter_recorder_scheduler_cancelEventPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Uint32)>>(
+          'flutter_recorder_scheduler_cancelEvent');
+  late final _flutter_recorder_scheduler_cancelEvent =
+      _flutter_recorder_scheduler_cancelEventPtr
+          .asFunction<int Function(int)>();
+
+  /// Cancel all pending events
+  void flutter_recorder_scheduler_cancelAll() {
+    return _flutter_recorder_scheduler_cancelAll();
+  }
+
+  late final _flutter_recorder_scheduler_cancelAllPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_scheduler_cancelAll');
+  late final _flutter_recorder_scheduler_cancelAll =
+      _flutter_recorder_scheduler_cancelAllPtr.asFunction<void Function()>();
+
+  /// Poll for fired event notification
+  /// Returns 1 if notification available, 0 if queue empty
+  int flutter_recorder_scheduler_pollNotification(
+    ffi.Pointer<ffi.Uint32> outEventId,
+    ffi.Pointer<ffi.Int> outAction,
+    ffi.Pointer<ffi.Int64> outFiredFrame,
+    ffi.Pointer<ffi.Int32> outLatency,
+  ) {
+    return _flutter_recorder_scheduler_pollNotification(
+      outEventId,
+      outAction,
+      outFiredFrame,
+      outLatency,
+    );
+  }
+
+  late final _flutter_recorder_scheduler_pollNotificationPtr = _lookup<
+          ffi.NativeFunction<
+              ffi.Int Function(ffi.Pointer<ffi.Uint32>, ffi.Pointer<ffi.Int>,
+                  ffi.Pointer<ffi.Int64>, ffi.Pointer<ffi.Int32>)>>(
+      'flutter_recorder_scheduler_pollNotification');
+  late final _flutter_recorder_scheduler_pollNotification =
+      _flutter_recorder_scheduler_pollNotificationPtr.asFunction<
+          int Function(ffi.Pointer<ffi.Uint32>, ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Int64>, ffi.Pointer<ffi.Int32>)>();
+
+  /// Check if there are pending notifications
+  int flutter_recorder_scheduler_hasNotifications() {
+    return _flutter_recorder_scheduler_hasNotifications();
+  }
+
+  late final _flutter_recorder_scheduler_hasNotificationsPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_scheduler_hasNotifications');
+  late final _flutter_recorder_scheduler_hasNotifications =
+      _flutter_recorder_scheduler_hasNotificationsPtr
+          .asFunction<int Function()>();
+
+  /// Get current global frame position
+  int flutter_recorder_scheduler_getGlobalFrame() {
+    return _flutter_recorder_scheduler_getGlobalFrame();
+  }
+
+  late final _flutter_recorder_scheduler_getGlobalFramePtr =
+      _lookup<ffi.NativeFunction<ffi.Int64 Function()>>(
+          'flutter_recorder_scheduler_getGlobalFrame');
+  late final _flutter_recorder_scheduler_getGlobalFrame =
+      _flutter_recorder_scheduler_getGlobalFramePtr
+          .asFunction<int Function()>();
+
+  /// Get base loop length in frames
+  int flutter_recorder_scheduler_getBaseLoopFrames() {
+    return _flutter_recorder_scheduler_getBaseLoopFrames();
+  }
+
+  late final _flutter_recorder_scheduler_getBaseLoopFramesPtr =
+      _lookup<ffi.NativeFunction<ffi.Int64 Function()>>(
+          'flutter_recorder_scheduler_getBaseLoopFrames');
+  late final _flutter_recorder_scheduler_getBaseLoopFrames =
+      _flutter_recorder_scheduler_getBaseLoopFramesPtr
+          .asFunction<int Function()>();
+
+  /// Get next loop boundary frame
+  int flutter_recorder_scheduler_getNextLoopBoundary() {
+    return _flutter_recorder_scheduler_getNextLoopBoundary();
+  }
+
+  late final _flutter_recorder_scheduler_getNextLoopBoundaryPtr =
+      _lookup<ffi.NativeFunction<ffi.Int64 Function()>>(
+          'flutter_recorder_scheduler_getNextLoopBoundary');
+  late final _flutter_recorder_scheduler_getNextLoopBoundary =
+      _flutter_recorder_scheduler_getNextLoopBoundaryPtr
+          .asFunction<int Function()>();
+
+  /// Set latency compensation in frames (applied at recording start)
+  void flutter_recorder_scheduler_setLatencyCompensation(int frames) {
+    return _flutter_recorder_scheduler_setLatencyCompensation(frames);
+  }
+
+  late final _flutter_recorder_scheduler_setLatencyCompensationPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int64)>>(
+          'flutter_recorder_scheduler_setLatencyCompensation');
+  late final _flutter_recorder_scheduler_setLatencyCompensation =
+      _flutter_recorder_scheduler_setLatencyCompensationPtr
+          .asFunction<void Function(int)>();
+
+  /// Get latency compensation in frames
+  int flutter_recorder_scheduler_getLatencyCompensation() {
+    return _flutter_recorder_scheduler_getLatencyCompensation();
+  }
+
+  late final _flutter_recorder_scheduler_getLatencyCompensationPtr =
+      _lookup<ffi.NativeFunction<ffi.Int64 Function()>>(
+          'flutter_recorder_scheduler_getLatencyCompensation');
+  late final _flutter_recorder_scheduler_getLatencyCompensation =
+      _flutter_recorder_scheduler_getLatencyCompensationPtr
+          .asFunction<int Function()>();
+
+  /// Create/configure the native ring buffer
+  /// capacitySeconds: How many seconds of audio to keep (typically 5)
+  /// sampleRate: Sample rate in Hz
+  /// channels: Number of channels (1=mono, 2=stereo)
+  void flutter_recorder_createRingBuffer(
+    int capacitySeconds,
+    int sampleRate,
+    int channels,
+  ) {
+    return _flutter_recorder_createRingBuffer(
+      capacitySeconds,
+      sampleRate,
+      channels,
+    );
+  }
+
+  late final _flutter_recorder_createRingBufferPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Void Function(ffi.Size, ffi.UnsignedInt,
+              ffi.UnsignedInt)>>('flutter_recorder_createRingBuffer');
+  late final _flutter_recorder_createRingBuffer =
+      _flutter_recorder_createRingBufferPtr
+          .asFunction<void Function(int, int, int)>();
+
+  /// Destroy/reset the native ring buffer
+  void flutter_recorder_destroyRingBuffer() {
+    return _flutter_recorder_destroyRingBuffer();
+  }
+
+  late final _flutter_recorder_destroyRingBufferPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_destroyRingBuffer');
+  late final _flutter_recorder_destroyRingBuffer =
+      _flutter_recorder_destroyRingBufferPtr.asFunction<void Function()>();
+
+  /// Read pre-roll samples for latency compensation
+  /// dest: Destination buffer (must be pre-allocated)
+  /// frameCount: Number of frames to read
+  /// rewindFrames: How many frames back in time to start reading
+  /// Returns: Number of frames actually read
+  int flutter_recorder_readPreRoll(
+    ffi.Pointer<ffi.Float> dest,
+    int frameCount,
+    int rewindFrames,
+  ) {
+    return _flutter_recorder_readPreRoll(
+      dest,
+      frameCount,
+      rewindFrames,
+    );
+  }
+
+  late final _flutter_recorder_readPreRollPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Size Function(ffi.Pointer<ffi.Float>, ffi.Size,
+              ffi.Size)>>('flutter_recorder_readPreRoll');
+  late final _flutter_recorder_readPreRoll = _flutter_recorder_readPreRollPtr
+      .asFunction<int Function(ffi.Pointer<ffi.Float>, int, int)>();
+
+  /// Get current audio level in dB (RMS)
+  double flutter_recorder_getAudioLevelDb() {
+    return _flutter_recorder_getAudioLevelDb();
+  }
+
+  late final _flutter_recorder_getAudioLevelDbPtr =
+      _lookup<ffi.NativeFunction<ffi.Float Function()>>(
+          'flutter_recorder_getAudioLevelDb');
+  late final _flutter_recorder_getAudioLevelDb =
+      _flutter_recorder_getAudioLevelDbPtr.asFunction<double Function()>();
+
+  /// Get total frames written to the ring buffer
+  int flutter_recorder_getRingBufferFramesWritten() {
+    return _flutter_recorder_getRingBufferFramesWritten();
+  }
+
+  late final _flutter_recorder_getRingBufferFramesWrittenPtr =
+      _lookup<ffi.NativeFunction<ffi.Size Function()>>(
+          'flutter_recorder_getRingBufferFramesWritten');
+  late final _flutter_recorder_getRingBufferFramesWritten =
+      _flutter_recorder_getRingBufferFramesWrittenPtr
+          .asFunction<int Function()>();
+
+  /// Get available frames in the ring buffer
+  int flutter_recorder_getRingBufferAvailable() {
+    return _flutter_recorder_getRingBufferAvailable();
+  }
+
+  late final _flutter_recorder_getRingBufferAvailablePtr =
+      _lookup<ffi.NativeFunction<ffi.Size Function()>>(
+          'flutter_recorder_getRingBufferAvailable');
+  late final _flutter_recorder_getRingBufferAvailable =
+      _flutter_recorder_getRingBufferAvailablePtr.asFunction<int Function()>();
+
+  /// Reset the ring buffer (clear all data)
+  void flutter_recorder_resetRingBuffer() {
+    return _flutter_recorder_resetRingBuffer();
+  }
+
+  late final _flutter_recorder_resetRingBufferPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_resetRingBuffer');
+  late final _flutter_recorder_resetRingBuffer =
+      _flutter_recorder_resetRingBufferPtr.asFunction<void Function()>();
 }
 
 typedef dartSilenceChangedCallback_t
@@ -1498,6 +1964,22 @@ enum CaptureErrors {
         _ => throw ArgumentError("Unknown value for CaptureErrors: $value"),
       };
 }
+
+/// //////////////////////
+/// NATIVE AUDIO SINK
+/// //////////////////////
+/// Direct native-to-native streaming (bypasses Dart main thread)
+/// Callback type matches flutter_soloud's expected signature
+typedef NativeAudioSinkCallback
+    = ffi.Pointer<ffi.NativeFunction<NativeAudioSinkCallbackFunction>>;
+typedef NativeAudioSinkCallbackFunction = ffi.Void Function(
+    ffi.Pointer<ffi.UnsignedChar> data,
+    ffi.UnsignedInt dataLen,
+    ffi.Pointer<ffi.Void> userData);
+typedef DartNativeAudioSinkCallbackFunction = void Function(
+    ffi.Pointer<ffi.UnsignedChar> data,
+    int dataLen,
+    ffi.Pointer<ffi.Void> userData);
 
 enum RecorderFilterType {
   autogain(0),

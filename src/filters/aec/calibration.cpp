@@ -25,27 +25,31 @@ static std::mutex sLogBufferMutex;  // Protects sLogBuffer for thread-safety
 static const size_t MAX_LOG_SIZE = 64 * 1024; // 64KB max
 
 void aecLog(const char *fmt, ...) {
+  // In production, just print - no buffering to avoid any locking in audio thread
+#ifndef AEC_DEBUG_LOGGING
+  (void)fmt;  // Suppress unused parameter warning when logging disabled
+  return;
+#else
   char buffer[1024];
   va_list args;
   va_start(args, fmt);
   vsnprintf(buffer, sizeof(buffer), fmt, args);
   va_end(args);
 
-  // Append to in-memory buffer (truncate if too large)
+  // Append to in-memory buffer only in debug mode
   {
-    std::lock_guard<std::mutex> lock(sLogBufferMutex);
-    if (sLogBuffer.size() < MAX_LOG_SIZE) {
+    std::unique_lock<std::mutex> lock(sLogBufferMutex, std::try_to_lock);
+    if (lock.owns_lock() && sLogBuffer.size() < MAX_LOG_SIZE) {
       sLogBuffer += buffer;
     }
   }
 
 #ifdef __ANDROID__
-  // On Android, use logcat
   __android_log_print(ANDROID_LOG_INFO, AEC_LOG_TAG, "%s", buffer);
 #else
-  // Also print to stderr
   fprintf(stderr, "%s", buffer);
   fflush(stderr);
+#endif
 #endif
 }
 

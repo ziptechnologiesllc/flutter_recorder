@@ -1,6 +1,19 @@
 #include "neural_post_filter.h"
 extern void aecLog(const char *fmt, ...);
 #include <cstring>
+#include <cstdlib>
+
+// Android API < 28 doesn't have aligned_alloc, use posix_memalign instead
+#if defined(__ANDROID__) && __ANDROID_API__ < 28
+static inline void* portable_aligned_alloc(size_t alignment, size_t size) {
+    void* ptr = nullptr;
+    if (posix_memalign(&ptr, alignment, size) != 0) {
+        return nullptr;
+    }
+    return ptr;
+}
+#define aligned_alloc portable_aligned_alloc
+#endif
 
 #ifdef USE_TFLITE
 #include "litert/c/litert_compiled_model.h"

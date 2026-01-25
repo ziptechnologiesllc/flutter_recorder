@@ -35,6 +35,18 @@ class RecorderWeb extends RecorderImpl {
   @override
   Future<void> setAecStatsCallback() async {}
 
+  @override
+  Stream<RecordingStoppedEvent> get recordingStoppedStream => Stream.empty();
+
+  @override
+  Future<void> setRecordingStoppedCallback() async {}
+
+  @override
+  Stream<RecordingStartedEvent> get recordingStartedStream => Stream.empty();
+
+  @override
+  Future<void> setRecordingStartedCallback() async {}
+
   SilenceCallback? _silenceCallback;
 
   /// Create the worker in the WASM Module and listen for events coming
@@ -156,7 +168,9 @@ class RecorderWeb extends RecorderImpl {
     required PCMFormat format,
     required int sampleRate,
     required RecorderChannels channels,
+    bool captureOnly = false,
   }) {
+    // Note: captureOnly is ignored on web - no native duplex mode
     final error = wasmInit(deviceID, format.value, sampleRate, channels.count);
     if (CaptureErrors.fromValue(error) != CaptureErrors.captureNoError) {
       throw RecorderCppException.fromRecorderError(
@@ -168,6 +182,7 @@ class RecorderWeb extends RecorderImpl {
       format: format,
       sampleRate: sampleRate,
       channels: channels,
+      captureOnly: captureOnly,
     );
   }
 
@@ -251,6 +266,15 @@ class RecorderWeb extends RecorderImpl {
   void setMonitoringMode(int mode) {
     // Not implemented on Web for now
   }
+
+  @override
+  int getFilterMissCount() => 0;
+
+  @override
+  int getFilterProcessCount() => 0;
+
+  @override
+  void resetFilterStats() {}
 
   @override
   Float32List getFft({bool alwaysReturnData = true}) {
@@ -438,6 +462,16 @@ class RecorderWeb extends RecorderImpl {
 
   @override
   void aecResetBuffer() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecSetEnabled(bool enabled) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  bool aecIsEnabled() {
     throw UnsupportedError('AEC is not supported on web platform');
   }
 
@@ -638,5 +672,140 @@ class RecorderWeb extends RecorderImpl {
     CalibrationSignalType signalType = CalibrationSignalType.chirp,
   }) {
     throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  // ==================== NATIVE AUDIO SINK ====================
+  // Not supported on web - audio goes through Dart
+
+  @override
+  void setNativeAudioSink(int callbackAddress, int userDataAddress) {
+    // No-op on web - native sink not supported
+  }
+
+  @override
+  bool isNativeAudioSinkActive() => false;
+
+  @override
+  void disableNativeAudioSink() {
+    // No-op on web
+  }
+
+  @override
+  void injectPreroll(int frameCount) {
+    // No-op on web - preroll handled differently
+  }
+
+  // ==================== NATIVE SCHEDULER ====================
+  // Not supported on web - scheduling uses JavaScript timers
+
+  @override
+  void schedulerReset() {
+    // No-op on web - use Dart-based scheduling
+  }
+
+  @override
+  void schedulerSetBaseLoop(int loopFrames, int loopStartFrame) {
+    // No-op on web
+  }
+
+  @override
+  void schedulerClearBaseLoop() {
+    // No-op on web
+  }
+
+  @override
+  int schedulerScheduleStart(String path) {
+    // Not supported on web - return 0 (failed)
+    return 0;
+  }
+
+  @override
+  int schedulerScheduleStop(int startFrame) {
+    // Not supported on web - return 0 (failed)
+    return 0;
+  }
+
+  @override
+  bool schedulerCancelEvent(int eventId) {
+    return false;
+  }
+
+  @override
+  void schedulerCancelAll() {
+    // No-op on web
+  }
+
+  @override
+  SchedulerNotification? schedulerPollNotification() {
+    return null;
+  }
+
+  @override
+  bool schedulerHasNotifications() {
+    return false;
+  }
+
+  @override
+  int schedulerGetGlobalFrame() {
+    return 0;
+  }
+
+  @override
+  int schedulerGetBaseLoopFrames() {
+    return 0;
+  }
+
+  @override
+  int schedulerGetNextLoopBoundary() {
+    return 0;
+  }
+
+  @override
+  void schedulerSetLatencyCompensation(int frames) {
+    // No-op on web
+  }
+
+  @override
+  int schedulerGetLatencyCompensation() {
+    return 0;
+  }
+
+  // ==================== NATIVE RING BUFFER ====================
+  // Stubs for web - native ring buffer not supported
+
+  @override
+  void createRingBuffer(int capacitySeconds, int sampleRate, int channels) {
+    // No-op on web
+  }
+
+  @override
+  void destroyRingBuffer() {
+    // No-op on web
+  }
+
+  @override
+  Float32List readPreRoll(int frameCount, int rewindFrames) {
+    // Return empty buffer on web
+    return Float32List(0);
+  }
+
+  @override
+  double getAudioLevelDb() {
+    return -100.0; // Silence
+  }
+
+  @override
+  int getRingBufferFramesWritten() {
+    return 0;
+  }
+
+  @override
+  int getRingBufferAvailable() {
+    return 0;
+  }
+
+  @override
+  void resetRingBuffer() {
+    // No-op on web
   }
 }

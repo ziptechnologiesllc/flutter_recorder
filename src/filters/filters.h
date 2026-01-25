@@ -5,6 +5,8 @@
 #include "generic_filter.h"
 #include "aec/neural_post_filter.h"
 
+#include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -94,12 +96,24 @@ public:
   std::vector<std::unique_ptr<FilterObject>> filters;
   mutable std::mutex mFiltersMutex;  // Protects 'filters' vector for thread-safety
 
+  // Lock contention tracking for debug overlay
+  std::atomic<uint64_t> mFilterMissCount{0};    // Times we skipped due to lock
+  std::atomic<uint64_t> mFilterProcessCount{0}; // Times we successfully processed
+
   // Thread-safe method to process all filters (for use in audio callback)
   void processAllFilters(void* pInput, ma_uint32 frameCount,
                          unsigned int channels, ma_format format);
 
   // Thread-safe method to get filter count (for use in audio callback)
   size_t getFilterCount() const;
+
+  // Debug stats for overlay
+  uint64_t getFilterMissCount() const { return mFilterMissCount.load(std::memory_order_relaxed); }
+  uint64_t getFilterProcessCount() const { return mFilterProcessCount.load(std::memory_order_relaxed); }
+  void resetFilterStats() {
+    mFilterMissCount.store(0, std::memory_order_relaxed);
+    mFilterProcessCount.store(0, std::memory_order_relaxed);
+  }
 };
 
 #endif // PLAYER_H

@@ -39,12 +39,21 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <stdint.h>
 #define FFI_PLUGIN_EXPORT __attribute__((visibility("default"))) __attribute__((used))
 #endif
 
 typedef void (*dartSilenceChangedCallback_t)(bool *, float *);
 
 typedef void (*dartStreamDataCallback_t)(const unsigned char * data, const int dataLength);
+
+// Callback when recording stops (auto-stop at loop boundary or manual)
+// Parameters: recordedFrames (total frames recorded), wavPath (null-terminated string)
+typedef void (*dartRecordingStoppedCallback_t)(int64_t recordedFrames, const char* wavPath);
+
+// Callback when recording starts (native scheduler fires StartRecording event)
+// Parameters: startFrame (global frame when recording started), wavPath (null-terminated string)
+typedef void (*dartRecordingStartedCallback_t)(int64_t startFrame, const char* wavPath);
 
 // To be used by `NativeCallable` since it will be called inside the audio thread,
 // these functions must return void.
@@ -56,5 +65,11 @@ extern void (*nativeSilenceChangedCallback)(bool *, float *);
 extern void (*dartStreamDataCallback)(const unsigned char * data, const int dataLength);
 
 extern void (*nativeStreamDataCallback)(const unsigned char * data, const int dataLength);
+
+// Recording stopped callback - called from audio thread when recording auto-stops
+extern void (*dartRecordingStoppedCallback)(int64_t recordedFrames, const char* wavPath);
+
+// Recording started callback - called from audio thread when recording starts
+extern void (*dartRecordingStartedCallback)(int64_t startFrame, const char* wavPath);
 
 #endif // COMMON_H

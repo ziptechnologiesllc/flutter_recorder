@@ -71,6 +71,9 @@ enum CaptureErrors {
 
 /// The channels to be used while initializing the player.
 enum RecorderChannels {
+  /// Let the system choose optimal channel count (recommended for Android low-latency).
+  auto(0),
+
   /// One channel.
   mono(1),
 
@@ -163,6 +166,46 @@ class AecStats {
         'filterLen: $filterLength, '
         'muMax: ${muMax.toStringAsFixed(2)}, '
         'muEff: ${muEffective.toStringAsFixed(3)})';
+  }
+}
+
+/// Event fired when native recording auto-stops at loop boundary.
+class RecordingStoppedEvent {
+  /// Constructs a new [RecordingStoppedEvent].
+  const RecordingStoppedEvent({
+    required this.recordedFrames,
+    required this.wavPath,
+  });
+
+  /// Total frames recorded.
+  final int recordedFrames;
+
+  /// Path to the WAV file.
+  final String wavPath;
+
+  @override
+  String toString() {
+    return 'RecordingStoppedEvent(frames: $recordedFrames, path: $wavPath)';
+  }
+}
+
+/// Event fired when native recording starts (native scheduler fires StartRecording).
+class RecordingStartedEvent {
+  /// Constructs a new [RecordingStartedEvent].
+  const RecordingStartedEvent({
+    required this.startFrame,
+    required this.wavPath,
+  });
+
+  /// Global frame when recording started.
+  final int startFrame;
+
+  /// Path to the WAV file being recorded.
+  final String wavPath;
+
+  @override
+  String toString() {
+    return 'RecordingStartedEvent(startFrame: $startFrame, path: $wavPath)';
   }
 }
 

@@ -105,8 +105,17 @@ CaptureErrors Filters::removeFilter(RecorderFilterType filterType) {
 
 void Filters::processAllFilters(void* pInput, ma_uint32 frameCount,
                                 unsigned int channels, ma_format format) {
-  std::lock_guard<std::mutex> lock(mFiltersMutex);  // Thread-safe access
+  // LOCK-FREE for real-time audio: try to acquire lock, skip if busy
+  // This prevents priority inversion where audio thread blocks on UI thread
+  std::unique_lock<std::mutex> lock(mFiltersMutex, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    // Another thread is modifying filters - skip processing this buffer
+    // This is better than blocking and causing audio glitches
+    mFilterMissCount.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
 
+  mFilterProcessCount.fetch_add(1, std::memory_order_relaxed);
   for (auto &filter : filters) {
     filter->filter->process(pInput, frameCount, channels, format);
   }

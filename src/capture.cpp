@@ -1,7 +1,9 @@
 #include "capture.h"
 #include "circular_buffer.h"
+#include "native_ring_buffer.h"
 #include "soloud_slave_bridge.h"
 #include "filters/aec/reference_buffer.h"
+#include "native_scheduler.h"
 
 #include "fft/soloud_fft.h"
 #include <atomic>
@@ -20,6 +22,7 @@ extern void aecLog(const char *fmt, ...);
 #ifdef _IS_ANDROID_
 #include <android/log.h>
 #include <jni.h>
+#include <dlfcn.h>  // For dlsym to dynamically load AAudio buffer APIs
 
 #define LOG_TAG "FlutterRecorder"
 #endif
@@ -30,9 +33,25 @@ extern void aecLog(const char *fmt, ...);
 #define MOVING_AVERAGE_SIZE 4                // Moving average window size
 #define VISUALIZATION_BUFFER_SIZE                                              \
   8192 // Larger buffer for waveform visualization
-float capturedBuffer[VISUALIZATION_BUFFER_SIZE *
-                     2];              // Captured audio buffer for visualization
-std::mutex capturedBufferMutex;       // Mutex for protecting capturedBuffer
+
+// =============================================================================
+// DEBUG LOGGING CONTROL
+// WARNING: Enabling callback debug logging causes significant latency (600ms+)
+// on mobile devices. Only enable for specific debugging sessions.
+// =============================================================================
+#define DEBUG_CALLBACK_CHANNELS 0    // Log channel count on first N callbacks
+#define DEBUG_CALLBACK_SLAVE 0       // Log slave mode mixing
+#define DEBUG_CALLBACK_FILTERS 0     // Log filter processing
+#define DEBUG_CALLBACK_CALIBRATION 0 // Log calibration capture (less impact)
+#define DEBUG_CALLBACK_AEC_REF 0     // Log AEC reference buffer writes
+
+// Double-buffer for lock-free visualization data
+// Audio thread writes to one buffer while UI thread reads from the other
+static float capturedBufferA[VISUALIZATION_BUFFER_SIZE * 2];
+static float capturedBufferB[VISUALIZATION_BUFFER_SIZE * 2];
+static std::atomic<int> capturedBufferWriteIndex{0};  // 0 = writing to A, 1 = writing to B
+// Legacy pointer for compatibility (points to readable buffer)
+float *capturedBuffer = capturedBufferA;
 std::atomic<bool> is_silent{true};    // Initial state
 bool delayed_silence_started = false; // Whether the silence is delayed
 std::atomic<float> energy_db{-100.0f}; // Current energy
@@ -81,17 +100,19 @@ float energy_to_db(float energy) {
   return 10.0f * log10f(energy + 1e-10f); // Add a small value to avoid log(0)
 }
 
-void calculateEnergy(float *captured, ma_uint32 frameCount) {
+void calculateEnergy(float *captured, ma_uint32 frameCount, int channels) {
   static float moving_average[MOVING_AVERAGE_SIZE] = {
       0};                       // Moving average window
   static int average_index = 0; // Circular buffer index
   float sum = 0.0f;
 
   // Calculate the average energy of the current buffer
-  for (int i = 0; i < frameCount; i++) {
+  // Must iterate over all samples: frameCount * channels for stereo
+  size_t sampleCount = (size_t)frameCount * channels;
+  for (size_t i = 0; i < sampleCount; i++) {
     sum += captured[i] * captured[i];
   }
-  float average_energy = sum / frameCount;
+  float average_energy = sum / sampleCount;
 
   // Update the moving average window
   moving_average[average_index] = average_energy;
@@ -154,9 +175,10 @@ void detectSilence(Capture *userData) {
           // %u  frame got: %u\n",
           //    circularBuffer.get()->size(), frameCount, data.size());
           // The framCount in wav.write is one for all the channels.
-          userData->wav.write(data.data(),
-                              data.size() /
-                                  userData->deviceConfig.capture.channels);
+          // Use actual device channels to avoid division by zero (deviceConfig may be 0 in auto mode)
+          int actualChannels = userData->getCaptureChannels();
+          if (actualChannels < 1) actualChannels = 1;
+          userData->wav.write(data.data(), data.size() / actualChannels);
         }
         if (nativeSilenceChangedCallback != nullptr) {
           float energy_value = energy_db.load();
@@ -199,6 +221,25 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     
     if (pDevice->capture.format == ma_format_s16) {
       ma_pcm_s16_to_f32(userData->mConversionBuffer.data(), (const ma_int16 *)pInput, samplesCount, ma_dither_mode_none);
+#ifdef _IS_ANDROID_
+      static int captureConvDebugCount = 0;
+      if (++captureConvDebugCount <= 10) {
+        // Check max value in converted buffer
+        float maxVal = 0.0f;
+        for (size_t i = 0; i < samplesCount && i < 100; i++) {
+          if (fabsf(userData->mConversionBuffer[i]) > maxVal) maxVal = fabsf(userData->mConversionBuffer[i]);
+        }
+        // Check max value in original s16 buffer
+        int16_t maxS16 = 0;
+        const ma_int16* s16Input = (const ma_int16*)pInput;
+        for (size_t i = 0; i < samplesCount && i < 100; i++) {
+          if (abs(s16Input[i]) > maxS16) maxS16 = abs(s16Input[i]);
+        }
+        __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+            "[Capture Conv #%d] samples=%zu, maxS16=%d, maxF32=%.6f",
+            captureConvDebugCount, samplesCount, maxS16, maxVal);
+      }
+#endif
     } else if (pDevice->capture.format == ma_format_s24) {
       ma_pcm_s24_to_f32(userData->mConversionBuffer.data(), pInput, samplesCount, ma_dither_mode_none);
     } else if (pDevice->capture.format == ma_format_s32) {
@@ -215,39 +256,23 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     captured = (float *)pInput;
   }
 
-  // Debug log first few callbacks to help diagnose channel issues
+#if DEBUG_CALLBACK_CHANNELS
   static int channelDebugCount = 0;
-  if (channelDebugCount < 5) {
+  if (++channelDebugCount <= 5) {
 #ifdef _IS_ANDROID_
     __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
-                        "[Capture CB] ACTUAL channels: capture=%d, playback=%d (configured: capture=%d, playback=%d)",
-                        captureChannels, playbackChannels,
-                        userData->deviceConfig.capture.channels,
-                        userData->deviceConfig.playback.channels);
-#else
-    printf("[Capture CB] ACTUAL channels: capture=%d, playback=%d (configured: capture=%d, playback=%d)\n",
-           captureChannels, playbackChannels,
-           userData->deviceConfig.capture.channels,
-           userData->deviceConfig.playback.channels);
-    fflush(stdout);
+                        "[Capture CB] channels: capture=%d, playback=%d, frames=%u",
+                        captureChannels, playbackChannels, frameCount);
 #endif
-    channelDebugCount++;
   }
+#endif
 
-  // Debug: Track callback timing to detect sample rate issues
-  static size_t totalCallbackFrames = 0;
-  static auto startTime = std::chrono::steady_clock::now();
-  static int debugCallbackCount = 0;
-  totalCallbackFrames += frameCount;
-  debugCallbackCount++;
-
-  // Log every 5 seconds worth of frames (at expected 48kHz)
-  if (debugCallbackCount % 1875 == 0) { // ~5s at 128 frames/callback @ 48kHz
-    auto now = std::chrono::steady_clock::now();
-    double elapsedSec = std::chrono::duration<double>(now - startTime).count();
-    double actualRate = totalCallbackFrames / elapsedSec;
-    aecLog("[Capture CB TIMING] frames=%zu elapsed=%.2fs rate=%.0fHz (expected 48000)\n",
-           totalCallbackFrames, elapsedSec, actualRate);
+  // =========================================================================
+  // NATIVE RING BUFFER: Continuous capture for latency compensation (pre-roll)
+  // Write immediately after format conversion, before any processing
+  // =========================================================================
+  if (g_nativeRingBuffer != nullptr && captured != nullptr) {
+    g_nativeRingBuffer->write(captured, frameCount);
   }
 
   // =========================================================================
@@ -258,39 +283,29 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   // between capture and playback, fixing AEC drift issues on Linux.
   if (soloud_isSlaveMode() && g_soloudSlaveMixCallback != nullptr &&
       pOutput != nullptr) {
-    // Get SoLoud's mixed output directly into pOutput
-    g_soloudSlaveMixCallback((float *)pOutput, frameCount, playbackChannels);
+    // Ensure playback buffer is large enough for f32 processing
+    size_t playbackSamples = (size_t)frameCount * playbackChannels;
+    if (userData->mPlaybackBuffer.size() < playbackSamples) {
+      userData->mPlaybackBuffer.resize(playbackSamples);
+    }
+    float *playbackFloat = userData->mPlaybackBuffer.data();
 
-    // Debug: Check if SoLoud produced any audio
+    // Zero the buffer first in case SoLoud doesn't write all samples
+    memset(playbackFloat, 0, playbackSamples * sizeof(float));
+
+    // Get SoLoud's mixed output into our f32 buffer (not pOutput directly)
+    // This allows all processing (AEC, monitoring) to work in f32
+    g_soloudSlaveMixCallback(playbackFloat, frameCount, playbackChannels);
+
+#if DEBUG_CALLBACK_SLAVE
     static int soloudMixDebugCount = 0;
-    if (soloudMixDebugCount++ < 10) {
-      float maxSample = 0.0f;
-      const float *out = (const float *)pOutput;
-      for (ma_uint32 i = 0; i < frameCount * playbackChannels; i++) {
-        if (fabsf(out[i]) > maxSample) maxSample = fabsf(out[i]);
-      }
+    if (++soloudMixDebugCount <= 5) {
 #ifdef _IS_ANDROID_
       __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
-                          "[Capture Slave Mix] frames=%u ch=%d maxSample=%.4f",
-                          frameCount, playbackChannels, maxSample);
-#else
-      printf("[Capture Slave Mix] frames=%u ch=%d maxSample=%.4f\n",
-             frameCount, playbackChannels, maxSample);
-      fflush(stdout);
+                          "[Capture Slave] frames=%u ch=%d", frameCount, playbackChannels);
 #endif
     }
-
-    // Debug: Check captured input level
-    static int captureDebugCount = 0;
-    if (captureDebugCount++ < 10 && captured != nullptr) {
-      float maxInput = 0.0f;
-      for (ma_uint32 i = 0; i < frameCount * captureChannels; i++) {
-        if (fabsf(captured[i]) > maxInput) maxInput = fabsf(captured[i]);
-      }
-      printf("[Capture Input] frames=%u ch=%d maxInput=%.4f\n",
-             frameCount, captureChannels, maxInput);
-      fflush(stdout);
-    }
+#endif
 
     // Mark slave audio as ready after first successful callback
     // This signals that the audio pipeline is flowing and calibration can start
@@ -300,17 +315,10 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     // This is the whole point of slave mode: one callback, one clock.
     // Handle channel conversion: pOutput has actual device channels, but AEC buffer
     // may have different channel count (usually mono for AEC purposes).
-    static int aecRefBufDebugCount = 0;
-    if (aecRefBufDebugCount++ < 5) {
-#ifdef _IS_ANDROID_
-      __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
-                          "[Capture Slave] g_aecReferenceBuffer=%p, playbackCh=%d",
-                          (void*)g_aecReferenceBuffer, playbackChannels);
-#endif
-    }
-    if (g_aecReferenceBuffer != nullptr) {
+    // Skip entirely if AEC is disabled to save CPU
+    if (g_aecReferenceBuffer != nullptr && g_aecReferenceBuffer->isEnabled()) {
       unsigned int bufferCh = g_aecReferenceBuffer->channels();
-      float *outputFloat = (float *)pOutput; // Slave mixer output is always float
+      float *outputFloat = playbackFloat; // Use our f32 buffer for AEC
 
       if ((unsigned int)playbackChannels == bufferCh) {
         // Channels match - direct write
@@ -336,18 +344,12 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
         g_aecReferenceBuffer->write(outputFloat, frameCount);
       }
 
-      // Debug logging (sparse to avoid spam)
-      static int slaveLogCount = 0;
-      if (slaveLogCount++ < 10 || slaveLogCount % 1000 == 0) {
-        aecLog("[Capture Slave] Wrote %u frames to AEC ref buffer (playback=%d, bufferCh=%u), total=%zu\n",
-               frameCount, playbackChannels, bufferCh, g_aecReferenceBuffer->getFramesWritten());
-      }
     }
 
     // If monitoring is enabled, ADD the captured input to the SoLoud output
     // (This allows hearing yourself while SoLoud plays)
     if (userData->monitoringEnabled && captured != nullptr && pOutput != nullptr) {
-      float *outputFloat = (float *)pOutput;
+      float *outputFloat = playbackFloat; // Use our f32 buffer for monitoring mix
       float *inputFloat = captured;
 
       // Simple mix: add monitoring signal on top of SoLoud output
@@ -372,6 +374,31 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
                             monitorGain;
         }
       }
+    }
+
+    // Final step: Convert f32 playback buffer to device format and copy to pOutput
+    // This happens AFTER all processing (AEC, monitoring) is done in f32
+#ifdef _IS_ANDROID_
+    static int convDebugCount = 0;
+    if (++convDebugCount <= 10) {
+      float maxVal = 0.0f;
+      for (size_t i = 0; i < playbackSamples; i++) {
+        if (fabsf(playbackFloat[i]) > maxVal) maxVal = fabsf(playbackFloat[i]);
+      }
+      __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+          "[Playback Conv #%d] samples=%zu, maxF32=%.6f, format=%d",
+          convDebugCount, playbackSamples, maxVal, pDevice->playback.format);
+    }
+#endif
+    if (pDevice->playback.format == ma_format_s16) {
+      // Convert f32 -> s16
+      ma_pcm_f32_to_s16(pOutput, playbackFloat, playbackSamples, ma_dither_mode_none);
+    } else if (pDevice->playback.format == ma_format_s32) {
+      // Convert f32 -> s32 (some HALs use 32-bit integer)
+      ma_pcm_f32_to_s32(pOutput, playbackFloat, playbackSamples, ma_dither_mode_none);
+    } else {
+      // f32 output - direct copy
+      memcpy(pOutput, playbackFloat, playbackSamples * sizeof(float));
     }
   }
   // =========================================================================
@@ -456,10 +483,10 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   // save CPU)
   // Note: mFilters may be null if callback runs before init() completes
   if (userData->mFilters != nullptr) {
-    static int filterDebugCounter = 0;
-    filterDebugCounter++;
     size_t filterCount = userData->mFilters->getFilterCount();  // Thread-safe access
-    if (filterDebugCounter <= 5 || filterDebugCounter % 500 == 0) {
+#if DEBUG_CALLBACK_FILTERS
+    static int filterDebugCounter = 0;
+    if (++filterDebugCounter <= 5 || filterDebugCounter % 500 == 0) {
 #ifdef _IS_ANDROID_
       __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
           "[Capture CB #%d] filters=%zu calibActive=%d",
@@ -468,6 +495,7 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
       aecLog("[Capture CB #%d] filters=%zu calibActive=%d\n",
              filterDebugCounter, filterCount, userData->mCalibrationActive);
     }
+#endif
     if (filterCount > 0 && !userData->mCalibrationActive) {
       // Set the capture frame count for AEC position-based sync BEFORE processing
       // This is the frame count at the START of this block (before we increment)
@@ -480,7 +508,9 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
                                             captureChannels,
                                             userData->deviceConfig.capture.format);
     }
-  } else {
+  }
+#if DEBUG_CALLBACK_FILTERS
+  else {
 #ifdef _IS_ANDROID_
     static int nullFilterDebugCounter = 0;
     if (++nullFilterDebugCounter <= 5) {
@@ -489,18 +519,30 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     }
 #endif
   }
+#endif
 
   // Do something with the captured audio data...
-  // Protect the write to capturedBuffer
+  // LOCK-FREE: Write to the current write buffer, then swap atomically
   {
-    std::lock_guard<std::mutex> lock(capturedBufferMutex);
+    // Get the buffer we should write to
+    float *writeBuffer = (capturedBufferWriteIndex.load(std::memory_order_relaxed) == 0)
+                         ? capturedBufferA : capturedBufferB;
+
     // SAFE COPY: Ensure we don't overflow the fixed-size visualization buffer
     size_t maxFloats = VISUALIZATION_BUFFER_SIZE * 2;
     size_t floatsToCopy = (size_t)frameCount * captureChannels;
     if (floatsToCopy > maxFloats) {
         floatsToCopy = maxFloats;
     }
-    memcpy(capturedBuffer, captured, sizeof(float) * floatsToCopy);
+    if (captured != nullptr) {
+      memcpy(writeBuffer, captured, sizeof(float) * floatsToCopy);
+
+      // Atomically swap: make the buffer we just wrote to the "read" buffer
+      // and switch to writing to the other buffer next time
+      int oldIndex = capturedBufferWriteIndex.load(std::memory_order_relaxed);
+      capturedBuffer = writeBuffer;  // Update legacy pointer for readers
+      capturedBufferWriteIndex.store(1 - oldIndex, std::memory_order_release);
+    }
   }
 
   // Calibration capture: accumulate samples if calibration is active
@@ -515,8 +557,9 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     if (samplesToCapture > 0) {
       // Copy to calibration buffer (Mono Downmix)
       // Use captureChannels (actual device value) for correct buffer interpretation
+#if DEBUG_CALLBACK_CALIBRATION
       float debugBatchSum = 0.0f;
-
+#endif
       for (size_t i = 0; i < samplesToCapture; ++i) {
         float sample;
         if (captureChannels >= 2) {
@@ -525,27 +568,29 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
         } else {
           sample = captured[i * captureChannels]; // Already mono
         }
-
-        userData->mCalibrationBuffer[userData->mCalibrationWritePos + i] =
-            sample;
+        userData->mCalibrationBuffer[userData->mCalibrationWritePos + i] = sample;
+#if DEBUG_CALLBACK_CALIBRATION
         debugBatchSum += fabsf(sample);
+#endif
       }
 
-      // Periodic debug logging (once per ~100 calls to avoid spam, assuming
-      // frameCount ~512)
+#if DEBUG_CALLBACK_CALIBRATION
       static int logCounter = 0;
       if (++logCounter % 100 == 0) {
         printf("[Calibration Capture] Added %zu samples. Avg energy in batch: "
                "%.6f\n",
                samplesToCapture, debugBatchSum / (samplesToCapture + 0.0001f));
       }
+#endif
 
       userData->mCalibrationWritePos += samplesToCapture;
     }
   }
 
-  if (userData->deviceConfig.capture.format == ma_format_f32)
-    calculateEnergy(captured, frameCount);
+  // Calculate energy for FFT visualization
+  // NOTE: captured is ALWAYS f32 after conversion (lines 203-230), regardless of device format
+  if (captured != nullptr)
+    calculateEnergy(captured, frameCount, captureChannels);
 
   // Stream the audio data?
   if (userData->isStreamingData && nativeStreamDataCallback != nullptr) {
@@ -582,27 +627,58 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     }
   }
 
-  // Detect silence only when using float32
-  if (userData->isDetectingSilence &&
-      userData->deviceConfig.capture.format == ma_format_f32) {
+  // Detect silence - captured is always f32 after conversion
+  if (userData->isDetectingSilence && captured != nullptr) {
     detectSilence(userData);
 
     // Copy current buffer to circularBuffer
     if (delayed_silence_started && userData->isRecording &&
         userData->secondsOfAudioToWriteBefore > 0) {
-      std::vector<float> values(captured, captured + frameCount);
+      std::vector<float> values(captured, captured + frameCount * captureChannels);
       circularBuffer.get()->push(values);
     }
 
     if (!delayed_silence_started && userData->isRecording &&
         !userData->isRecordingPaused) {
+#ifdef _IS_ANDROID_
+      static int wavWriteDebugCount = 0;
+      if (++wavWriteDebugCount <= 5) {
+        float maxVal = 0.0f;
+        for (ma_uint32 i = 0; i < frameCount * captureChannels && i < 100; i++) {
+          if (fabsf(captured[i]) > maxVal) maxVal = fabsf(captured[i]);
+        }
+        __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+            "[WAV WRITE #%d] frames=%u, channels=%d, samples=%u, maxF32=%.6f",
+            wavWriteDebugCount, frameCount, captureChannels, frameCount * captureChannels, maxVal);
+      }
+#endif
       userData->wav.write(captured, frameCount);
     }
   } else {
     if (userData->isRecording && !userData->isRecordingPaused) {
+#ifdef _IS_ANDROID_
+      static int wavWriteDebugCount2 = 0;
+      if (++wavWriteDebugCount2 <= 5) {
+        float maxVal = 0.0f;
+        for (ma_uint32 i = 0; i < frameCount * captureChannels && i < 100; i++) {
+          if (fabsf(captured[i]) > maxVal) maxVal = fabsf(captured[i]);
+        }
+        __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+            "[WAV WRITE2 #%d] frames=%u, channels=%d, samples=%u, maxF32=%.6f",
+            wavWriteDebugCount2, frameCount, captureChannels, frameCount * captureChannels, maxVal);
+      }
+#endif
       userData->wav.write(captured, frameCount);
     }
   }
+
+  // =========================================================================
+  // NATIVE SCHEDULER: Process scheduled events at buffer boundaries
+  // =========================================================================
+  // Calculate buffer start frame (before incrementing the counter)
+  int64_t bufferStartFrame = static_cast<int64_t>(
+      userData->mTotalFramesCaptured.load(std::memory_order_acquire));
+  NativeScheduler::instance().processEvents(bufferStartFrame, frameCount, userData);
 
   // Increment total frame counter for AEC synchronization
   // This must be done AFTER all processing to mark this block as complete
@@ -618,8 +694,8 @@ Capture::Capture()
       silenceDuration(2.0f), secondsOfAudioToWriteBefore(0.0f),
       isRecording(false), isRecordingPaused(false), isStreamingData(false),
       monitoringEnabled(false), monitoringMode(0), mInited(false),
-      mContextInited(false), mCalibrationWritePos(0),
-      mCalibrationActive(false) {
+      mCalibrationWritePos(0), mCalibrationActive(false),
+      mContextInited(false) {
   memset(waveData, 0, sizeof(float) * 256);
 }
 
@@ -747,12 +823,22 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   //   This prevents two playback devices from competing (which causes grainy audio)
   // - captureOnly=false: Use duplex mode for slave mode where recorder drives SoLoud output
   if (captureOnly) {
+#ifdef _IS_ANDROID_
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+        "[Capture::init] Using CAPTURE-ONLY mode (SoLoud has own playback)");
+#else
     printf("[Capture::init] Using CAPTURE-ONLY mode (SoLoud has own playback)\n");
     fflush(stdout);
+#endif
     deviceConfig = ma_device_config_init(ma_device_type_capture);
   } else {
+#ifdef _IS_ANDROID_
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+        "[Capture::init] Using DUPLEX mode (slave mode for AEC)");
+#else
     printf("[Capture::init] Using DUPLEX mode (slave mode for AEC)\n");
     fflush(stdout);
+#endif
     deviceConfig = ma_device_config_init(ma_device_type_duplex);
   }
 
@@ -761,34 +847,30 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   deviceConfig.performanceProfile = ma_performance_profile_low_latency;
 
 #ifdef _IS_ANDROID_
-  // Android AAudio-specific configuration following AAudio best practices:
-  // https://developer.android.com/ndk/guides/audio/aaudio/aaudio
-  //
-  // KEY INSIGHT: "It is better to let AAudio select these because some
-  // combinations of settings are not supported on some devices."
-  //
-  // For LOW LATENCY, we:
-  // 1. Request EXCLUSIVE sharing mode (lowest latency, but may fail)
-  // 2. Do NOT specify periodSizeInFrames (let AAudio choose optimal)
-  // 3. Do NOT specify format/channels/sampleRate if pcmFormat=unknown (let AAudio choose)
-  // 4. Query actual values after stream opens
+  // Android AAudio FAST PATH configuration
+  // HAL fast capture uses 240-frame bursts (5ms @ 48kHz) - request 2 bursts (480 frames = 10ms)
+  // This matches the hardware burst size while keeping latency minimal
+  deviceConfig.periodSizeInFrames = 480;  // 2 x 240-frame burst = 10ms @ 48kHz
 
-  deviceConfig.aaudio.usage = ma_aaudio_usage_game;  // Routes through low-latency audio path
+  // AAudio-specific settings for FAST PATH (Mode 12):
+  // VOICE_RECOGNITION preset is designed for low-latency speech recognition
+  // - No AEC/NS processing (unlike VOICE_COMMUNICATION)
+  // - No effects (unlike DEFAULT which may apply system effects)
+  // - Should enable MMAP fast path
+  deviceConfig.aaudio.inputPreset = ma_aaudio_input_preset_voice_recognition;  // Low-latency speech path
+  deviceConfig.aaudio.usage = ma_aaudio_usage_game;                            // GAME bypasses Dolby/effects!
   deviceConfig.aaudio.contentType = ma_aaudio_content_type_music;
-  deviceConfig.aaudio.inputPreset = ma_aaudio_input_preset_voice_performance;  // Real-time optimized
 
-  // CRITICAL: Request EXCLUSIVE sharing mode for lowest latency
-  // From AAudio docs: "Exclusive streams provide the lowest possible latency"
-  // miniaudio maps ma_share_mode_exclusive to AAUDIO_SHARING_MODE_EXCLUSIVE
-  deviceConfig.aaudio.noAutoStartAfterReroute = MA_TRUE;
-
-  // Allow variable callback size for low-latency (AAudio may give us smaller buffers)
-  deviceConfig.noFixedSizedCallback = MA_TRUE;
+  // Request EXCLUSIVE mode - required for true MMAP fast path
+  deviceConfig.capture.shareMode = ma_share_mode_exclusive;
+  deviceConfig.playback.shareMode = ma_share_mode_exclusive;
 
   __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
-      "[Capture::init] AAudio config: usage=GAME, content=MUSIC, input=VOICE_PERFORMANCE, noFixedCallback=true");
+      "[Capture::init] AAudio: inputPreset=VOICE_RECOGNITION, usage=GAME, sharingMode=EXCLUSIVE (for Mode 12)");
+  __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+      "[Capture::init] AAudio: periodSize=480 (2 bursts, 10ms @ 48kHz)");
 #else
-  // Non-Android platforms: set period size for consistent behavior
+  // Non-Android: Set consistent period size for capture and playback
   deviceConfig.periodSizeInFrames = BUFFER_SIZE;
 #endif
 
@@ -844,27 +926,40 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   }
 
 #ifdef _IS_ANDROID_
-  // Android with format=unknown: Let AAudio choose EVERYTHING optimal
-  // This follows AAudio best practices for achieving low-latency
+  // Android with format=unknown: Configure for AAudio Fast Capture (low-latency)
+  // Key requirements for MediaTek Helio G88 Fast Capture path:
+  // - PCM_16_BIT format (NOT float32 - HAL only supports s16 on fast path)
+  // - 48kHz sample rate (exact match required)
+  // - VOICE_RECOGNITION input preset (enables AUDIO_INPUT_FLAG_FAST)
+  // - Stereo capture (works per dumpsys evidence)
   if (pcmFormat == PCMFormat::pcm_unknown) {
-    deviceConfig.capture.format = ma_format_unknown;  // Let system choose
-    deviceConfig.capture.channels = 0;  // Let system choose (0 = default)
-    deviceConfig.sampleRate = 0;  // Let system choose native rate
-    deviceConfig.playback.format = ma_format_unknown;
-    // IMPORTANT: For duplex mode, we MUST request playback channels explicitly
-    // Setting to 0 causes AAudio to skip playback entirely, breaking slave mode
-    deviceConfig.playback.channels = captureOnly ? 0 : 2;
+    // Force PCM_16_BIT (s16) for CAPTURE only - required for Fast Capture path on MediaTek
+    // Evidence from dumpsys of working app (com.zuidsoft.looper):
+    // - Capture: HAL format 0x1 (16-bit), Processing format 0x1 (16-bit), HAL frame count 240
+    // - Playback: HAL format 0x3 (32-bit), Processing format 0x5 (float) - DIFFERENT from capture!
+    // The capture and playback formats do NOT need to match.
+    // DUPLEX MODE: Both capture and playback must use same format for miniaudio
+    // The Oboe example uses separate streams (different formats), but we use duplex
+    // So we force s16 for both - the callback converts s16↔f32 for internal processing
+    deviceConfig.capture.format = ma_format_s16;       // PCM_16_BIT - required for Fast Capture path
+    deviceConfig.capture.channels = 2;                 // STEREO capture
+    deviceConfig.sampleRate = 48000;                   // EXPLICIT 48kHz
+    deviceConfig.playback.format = ma_format_s16;      // PCM_16_BIT - must match capture for duplex!
+    deviceConfig.playback.channels = 2;                // Stereo playback
     __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
-        "[Capture::init] AAudio FULL AUTO mode: format=unknown, capture=0, playback=%d, captureOnly=%d",
-        deviceConfig.playback.channels, captureOnly);
+        "[Capture::init] AAudio FAST MODE (DUPLEX): capture=S16, playback=S16, channels=STEREO, rate=48000, captureOnly=%d",
+        captureOnly);
   } else {
     // Specific format requested - use provided values
+    // Note: This may not achieve low-latency mode if values don't match device native config
     deviceConfig.capture.format = format;
     deviceConfig.capture.channels = channels;
     deviceConfig.sampleRate = sampleRate;
     deviceConfig.playback.format = format;
-    // Android: Force 2 channels for playback output for Fast Path compatibility
-    deviceConfig.playback.channels = 2;
+    deviceConfig.playback.channels = channels;  // Match capture for consistency
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+        "[Capture::init] AAudio explicit mode: format=%d, channels=%d, rate=%d",
+        format, channels, sampleRate);
   }
 #else
   // Non-Android: use provided values
@@ -910,13 +1005,18 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
 #endif
   }
 
-  // Pre-allocate conversion buffer if needed (use ACTUAL device period, not config)
+  // Pre-allocate conversion buffers if needed (use ACTUAL device period, not config)
+  ma_uint32 actualPeriod = device.capture.internalPeriodSizeInFrames;
+  if (actualPeriod == 0) actualPeriod = 512;  // Fallback if not reported
+
+  // Capture conversion buffer: s16/s24/s32 -> f32
   if (device.capture.format != ma_format_f32) {
-      // Use actual internal period size since we may not have set deviceConfig.periodSizeInFrames (Android auto mode)
-      ma_uint32 actualPeriod = device.capture.internalPeriodSizeInFrames;
-      if (actualPeriod == 0) actualPeriod = 512;  // Fallback if not reported
       mConversionBuffer.resize(actualPeriod * device.capture.channels);
   }
+
+  // Playback conversion buffer: f32 -> s16 (for low-latency fast path)
+  // Always allocate since slave mode needs f32 buffer for SoLoud output before conversion
+  mPlaybackBuffer.resize(actualPeriod * device.playback.channels);
 
   printf("[Capture::init] ACTUAL device params: sampleRate=%u, capture.channels=%u, playback.channels=%u, capture.format=%d, playback.format=%d\n",
          device.sampleRate, device.capture.channels, device.playback.channels, device.capture.format, device.playback.format);
@@ -925,6 +1025,108 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   fflush(stdout);
 
 #ifdef _IS_ANDROID_
+  // CRITICAL: Set buffer size to 2x burst for low-latency (per Oboe/AAudio best practices)
+  // Default AAudio buffer is much higher than optimal
+  // https://developer.android.com/games/sdk/oboe/low-latency-audio#double-buffering
+  // Note: We use miniaudio's dynamically loaded function pointers since these APIs require API 26+
+  typedef int32_t (*PFN_AAudioStream_getFramesPerBurst)(void* stream);
+  typedef int32_t (*PFN_AAudioStream_setBufferSizeInFrames)(void* stream, int32_t numFrames);
+  typedef int32_t (*PFN_AAudioStream_getBufferSizeInFrames)(void* stream);
+
+  // Use miniaudio's AAudio library handle for dlsym (not RTLD_DEFAULT which won't find dynamically loaded libs)
+  void* aaudioLib = context.aaudio.hAAudio;
+  auto getFramesPerBurst = (PFN_AAudioStream_getFramesPerBurst)context.aaudio.AAudioStream_getFramesPerBurst;
+  auto setBufferSizeInFrames = aaudioLib ? (PFN_AAudioStream_setBufferSizeInFrames)dlsym(aaudioLib, "AAudioStream_setBufferSizeInFrames") : nullptr;
+  auto getBufferSizeInFrames = aaudioLib ? (PFN_AAudioStream_getBufferSizeInFrames)dlsym(aaudioLib, "AAudioStream_getBufferSizeInFrames") : nullptr;
+
+  if (getFramesPerBurst && setBufferSizeInFrames && getBufferSizeInFrames) {
+    if (device.aaudio.pStreamCapture != nullptr) {
+      int32_t burstSize = getFramesPerBurst(device.aaudio.pStreamCapture);
+      int32_t optimalBufferSize = burstSize * 2;  // Double buffering
+      int32_t setResult = setBufferSizeInFrames(device.aaudio.pStreamCapture, optimalBufferSize);
+      int32_t actualBufferSize = getBufferSizeInFrames(device.aaudio.pStreamCapture);
+      __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+          "[LOW-LATENCY] Capture: burstSize=%d, requested=%d, actual=%d, result=%d",
+          burstSize, optimalBufferSize, actualBufferSize, setResult);
+    }
+    if (device.aaudio.pStreamPlayback != nullptr) {
+      int32_t burstSize = getFramesPerBurst(device.aaudio.pStreamPlayback);
+      int32_t optimalBufferSize = burstSize * 2;  // Double buffering
+      int32_t setResult = setBufferSizeInFrames(device.aaudio.pStreamPlayback, optimalBufferSize);
+      int32_t actualBufferSize = getBufferSizeInFrames(device.aaudio.pStreamPlayback);
+      __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+          "[LOW-LATENCY] Playback: burstSize=%d, requested=%d, actual=%d, result=%d",
+          burstSize, optimalBufferSize, actualBufferSize, setResult);
+    }
+  } else {
+    __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
+        "[LOW-LATENCY] AAudio buffer APIs not available (API < 26)");
+  }
+
+  // CRITICAL: Verify AAudio performance mode and sharing mode
+  // perfMode: 12 = LOW_LATENCY, 10 = NONE
+  // sharingMode: 0 = EXCLUSIVE, 1 = SHARED
+  typedef int32_t (*PFN_AAudioStream_getPerformanceMode)(void* stream);
+  typedef int32_t (*PFN_AAudioStream_getSharingMode)(void* stream);
+  typedef int32_t (*PFN_AAudioStream_getInputPreset)(void* stream);
+
+  auto getPerformanceMode = aaudioLib ? (PFN_AAudioStream_getPerformanceMode)dlsym(aaudioLib, "AAudioStream_getPerformanceMode") : nullptr;
+  auto getSharingMode = aaudioLib ? (PFN_AAudioStream_getSharingMode)dlsym(aaudioLib, "AAudioStream_getSharingMode") : nullptr;
+  auto getInputPreset = aaudioLib ? (PFN_AAudioStream_getInputPreset)dlsym(aaudioLib, "AAudioStream_getInputPreset") : nullptr;
+
+  if (getPerformanceMode) {
+    if (device.aaudio.pStreamCapture != nullptr) {
+      int32_t perfMode = getPerformanceMode(device.aaudio.pStreamCapture);
+      int32_t shareMode = getSharingMode ? getSharingMode(device.aaudio.pStreamCapture) : -1;
+      int32_t burstSize = getFramesPerBurst ? getFramesPerBurst(device.aaudio.pStreamCapture) : -1;
+      int32_t inputPreset = getInputPreset ? getInputPreset(device.aaudio.pStreamCapture) : -1;
+      int32_t bufSize = getBufferSizeInFrames ? getBufferSizeInFrames(device.aaudio.pStreamCapture) : -1;
+
+      __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+          "[LOW-LATENCY] Capture: perfMode=%d (12=LOW_LATENCY), sharingMode=%d (0=EXCL, 1=SHARED)", perfMode, shareMode);
+      __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+          "[LOW-LATENCY] Capture: framesPerBurst=%d, bufferSize=%d, inputPreset=%d (5=VOICE_RECOG, 6=UNPROCESSED)",
+          burstSize, bufSize, inputPreset);
+
+      if (perfMode != 12) {
+        __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
+            "[LOW-LATENCY] WARNING: Capture NOT in low-latency mode! perfMode=%d (expected 12)", perfMode);
+      }
+      if (shareMode != 0) {
+        __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
+            "[LOW-LATENCY] WARNING: Capture NOT in exclusive mode! sharingMode=%d (requested 0)", shareMode);
+      }
+    }
+    if (device.aaudio.pStreamPlayback != nullptr) {
+      int32_t perfMode = getPerformanceMode(device.aaudio.pStreamPlayback);
+      int32_t shareMode = getSharingMode ? getSharingMode(device.aaudio.pStreamPlayback) : -1;
+      int32_t burstSize = getFramesPerBurst ? getFramesPerBurst(device.aaudio.pStreamPlayback) : -1;
+      int32_t bufSize = getBufferSizeInFrames ? getBufferSizeInFrames(device.aaudio.pStreamPlayback) : -1;
+
+      __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+          "[LOW-LATENCY] Playback: perfMode=%d (12=LOW_LATENCY), sharingMode=%d (0=EXCL, 1=SHARED)", perfMode, shareMode);
+      __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+          "[LOW-LATENCY] Playback: framesPerBurst=%d, bufferSize=%d", burstSize, bufSize);
+
+      if (perfMode != 12) {
+        __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
+            "[LOW-LATENCY] WARNING: Playback NOT in low-latency mode! perfMode=%d (expected 12)", perfMode);
+      }
+    }
+  } else {
+    __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
+        "[LOW-LATENCY] AAudioStream_getPerformanceMode not available (API < 28)");
+  }
+
+  // Log ACTUAL vs REQUESTED configuration for debugging
+  __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+      "[LOW-LATENCY] ACTUAL config: capture.ch=%u playback.ch=%u rate=%u capture.fmt=%d playback.fmt=%d",
+      device.capture.channels, device.playback.channels, device.sampleRate,
+      device.capture.format, device.playback.format);
+  __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+      "[LOW-LATENCY] REQUESTED config: capture.ch=%u playback.ch=%u rate=%u (0=native)",
+      deviceConfig.capture.channels, deviceConfig.playback.channels, deviceConfig.sampleRate);
+
   // Log actual AAudio latency for debugging
   ma_uint32 capturePeriod = device.capture.internalPeriodSizeInFrames;
   ma_uint32 playbackPeriod = device.playback.internalPeriodSizeInFrames;
@@ -1040,9 +1242,12 @@ void Capture::setSilenceDuration(float silenceDuration) {
 void Capture::setSecondsOfAudioToWriteBefore(
     float secondsOfAudioToWriteBefore) {
   this->secondsOfAudioToWriteBefore = secondsOfAudioToWriteBefore;
+  // Use ACTUAL device values (deviceConfig may have channels=0 in Android auto mode)
+  int channels = device.capture.channels;
+  if (channels < 1) channels = 1;  // Safety fallback
+  ma_uint32 sampleRate = device.sampleRate > 0 ? device.sampleRate : 48000;
   ma_uint32 frameCount =
-      (ma_uint32)(secondsOfAudioToWriteBefore * deviceConfig.capture.channels *
-                  deviceConfig.sampleRate);
+      (ma_uint32)(secondsOfAudioToWriteBefore * channels * sampleRate);
   frameCount = (frameCount >> 1) << 1;
   if (!circularBuffer)
     circularBuffer.reset();
@@ -1052,7 +1257,25 @@ void Capture::setSecondsOfAudioToWriteBefore(
 CaptureErrors Capture::startRecording(const char *path) {
   if (!mInited)
     return captureNotInited;
-  CaptureErrors result = wav.init(path, deviceConfig);
+
+  // IMPORTANT: Create a config with ACTUAL device values, not configured ones
+  // In Android auto mode, deviceConfig.capture.channels may be 0
+  ma_device_config actualConfig = deviceConfig;
+  // Use f32 format for WAV - the captured buffer is ALWAYS converted to f32
+  // regardless of device format (s16/s32 are converted in data_callback lines 203-246)
+  actualConfig.capture.format = ma_format_f32;
+  actualConfig.capture.channels = device.capture.channels;
+  actualConfig.sampleRate = device.sampleRate;
+
+#ifdef _IS_ANDROID_
+  __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+      "[WAV INIT] path=%s, format=f32(%d), channels=%d, sampleRate=%d",
+      path, ma_format_f32, actualConfig.capture.channels, actualConfig.sampleRate);
+#endif
+  printf("[WAV INIT] path=%s, format=f32(%d), channels=%d, sampleRate=%d\n",
+      path, ma_format_f32, actualConfig.capture.channels, actualConfig.sampleRate);
+
+  CaptureErrors result = wav.init(path, actualConfig);
   if (result != captureNoError)
     return result;
   setSecondsOfAudioToWriteBefore(secondsOfAudioToWriteBefore);
@@ -1075,6 +1298,19 @@ void Capture::stopRecording() {
   isRecording = false;
 }
 
+void Capture::writePrerollToWav(const float* samples, size_t numSamples) {
+  if (!mInited || !isRecording || samples == nullptr || numSamples == 0)
+    return;
+
+  // Get actual channel count for frame calculation
+  unsigned int channels = getCaptureChannels();
+  if (channels < 1) channels = 1;
+
+  size_t frameCount = numSamples / channels;
+  wav.write((void*)samples, frameCount);
+  printf("[Capture] Wrote %zu preroll frames (%zu samples) to WAV\n", frameCount, numSamples);
+}
+
 /// @brief Shrinks the captured audio buffer to 256 floats.
 /// @param inputBuffer The captured audio buffer.
 /// @param outputBuffer The output buffer.
@@ -1093,10 +1329,13 @@ void shrink_buffer(float *inputBuffer, float *outputBuffer, int channels) {
 float *Capture::getWave(bool *isTheSameAsBefore) {
   float currentWave[256];
 
-  // Protect the read from capturedBuffer
+  // LOCK-FREE: Read from the stable buffer (capturedBuffer points to the
+  // buffer that was last fully written by the audio callback)
   {
-    std::lock_guard<std::mutex> lock(capturedBufferMutex);
-    shrink_buffer(capturedBuffer, currentWave, deviceConfig.capture.channels);
+    // IMPORTANT: Use ACTUAL device channels, not configured (which may be 0 in auto mode)
+    int channels = device.capture.channels;
+    if (channels < 1) channels = 1;  // Safety fallback
+    shrink_buffer(capturedBuffer, currentWave, channels);
   }
 
   if (memcmp(waveData, currentWave, sizeof(waveData)) != 0) {

@@ -153,6 +153,64 @@ class RecorderFfi extends RecorderImpl {
     );
   }
 
+  // Recording stopped callback - fired from native when recording auto-stops
+  final _recordingStoppedController =
+      StreamController<RecordingStoppedEvent>.broadcast();
+
+  @override
+  Stream<RecordingStoppedEvent> get recordingStoppedStream =>
+      _recordingStoppedController.stream;
+
+  ffi.NativeCallable<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>?
+      _nativeRecordingStoppedCallable;
+
+  void _recordingStoppedCallback(int recordedFrames, ffi.Pointer<ffi.Char> wavPath) {
+    if (_recordingStoppedController.isClosed) return;
+    final path = wavPath.cast<Utf8>().toDartString();
+    _recordingStoppedController.add(
+      RecordingStoppedEvent(recordedFrames: recordedFrames, wavPath: path),
+    );
+  }
+
+  @override
+  Future<void> setRecordingStoppedCallback() async {
+    _nativeRecordingStoppedCallable = ffi
+        .NativeCallable<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>
+        .listener(_recordingStoppedCallback);
+    _bindings.flutter_recorder_setRecordingStoppedCallback(
+      _nativeRecordingStoppedCallable!.nativeFunction,
+    );
+  }
+
+  // Recording started callback - fired from native when recording starts
+  final _recordingStartedController =
+      StreamController<RecordingStartedEvent>.broadcast();
+
+  @override
+  Stream<RecordingStartedEvent> get recordingStartedStream =>
+      _recordingStartedController.stream;
+
+  ffi.NativeCallable<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>?
+      _nativeRecordingStartedCallable;
+
+  void _recordingStartedCallback(int startFrame, ffi.Pointer<ffi.Char> wavPath) {
+    if (_recordingStartedController.isClosed) return;
+    final path = wavPath.cast<Utf8>().toDartString();
+    _recordingStartedController.add(
+      RecordingStartedEvent(startFrame: startFrame, wavPath: path),
+    );
+  }
+
+  @override
+  Future<void> setRecordingStartedCallback() async {
+    _nativeRecordingStartedCallable = ffi
+        .NativeCallable<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>
+        .listener(_recordingStartedCallback);
+    _bindings.flutter_recorder_setRecordingStartedCallback(
+      _nativeRecordingStartedCallable!.nativeFunction,
+    );
+  }
+
   @override
   void setSilenceDetection({
     required bool enable,
@@ -440,6 +498,21 @@ class RecorderFfi extends RecorderImpl {
   }
 
   @override
+  int getFilterMissCount() {
+    return _bindings.flutter_recorder_getFilterMissCount();
+  }
+
+  @override
+  int getFilterProcessCount() {
+    return _bindings.flutter_recorder_getFilterProcessCount();
+  }
+
+  @override
+  void resetFilterStats() {
+    _bindings.flutter_recorder_resetFilterStats();
+  }
+
+  @override
   Float32List getFft({bool alwaysReturnData = true}) {
     final ffi.Pointer<ffi.Pointer<ffi.Float>> fft = calloc();
     final isTheSameAsBefore = calloc<ffi.Bool>();
@@ -663,6 +736,16 @@ class RecorderFfi extends RecorderImpl {
   @override
   void aecResetBuffer() {
     _bindings.flutter_recorder_aec_resetBuffer();
+  }
+
+  @override
+  void aecSetEnabled(bool enabled) {
+    _bindings.flutter_recorder_aec_setEnabled(enabled);
+  }
+
+  @override
+  bool aecIsEnabled() {
+    return _bindings.flutter_recorder_aec_isEnabled();
   }
 
   @override
@@ -1106,5 +1189,192 @@ class RecorderFfi extends RecorderImpl {
         calibratedOffset: calibratedOffsetPtr.value,
       );
     });
+  }
+
+  // ==================== NATIVE AUDIO SINK ====================
+  // Direct native-to-native streaming (bypasses Dart main thread)
+
+  @override
+  void setNativeAudioSink(int callbackAddress, int userDataAddress) {
+    final callback = ffi.Pointer<ffi.Void>.fromAddress(callbackAddress);
+    final userData = ffi.Pointer<ffi.Void>.fromAddress(userDataAddress);
+    _bindings.flutter_recorder_setNativeAudioSink(
+      callback.cast<ffi.NativeFunction<bindings_gen.NativeAudioSinkCallbackFunction>>(),
+      userData,
+    );
+  }
+
+  @override
+  bool isNativeAudioSinkActive() {
+    return _bindings.flutter_recorder_isNativeAudioSinkActive();
+  }
+
+  @override
+  void disableNativeAudioSink() {
+    _bindings.flutter_recorder_disableNativeAudioSink();
+  }
+
+  @override
+  void injectPreroll(int frameCount) {
+    _bindings.flutter_recorder_injectPreroll(frameCount);
+  }
+
+  // ==================== NATIVE SCHEDULER ====================
+
+  @override
+  void schedulerReset() {
+    _bindings.flutter_recorder_scheduler_reset();
+  }
+
+  @override
+  void schedulerSetBaseLoop(int loopFrames, int loopStartFrame) {
+    _bindings.flutter_recorder_scheduler_setBaseLoop(loopFrames, loopStartFrame);
+  }
+
+  @override
+  void schedulerClearBaseLoop() {
+    _bindings.flutter_recorder_scheduler_clearBaseLoop();
+  }
+
+  @override
+  int schedulerScheduleStart(String path) {
+    final pathPtr = path.toNativeUtf8();
+    try {
+      return _bindings.flutter_recorder_scheduler_scheduleStart(pathPtr.cast());
+    } finally {
+      malloc.free(pathPtr);
+    }
+  }
+
+  @override
+  int schedulerScheduleStop(int startFrame) {
+    return _bindings.flutter_recorder_scheduler_scheduleStop(startFrame);
+  }
+
+  @override
+  bool schedulerCancelEvent(int eventId) {
+    return _bindings.flutter_recorder_scheduler_cancelEvent(eventId) == 1;
+  }
+
+  @override
+  void schedulerCancelAll() {
+    _bindings.flutter_recorder_scheduler_cancelAll();
+  }
+
+  @override
+  SchedulerNotification? schedulerPollNotification() {
+    final outEventId = calloc<ffi.Uint32>();
+    final outAction = calloc<ffi.Int>();
+    final outFiredFrame = calloc<ffi.Int64>();
+    final outLatency = calloc<ffi.Int32>();
+    try {
+      final result = _bindings.flutter_recorder_scheduler_pollNotification(
+        outEventId,
+        outAction,
+        outFiredFrame,
+        outLatency,
+      );
+      if (result == 0) {
+        return null;
+      }
+      return SchedulerNotification(
+        eventId: outEventId.value,
+        action: SchedulerAction.fromValue(outAction.value),
+        firedAtFrame: outFiredFrame.value,
+        latencyFrames: outLatency.value,
+      );
+    } finally {
+      calloc
+        ..free(outEventId)
+        ..free(outAction)
+        ..free(outFiredFrame)
+        ..free(outLatency);
+    }
+  }
+
+  @override
+  bool schedulerHasNotifications() {
+    return _bindings.flutter_recorder_scheduler_hasNotifications() == 1;
+  }
+
+  @override
+  int schedulerGetGlobalFrame() {
+    return _bindings.flutter_recorder_scheduler_getGlobalFrame();
+  }
+
+  @override
+  int schedulerGetBaseLoopFrames() {
+    return _bindings.flutter_recorder_scheduler_getBaseLoopFrames();
+  }
+
+  @override
+  int schedulerGetNextLoopBoundary() {
+    return _bindings.flutter_recorder_scheduler_getNextLoopBoundary();
+  }
+
+  @override
+  void schedulerSetLatencyCompensation(int frames) {
+    _bindings.flutter_recorder_scheduler_setLatencyCompensation(frames);
+  }
+
+  @override
+  int schedulerGetLatencyCompensation() {
+    return _bindings.flutter_recorder_scheduler_getLatencyCompensation();
+  }
+
+  // ==================== NATIVE RING BUFFER ====================
+
+  @override
+  void createRingBuffer(int capacitySeconds, int sampleRate, int channels) {
+    _bindings.flutter_recorder_createRingBuffer(
+      capacitySeconds,
+      sampleRate,
+      channels,
+    );
+  }
+
+  @override
+  void destroyRingBuffer() {
+    _bindings.flutter_recorder_destroyRingBuffer();
+  }
+
+  @override
+  Float32List readPreRoll(int frameCount, int rewindFrames) {
+    final dest = calloc<ffi.Float>(frameCount * (channels?.count ?? 1));
+    try {
+      final actualFrames = _bindings.flutter_recorder_readPreRoll(
+        dest,
+        frameCount,
+        rewindFrames,
+      );
+      if (actualFrames == 0) {
+        return Float32List(0);
+      }
+      // Return copy of the data (interleaved samples)
+      final sampleCount = actualFrames * (channels?.count ?? 1);
+      return Float32List.fromList(dest.asTypedList(sampleCount));
+    } finally {
+      calloc.free(dest);
+    }
+  }
+
+  @override
+  double getAudioLevelDb() {
+    return _bindings.flutter_recorder_getAudioLevelDb();
+  }
+
+  @override
+  int getRingBufferFramesWritten() {
+    return _bindings.flutter_recorder_getRingBufferFramesWritten();
+  }
+
+  @override
+  int getRingBufferAvailable() {
+    return _bindings.flutter_recorder_getRingBufferAvailable();
+  }
+
+  @override
+  void resetRingBuffer() {
+    _bindings.flutter_recorder_resetRingBuffer();
   }
 }

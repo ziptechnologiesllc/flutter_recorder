@@ -48,6 +48,18 @@ abstract class RecorderImpl {
   /// Set the AEC statistics callback.
   Future<void> setAecStatsCallback() async {}
 
+  /// Stream of recording stopped events (fired from native when auto-stop occurs).
+  Stream<RecordingStoppedEvent> get recordingStoppedStream;
+
+  /// Set the recording stopped callback.
+  Future<void> setRecordingStoppedCallback() async {}
+
+  /// Stream of recording started events (fired from native when recording starts).
+  Stream<RecordingStartedEvent> get recordingStartedStream;
+
+  /// Set the recording started callback.
+  Future<void> setRecordingStartedCallback() async {}
+
   /// Set Dart functions to call when an event occurs.
   @mustBeOverridden
   Future<void> setDartEventCallbacks();
@@ -201,6 +213,22 @@ abstract class RecorderImpl {
   @mustBeOverridden
   void setMonitoringMode(int mode);
 
+  // ///////////////////////
+  // Filter debug stats
+  // ///////////////////////
+
+  /// Get the number of times filter processing was skipped due to lock contention.
+  @mustBeOverridden
+  int getFilterMissCount();
+
+  /// Get the number of times filter processing completed successfully.
+  @mustBeOverridden
+  int getFilterProcessCount();
+
+  /// Reset filter stats counters (call at session start).
+  @mustBeOverridden
+  void resetFilterStats();
+
   /// Conveninet way to get FFT data. Return a 256 float array containing
   /// FFT data in the range [-1.0, 1.0] not clamped.
   ///
@@ -340,6 +368,15 @@ abstract class RecorderImpl {
   /// Reset the AEC buffer (e.g., when switching audio configurations).
   @mustBeOverridden
   void aecResetBuffer();
+
+  /// Enable/disable AEC reference buffer writes.
+  /// When disabled, saves CPU when AEC is not needed.
+  @mustBeOverridden
+  void aecSetEnabled(bool enabled);
+
+  /// Check if AEC reference buffer is enabled.
+  @mustBeOverridden
+  bool aecIsEnabled();
 
   /// Set AEC Mode (0=Bypass, 1=Algo, 2=Neural, 3=Hybrid)
   @mustBeOverridden
@@ -543,4 +580,131 @@ abstract class RecorderImpl {
     int sampleRate, {
     CalibrationSignalType signalType = CalibrationSignalType.chirp,
   });
+
+  // ==================== NATIVE AUDIO SINK ====================
+  // Direct native-to-native streaming (bypasses Dart main thread)
+
+  /// Set native audio sink for direct recorder-to-player streaming.
+  /// [callbackAddress] and [userDataAddress] come from SoLoud's
+  /// configureNativeAudioSinkRaw().
+  @mustBeOverridden
+  void setNativeAudioSink(int callbackAddress, int userDataAddress);
+
+  /// Check if native audio sink is active.
+  @mustBeOverridden
+  bool isNativeAudioSinkActive();
+
+  /// Disable native audio sink (data flows through Dart again).
+  @mustBeOverridden
+  void disableNativeAudioSink();
+
+  /// Inject preroll audio from ring buffer into SoLoud stream via native path.
+  /// This reads [frameCount] frames from the ring buffer and sends them
+  /// directly to the native audio sink callback.
+  @mustBeOverridden
+  void injectPreroll(int frameCount);
+
+  // ==================== NATIVE SCHEDULER ====================
+  // Sample-accurate timing for recording start/stop in audio callback
+
+  /// Reset the native scheduler state.
+  @mustBeOverridden
+  void schedulerReset();
+
+  /// Set base loop parameters for quantization.
+  /// [loopFrames] is the loop length in frames.
+  /// [loopStartFrame] is the global frame when the loop started.
+  @mustBeOverridden
+  void schedulerSetBaseLoop(int loopFrames, int loopStartFrame);
+
+  /// Clear base loop (free recording mode).
+  @mustBeOverridden
+  void schedulerClearBaseLoop();
+
+  /// Schedule quantized recording start.
+  /// Returns event ID (0 if failed to schedule).
+  @mustBeOverridden
+  int schedulerScheduleStart(String path);
+
+  /// Schedule quantized recording stop.
+  /// [startFrame] is when recording started (for multi-loop calculation).
+  /// Returns event ID (0 if failed to schedule).
+  @mustBeOverridden
+  int schedulerScheduleStop(int startFrame);
+
+  /// Cancel a scheduled event by ID.
+  /// Returns true if event was cancelled.
+  @mustBeOverridden
+  bool schedulerCancelEvent(int eventId);
+
+  /// Cancel all pending events.
+  @mustBeOverridden
+  void schedulerCancelAll();
+
+  /// Poll for fired event notification.
+  /// Returns null if no notification available.
+  @mustBeOverridden
+  SchedulerNotification? schedulerPollNotification();
+
+  /// Check if there are pending notifications.
+  @mustBeOverridden
+  bool schedulerHasNotifications();
+
+  /// Get current global frame position.
+  @mustBeOverridden
+  int schedulerGetGlobalFrame();
+
+  /// Get base loop length in frames.
+  @mustBeOverridden
+  int schedulerGetBaseLoopFrames();
+
+  /// Get next loop boundary frame.
+  @mustBeOverridden
+  int schedulerGetNextLoopBoundary();
+
+  /// Set latency compensation in frames (applied at recording start).
+  @mustBeOverridden
+  void schedulerSetLatencyCompensation(int frames);
+
+  /// Get latency compensation in frames.
+  @mustBeOverridden
+  int schedulerGetLatencyCompensation();
+
+  // ==================== NATIVE RING BUFFER ====================
+  // Latency compensation via continuous capture with pre-roll
+
+  /// Create/configure the native ring buffer for latency compensation.
+  /// [capacitySeconds] How many seconds of audio to keep (typically 5).
+  /// [sampleRate] Sample rate in Hz.
+  /// [channels] Number of channels (1=mono, 2=stereo).
+  @mustBeOverridden
+  void createRingBuffer(int capacitySeconds, int sampleRate, int channels);
+
+  /// Destroy/reset the native ring buffer.
+  @mustBeOverridden
+  void destroyRingBuffer();
+
+  /// Read pre-roll samples for latency compensation.
+  /// [frameCount] Number of frames to read.
+  /// [rewindFrames] How many frames back in time to start reading.
+  /// Returns Float32List with interleaved samples.
+  @mustBeOverridden
+  Float32List readPreRoll(int frameCount, int rewindFrames);
+
+  /// Get current audio level in dB (RMS).
+  /// Calculated continuously in the native audio callback.
+  @mustBeOverridden
+  double getAudioLevelDb();
+
+  /// Get total frames written to the ring buffer.
+  @mustBeOverridden
+  int getRingBufferFramesWritten();
+
+  /// Get available frames in the ring buffer.
+  @mustBeOverridden
+  int getRingBufferAvailable();
+
+  /// Reset the ring buffer (clear all data).
+  @mustBeOverridden
+  void resetRingBuffer();
 }
