@@ -770,6 +770,16 @@ class RecorderWeb extends RecorderImpl {
     return 0;
   }
 
+  @override
+  void schedulerSetAutoStop(bool enabled) {
+    // No-op on web
+  }
+
+  @override
+  bool schedulerIsAutoStopEnabled() {
+    return true; // Default to true on web
+  }
+
   // ==================== NATIVE RING BUFFER ====================
   // Stubs for web - native ring buffer not supported
 

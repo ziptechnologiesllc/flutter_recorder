@@ -670,6 +670,14 @@ abstract class RecorderImpl {
   @mustBeOverridden
   int schedulerGetLatencyCompensation();
 
+  /// Set auto-stop enabled (when true, STOP is scheduled upfront with START).
+  @mustBeOverridden
+  void schedulerSetAutoStop(bool enabled);
+
+  /// Get auto-stop enabled state.
+  @mustBeOverridden
+  bool schedulerIsAutoStopEnabled();
+
   // ==================== NATIVE RING BUFFER ====================
   // Latency compensation via continuous capture with pre-roll
 

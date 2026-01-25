@@ -1414,6 +1414,17 @@ FFI_PLUGIN_EXPORT int64_t flutter_recorder_scheduler_getLatencyCompensation() {
   return NativeScheduler::instance().getLatencyCompensationFrames();
 }
 
+// Set auto-stop enabled (when true, STOP is scheduled upfront with START)
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setAutoStop(bool enabled) {
+  NativeScheduler::instance().setAutoStopEnabled(enabled);
+  fprintf(stderr, "[Recorder] Scheduler auto-stop %s\n", enabled ? "enabled" : "disabled");
+}
+
+// Get auto-stop enabled state
+FFI_PLUGIN_EXPORT bool flutter_recorder_scheduler_isAutoStopEnabled() {
+  return NativeScheduler::instance().isAutoStopEnabled();
+}
+
 /////////////////////////
 /// NATIVE RING BUFFER
 /// Latency compensation via continuous capture with pre-roll

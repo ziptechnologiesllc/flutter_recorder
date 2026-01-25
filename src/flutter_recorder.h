@@ -380,6 +380,12 @@ FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setLatencyCompensation(int64_t
 // Get latency compensation in frames
 FFI_PLUGIN_EXPORT int64_t flutter_recorder_scheduler_getLatencyCompensation();
 
+// Set auto-stop enabled (when true, STOP is scheduled upfront with START)
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setAutoStop(bool enabled);
+
+// Get auto-stop enabled state
+FFI_PLUGIN_EXPORT bool flutter_recorder_scheduler_isAutoStopEnabled();
+
 /////////////////////////
 /// Native Ring Buffer
 /// Latency compensation via continuous capture with pre-roll

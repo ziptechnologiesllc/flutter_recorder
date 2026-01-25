@@ -1797,6 +1797,30 @@ class FlutterRecorderBindings {
       _flutter_recorder_scheduler_getLatencyCompensationPtr
           .asFunction<int Function()>();
 
+  /// Set auto-stop enabled (when true, STOP is scheduled upfront with START)
+  void flutter_recorder_scheduler_setAutoStop(bool enabled) {
+    return _flutter_recorder_scheduler_setAutoStop(enabled);
+  }
+
+  late final _flutter_recorder_scheduler_setAutoStopPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Bool)>>(
+          'flutter_recorder_scheduler_setAutoStop');
+  late final _flutter_recorder_scheduler_setAutoStop =
+      _flutter_recorder_scheduler_setAutoStopPtr
+          .asFunction<void Function(bool)>();
+
+  /// Get auto-stop enabled state
+  bool flutter_recorder_scheduler_isAutoStopEnabled() {
+    return _flutter_recorder_scheduler_isAutoStopEnabled();
+  }
+
+  late final _flutter_recorder_scheduler_isAutoStopEnabledPtr =
+      _lookup<ffi.NativeFunction<ffi.Bool Function()>>(
+          'flutter_recorder_scheduler_isAutoStopEnabled');
+  late final _flutter_recorder_scheduler_isAutoStopEnabled =
+      _flutter_recorder_scheduler_isAutoStopEnabledPtr
+          .asFunction<bool Function()>();
+
   /// Create/configure the native ring buffer
   /// capacitySeconds: How many seconds of audio to keep (typically 5)
   /// sampleRate: Sample rate in Hz

@@ -1215,6 +1215,19 @@ interface class Recorder {
     return _impl.schedulerGetLatencyCompensation();
   }
 
+  /// Set auto-stop enabled.
+  /// When true (default), both START and STOP are scheduled upfront for
+  /// exactly one loop length. When false, only START is scheduled, allowing
+  /// manual control over when to stop (useful for pedal users).
+  void schedulerSetAutoStop(bool enabled) {
+    _impl.schedulerSetAutoStop(enabled);
+  }
+
+  /// Get auto-stop enabled state.
+  bool schedulerIsAutoStopEnabled() {
+    return _impl.schedulerIsAutoStopEnabled();
+  }
+
   // ==================== NATIVE RING BUFFER ====================
   // Latency compensation via continuous capture with pre-roll
 

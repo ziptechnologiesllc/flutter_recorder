@@ -76,6 +76,16 @@ public:
         return mLatencyCompensationFrames.load(std::memory_order_acquire);
     }
 
+    /// Set auto-stop enabled (when true, STOP is scheduled upfront with START)
+    void setAutoStopEnabled(bool enabled) {
+        mAutoStopEnabled.store(enabled, std::memory_order_release);
+    }
+
+    /// Get auto-stop enabled state
+    bool isAutoStopEnabled() const {
+        return mAutoStopEnabled.load(std::memory_order_acquire);
+    }
+
     /// Reset all state (call on session end)
     void reset();
 
@@ -165,6 +175,7 @@ private:
     std::atomic<int64_t> mBaseLoopFrames{0};
     std::atomic<int64_t> mBaseLoopStartFrame{0};
     std::atomic<int64_t> mLatencyCompensationFrames{0};  // Frames to rewind at recording start
+    std::atomic<bool> mAutoStopEnabled{true};  // When true, auto-schedule STOP with START
 
     // ===================== NOTIFICATION QUEUE (SPSC) =====================
     // Single-Producer (audio thread) / Single-Consumer (Dart poll)

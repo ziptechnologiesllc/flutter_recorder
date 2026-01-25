@@ -1322,6 +1322,16 @@ class RecorderFfi extends RecorderImpl {
     return _bindings.flutter_recorder_scheduler_getLatencyCompensation();
   }
 
+  @override
+  void schedulerSetAutoStop(bool enabled) {
+    _bindings.flutter_recorder_scheduler_setAutoStop(enabled);
+  }
+
+  @override
+  bool schedulerIsAutoStopEnabled() {
+    return _bindings.flutter_recorder_scheduler_isAutoStopEnabled();
+  }
+
   // ==================== NATIVE RING BUFFER ====================
 
   @override

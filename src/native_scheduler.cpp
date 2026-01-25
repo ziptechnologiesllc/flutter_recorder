@@ -138,13 +138,28 @@ uint32_t NativeScheduler::scheduleQuantizedStart(const char* recordingPath) {
     int64_t currentFrame = mGlobalFramePosition.load(std::memory_order_acquire);
     int64_t loopFrames = mBaseLoopFrames.load(std::memory_order_acquire);
     int64_t loopStartFrame = mBaseLoopStartFrame.load(std::memory_order_acquire);
-    int64_t targetFrame = getNextLoopBoundary();
+    int64_t targetStartFrame = getNextLoopBoundary();
 
     SCHED_LOG("scheduleQuantizedStart: currentFrame=%lld loopFrames=%lld loopStart=%lld -> targetFrame=%lld path=%s",
               (long long)currentFrame, (long long)loopFrames, (long long)loopStartFrame,
-              (long long)targetFrame, recordingPath ? recordingPath : "(null)");
+              (long long)targetStartFrame, recordingPath ? recordingPath : "(null)");
 
-    return scheduleEvent(SchedulerAction::StartRecording, targetFrame, recordingPath);
+    // Schedule the START event
+    uint32_t startEventId = scheduleEvent(SchedulerAction::StartRecording, targetStartFrame, recordingPath);
+
+    // If we have a base loop AND auto-stop is enabled, also schedule the STOP event upfront
+    bool autoStop = mAutoStopEnabled.load(std::memory_order_acquire);
+    if (startEventId != 0 && loopFrames > 0 && autoStop) {
+        int64_t targetStopFrame = targetStartFrame + loopFrames;
+        uint32_t stopEventId = scheduleEvent(SchedulerAction::StopRecording, targetStopFrame, recordingPath);
+        SCHED_LOG("scheduleQuantizedStart: auto-scheduled STOP at frame %lld (startEventId=%u, stopEventId=%u)",
+                  (long long)targetStopFrame, startEventId, stopEventId);
+    } else if (startEventId != 0 && loopFrames > 0 && !autoStop) {
+        SCHED_LOG("scheduleQuantizedStart: auto-stop DISABLED, no STOP scheduled (startEventId=%u)",
+                  startEventId);
+    }
+
+    return startEventId;
 }
 
 uint32_t NativeScheduler::scheduleQuantizedStop(int64_t recordingStartFrame) {
@@ -291,27 +306,8 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                         dartRecordingStartedCallback(currentFrame, event.recordingPath);
                     }
 
-                    // AUTO-SCHEDULE STOP: If we have a base loop, schedule stop at next loop boundary
-                    int64_t loopFrames = mBaseLoopFrames.load(std::memory_order_acquire);
-                    if (loopFrames > 0) {
-                        int64_t stopFrame = currentFrame + loopFrames;
-                        int slot = findEmptySlot();
-                        if (slot >= 0) {
-                            ScheduledEvent& stopEvent = mEvents[slot];
-                            uint32_t stopEventId = mNextEventId.fetch_add(1, std::memory_order_relaxed);
-                            stopEvent.eventId.store(stopEventId, std::memory_order_relaxed);
-                            stopEvent.action.store(SchedulerAction::StopRecording, std::memory_order_relaxed);
-                            stopEvent.targetFrame.store(stopFrame, std::memory_order_relaxed);
-                            // Copy path for stop event (needed for WAV writing)
-                            strncpy(stopEvent.recordingPath, event.recordingPath, sizeof(stopEvent.recordingPath) - 1);
-                            stopEvent.recordingPath[sizeof(stopEvent.recordingPath) - 1] = '\0';
-                            stopEvent.state.store(EventState::Pending, std::memory_order_release);
-                            SCHED_LOG("Auto-scheduled stop event id=%u at frame %lld (loopFrames=%lld)",
-                                      stopEventId, (long long)stopFrame, (long long)loopFrames);
-                        } else {
-                            SCHED_LOG("WARNING: Could not auto-schedule stop - no empty slot!");
-                        }
-                    }
+                    // NOTE: STOP event is now scheduled upfront in scheduleQuantizedStart()
+                    // when both START and STOP are queued together
                 } else {
                     SCHED_LOG("executeEvent: WARNING - no ring buffer, falling back to capture");
                     CaptureErrors err = capture->startRecording(event.recordingPath);
