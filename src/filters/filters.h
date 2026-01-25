@@ -2,8 +2,8 @@
 #define FILTERS_H
 
 #include "../enums.h"
-#include "generic_filter.h"
 #include "aec/neural_post_filter.h"
+#include "generic_filter.h"
 
 #include <functional>
 #include <memory>
@@ -72,15 +72,16 @@ public:
   // Aligned calibration capture (for accurate delay estimation)
   void startAecCalibrationCapture(size_t maxSamples);
   void stopAecCalibrationCapture();
-  const std::vector<float> &getAecAlignedRef() const;
-  const std::vector<float> &getAecAlignedMic() const;
+  std::vector<float> getAecAlignedRef() const;
+  std::vector<float> getAecAlignedMic() const;
 
   // AEC Mode Control
   void setAecMode(AecMode mode);
   AecMode getAecMode() const;
 
   // Neural Model Control
-  bool loadNeuralModel(NeuralModelType modelType, const std::string &assetBasePath);
+  bool loadNeuralModel(NeuralModelType modelType,
+                       const std::string &assetBasePath);
   NeuralModelType getLoadedNeuralModel() const;
   void setNeuralEnabled(bool enabled);
   bool isNeuralEnabled() const;

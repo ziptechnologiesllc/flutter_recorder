@@ -48,8 +48,12 @@ typedef enum AecMode {
 
 typedef struct {
   float maxAttenuationDb;
+  float avgAttenuationDb;
+  float minAttenuationDb;
   float correlation;
   float echoReturnLossDb;
+  float refEnergy;
+  float micEnergy;
   // Debug display fields
   int filterLength;         // Current filter length in samples
   float muMax;              // Configured max step size

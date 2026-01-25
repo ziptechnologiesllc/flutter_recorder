@@ -212,84 +212,52 @@ public:
   size_t readFramesAtTimestamp(float *dest, size_t frameCount,
                                TimePoint targetTime,
                                float calibratedDelayMs) const {
-    if (dest == nullptr || frameCount == 0)
+    int64_t absoluteStartFrame =
+        findFrameForTimestamp(targetTime, calibratedDelayMs);
+    if (absoluteStartFrame < 0) {
+      std::memset(dest, 0, frameCount * mChannels * sizeof(float));
       return 0;
+    }
 
-    // Get the last write timestamp and frame count
+    // Adjust to start of block (findFrameForTimestamp returns the "head" or
+    // current sample)
+    absoluteStartFrame -= frameCount;
+
+    return readFramesAtPosition(dest, frameCount,
+                                static_cast<size_t>(absoluteStartFrame));
+  }
+
+  /**
+   * Find the absolute frame position corresponding to a timestamp.
+   *
+   * @param targetTime The timestamp to find the frame for.
+   * @param delayMs Optional additional delay to apply (e.g. calibrated hardware
+   * delay).
+   * @return Absolute frame position, or -1 if timestamp is invalid/too old.
+   */
+  int64_t findFrameForTimestamp(TimePoint targetTime,
+                                float delayMs = 0.0f) const {
     size_t lastFrameCount =
         mLastWriteFrameCount.load(std::memory_order_acquire);
     int64_t lastWriteUs = mLastWriteTimestampUs.load(std::memory_order_relaxed);
 
-    if (lastWriteUs == 0) {
-      return 0;
-    }
+    if (lastWriteUs == 0)
+      return -1;
 
     TimePoint lastWriteTime = fromMicroseconds(lastWriteUs);
-
-    // Calculate time elapsed since the last write operation
     auto timeSinceLastWrite = targetTime - lastWriteTime;
     double secondsSinceLastWrite =
         std::chrono::duration<double>(timeSinceLastWrite).count();
 
-    // SMOOTH SYNCHRONIZATION:
-    // Instead of anchoring to the jumpy mWritePos, we use the timestamp to
-    // calculate exactly which sample corresponds to targetTime. Current
-    // playback head (in frames) = lastFrameCount + (secondsSinceLastWrite *
-    // mSampleRate)
     double currentPlaybackHead =
         static_cast<double>(lastFrameCount) +
         (secondsSinceLastWrite * static_cast<double>(mSampleRate));
 
-    // Required reference head = currentPlaybackHead - delaySamples
-    // Convert ms to samples: delay_samples = (delay_ms / 1000) * sample_rate
-    double delaySamples = (static_cast<double>(calibratedDelayMs) / 1000.0) *
+    double delaySamples = (static_cast<double>(delayMs) / 1000.0) *
                           static_cast<double>(mSampleRate);
     double requiredRefHead = currentPlaybackHead - delaySamples;
 
-    // We want to read frameCount frames ending at requiredRefHead (exclusive)
-    // So the start frame is requiredRefHead - frameCount
-    double startFrame = requiredRefHead - static_cast<double>(frameCount);
-
-    // Convert absolute start frame to circular buffer index
-    // Note: we use floor to keep it sample-aligned, but the double math
-    // maintains the smooth continuous timeline.
-    int64_t absoluteStartFrame = static_cast<int64_t>(std::floor(startFrame));
-
-    // Safety check: if we are requesting frames that haven't been written or
-    // are too old
-    if (absoluteStartFrame < 0 ||
-        (absoluteStartFrame + frameCount) >
-            static_cast<int64_t>(currentPlaybackHead)) {
-      // Not enough data or asking for future samples
-      // For now, return 0 or fill with silence
-      std::memset(dest, 0, frameCount * mChannels * sizeof(float));
-      return 0;
-    }
-
-    size_t bufferSize = mBuffer.size();
-    size_t bufferSizeFrames = bufferSize / mChannels;
-
-    // Check if data is still in buffer (not overwritten)
-    size_t totalWritten = mFramesWritten.load(std::memory_order_relaxed);
-    if (totalWritten > bufferSizeFrames &&
-        absoluteStartFrame <
-            static_cast<int64_t>(totalWritten - bufferSizeFrames)) {
-      // Data has been overwritten (buffer overflow for this delay)
-      std::memset(dest, 0, frameCount * mChannels * sizeof(float));
-      return 0;
-    }
-
-    // Map absolute frame to buffer index
-    size_t readPosSamples =
-        (static_cast<size_t>(absoluteStartFrame) % bufferSizeFrames) *
-        mChannels;
-    size_t samplesToRead = frameCount * mChannels;
-
-    for (size_t i = 0; i < samplesToRead; ++i) {
-      dest[i] = mBuffer[(readPosSamples + i) % bufferSize];
-    }
-
-    return frameCount;
+    return static_cast<int64_t>(std::floor(requiredRefHead));
   }
 
   /**
@@ -300,10 +268,12 @@ public:
   /**
    * Read frames at an absolute position in the output stream.
    *
-   * This is the NEW SYNC METHOD that uses sample counters instead of timestamps.
-   * The capture side calculates: refPosition = captureFrameCount - calibratedOffset
+   * This is the NEW SYNC METHOD that uses sample counters instead of
+   * timestamps. The capture side calculates: refPosition = captureFrameCount -
+   * calibratedOffset
    *
-   * @param dest Destination buffer for INTERLEAVED samples (frameCount * channels)
+   * @param dest Destination buffer for INTERLEAVED samples (frameCount *
+   * channels)
    * @param frameCount Number of frames to read
    * @param absoluteOutputFrame The absolute output frame position to read from
    * @return Number of frames actually read, or 0 if data unavailable
@@ -319,7 +289,8 @@ public:
 
     // Check if the requested position is valid:
     // - Not in the future (absoluteOutputFrame + frameCount <= totalWritten)
-    // - Not overwritten (absoluteOutputFrame >= totalWritten - bufferSizeFrames)
+    // - Not overwritten (absoluteOutputFrame >= totalWritten -
+    // bufferSizeFrames)
 
     // Check for future samples
     if (absoluteOutputFrame + frameCount > totalWritten) {
@@ -353,20 +324,71 @@ public:
     size_t bufferIndex = (absoluteOutputFrame % bufferSizeFrames) * mChannels;
     size_t bufferSize = mBuffer.size();
 
-    // Debug logging (sparse)
     static int posReadDebugCount = 0;
-    if (++posReadDebugCount % 500 == 0) {
+    if (++posReadDebugCount % 187 == 0) {
       aecLog("[AEC RefBuf PosR] absFrame=%zu bufIdx=%zu totalWritten=%zu\n",
              absoluteOutputFrame, bufferIndex, totalWritten);
     }
 
     // Read interleaved samples (matches legacy readFrames behavior)
-    // The caller expects stereo interleaved data for stereo audio
     for (size_t i = 0; i < samplesToRead; ++i) {
       dest[i] = mBuffer[(bufferIndex + i) % bufferSize];
     }
 
     return frameCount;
+  }
+
+  /**
+   * Read a continuous context window of frames (History + Current Block).
+   *
+   * This is designed for the VssNlmsFilter::processBlock method. It extracts
+   * MONO data (channel 0) from the interleaved buffer into a contiguous
+   * destination.
+   *
+   * @param dest           Destination buffer. Size must be (historyCount +
+   * frameCount).
+   * @param historyCount   Number of frames of history to read (before
+   * absoluteOutputFrame).
+   * @param frameCount     Number of frames for the current block.
+   * @param absoluteOutputFrame The absolute frame position of the START of the
+   * current block.
+   * @return Number of total frames read (history + current).
+   */
+  size_t readContextWindow(float *dest, size_t historyCount, size_t frameCount,
+                           size_t absoluteOutputFrame) const {
+    if (dest == nullptr)
+      return 0;
+
+    size_t totalRequested = historyCount + frameCount;
+    size_t totalWritten = mFramesWritten.load(std::memory_order_acquire);
+    size_t bufferSizeFrames = mSizeInFrames;
+
+    // The window starts at (absoluteOutputFrame - historyCount)
+    if (absoluteOutputFrame < historyCount) {
+      // Not enough history has even occurred yet.
+      // Fill the leading part with silence and adjust start.
+      size_t silenceCount = historyCount - absoluteOutputFrame;
+      std::memset(dest, 0, silenceCount * sizeof(float));
+
+      size_t framesToRead =
+          std::min(totalWritten, absoluteOutputFrame + frameCount);
+      // Start of output stream is absolute 0
+      for (size_t i = 0; i < framesToRead; ++i) {
+        dest[silenceCount + i] = mBuffer[(i % bufferSizeFrames) * mChannels];
+      }
+      return silenceCount + framesToRead;
+    }
+
+    size_t startFrame = absoluteOutputFrame - historyCount;
+
+    // Basic safety: if startFrame is too old, it's overwritten.
+    // We don't block, we just read what's there (caller handles divergence).
+    for (size_t i = 0; i < totalRequested; ++i) {
+      size_t frameIdx = (startFrame + i) % bufferSizeFrames;
+      dest[i] = mBuffer[frameIdx * mChannels]; // Channel 0 only
+    }
+
+    return totalRequested;
   }
 
   /**

@@ -254,27 +254,43 @@ void NeuralPostFilter::process(const float *micSignal, const float *refSignal,
   }
 
   for (unsigned int f = 0; f < frameCount; ++f) {
-    std::memmove(mInputBufferMic.data(), mInputBufferMic.data() + 1,
-                 (N_FFT - 1) * sizeof(float));
-    mInputBufferMic[N_FFT - 1] = micSignal[f];
-    std::memmove(mInputBufferLpb.data(), mInputBufferLpb.data() + 1,
-                 (N_FFT - 1) * sizeof(float));
-    mInputBufferLpb[N_FFT - 1] = refSignal[f];
+    // 1. Write new samples to circular input buffers
+    mInputBufferMic[mInputIndex] = micSignal[f];
+    mInputBufferLpb[mInputIndex] = refSignal[f];
+    mInputIndex = (mInputIndex + 1) % N_FFT;
 
     mWindowPos++;
     if (mWindowPos >= HOP_SIZE) {
       mWindowPos = 0;
-      performSTFT(mInputBufferMic.data(), mInputBufferLpb.data());
+
+      // 2. Prepare FFT input (contiguous copy from circular buffer)
+      float *micBlock = mFFTWorkBuffer.data(); // Use part of FFT work buffer or
+                                               // other pre-allocated space
+      float *refBlock = mFFTWorkBuffer.data() + N_FFT;
+
+      for (int i = 0; i < N_FFT; ++i) {
+        int idx = (mInputIndex - N_FFT + i + N_FFT) % N_FFT;
+        micBlock[i] = mInputBufferMic[idx];
+        refBlock[i] = mInputBufferLpb[idx];
+      }
+
+      performSTFT(micBlock, refBlock);
       processSingleStage(nullptr, nullptr, nullptr, 0);
-      std::vector<float> synth(N_FFT);
-      performIFFT(synth.data());
-      for (int i = 0; i < N_FFT; ++i)
-        mOutputAccumulator[i] += synth[i];
+
+      float *synth = mFFTWorkBuffer.data(); // Reuse buffer
+      performIFFT(synth);
+
+      // 3. Overlap-Add into circular output accumulator
+      for (int i = 0; i < N_FFT; ++i) {
+        int idx = (mOutputIndex + i) % N_FFT;
+        mOutputAccumulator[idx] += synth[i];
+      }
     }
-    output[f] = mOutputAccumulator[0];
-    std::memmove(mOutputAccumulator.data(), mOutputAccumulator.data() + 1,
-                 (N_FFT - 1) * sizeof(float));
-    mOutputAccumulator[N_FFT - 1] = 0.0f;
+
+    // 4. Read from circular output accumulator
+    output[f] = mOutputAccumulator[mOutputIndex];
+    mOutputAccumulator[mOutputIndex] = 0.0f; // Clear for next round
+    mOutputIndex = (mOutputIndex + 1) % N_FFT;
   }
 }
 

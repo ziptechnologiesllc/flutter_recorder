@@ -152,7 +152,6 @@ AecStats Filters::getAecStats() {
   if (idx < 0)
     return zero;
 
-  // Cast and call
   AdaptiveEchoCancellation *aec =
       static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
   return aec->getStats();
@@ -287,24 +286,23 @@ void Filters::stopAecCalibrationCapture() {
   aec->stopCalibrationCapture();
 }
 
-// Static empty vectors for when AEC is not active
-static std::vector<float> sEmptyVector;
-
-const std::vector<float> &Filters::getAecAlignedRef() const {
+std::vector<float> Filters::getAecAlignedRef() const {
+  static std::vector<float> empty;
   int idx =
       const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
-    return sEmptyVector;
+    return empty;
   AdaptiveEchoCancellation *aec =
       static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
   return aec->getAlignedRef();
 }
 
-const std::vector<float> &Filters::getAecAlignedMic() const {
+std::vector<float> Filters::getAecAlignedMic() const {
+  static std::vector<float> empty;
   int idx =
       const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
-    return sEmptyVector;
+    return empty;
   AdaptiveEchoCancellation *aec =
       static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
   return aec->getAlignedMic();
@@ -331,7 +329,7 @@ AecMode Filters::getAecMode() const {
 
 // Neural Model Control
 bool Filters::loadNeuralModel(NeuralModelType modelType,
-                               const std::string &assetBasePath) {
+                              const std::string &assetBasePath) {
   int idx = isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
     return false; // AEC filter not active

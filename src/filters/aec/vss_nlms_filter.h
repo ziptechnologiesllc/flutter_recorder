@@ -23,7 +23,7 @@
 class VssNlmsFilter {
 public:
   static constexpr int DEFAULT_FILTER_LENGTH =
-      8192; // ~170ms at 48kHz, covers long reverb tails
+      4096; // ~85ms at 48kHz. 8192 was too heavy for time-domain.
 
   /**
    * @param taps Filter length in samples. Will be rounded up to nearest
@@ -42,6 +42,18 @@ public:
    * @return            The clean signal (e) = mic_input - estimated_echo.
    */
   float processSample(float aligned_ref, float mic_input);
+  /**
+   * Process a block of samples for efficiency.
+   *
+   * @param ref_context  A span of reference samples containing (filter_length -
+   * 1) samples of history followed by (num_samples) of current block. Size must
+   * be (filter_length - 1 + num_samples).
+   * @param mic_input    Input microphone samples for the current block.
+   * @param out_error    Output clean samples for the current block.
+   * @param num_samples  Size of the block to process.
+   */
+  void processBlock(const float *ref_context, const float *mic_input,
+                    float *out_error, size_t num_samples);
 
   /**
    * Reset filter weights and history.
@@ -122,26 +134,33 @@ private:
   // We use standard vectors but handle unaligned loads safely in the
   // implementation.
   std::vector<float> weights;
-  std::vector<float> x_history;
+  std::vector<float> x_history; // Circular buffer (mirrored length*2)
   size_t filter_length;
+  size_t mHistoryIndex = 0;
 
   // VSS Statistics
   float p_est = 0.0f; // Cross-correlation estimate (smoothed)
   float var_x = 0.0f; // Power of Reference (smoothed)
   float var_e = 0.0f; // Power of Error (smoothed)
 
-  // Tuning Parameters (optimized via sweep test - 9.05dB cancellation)
+  // Tuning Parameters (optimized via sweep test)
   float alpha =
-      0.05f; // Smoothing factor (lower = faster tracking for transients)
-  float mu_max = 1.2f;    // Max step size (higher = faster convergence)
-  float epsilon = 1e-6f;  // Small constant to prevent division by zero
+      0.99f; // Smoothing factor (higher = more smoothing, less modulation)
+  float mu_max = 1.2f;     // Max step size (higher = faster convergence)
+  float epsilon = 1e-6f;   // Small constant to prevent division by zero
   float leakage = 0.9999f; // Leakage factor (slight decay for stability)
+
+  // Adaptive Gain / Suppression (Ports from NLMSFilter)
+  float mMicEnergy = 0.0f;     // Smoothed mic energy
+  float mEchoEstEnergy = 0.0f; // Smoothed echo estimate energy
+  float mAppliedGain = 1.0f;   // Transitioned gain factor
 
   // Diagnostics
   float mLastE = 0.0f;
   float mLastStep = 0.0f;
   float mLastCorrelation = 0.0f;
-  float mLastYEst = 0.0f; // Last echo estimate for diagnostics
+  float mLastYEst = 0.0f;      // Last echo estimate for diagnostics
+  float x_energy_total = 0.0f; // O(1) energy tracking
 
   // SIMD helper functions defined in cpp
   void updateHistory(float new_sample);

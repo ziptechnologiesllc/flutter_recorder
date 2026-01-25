@@ -107,6 +107,8 @@ private:
   std::vector<float> mMagLpb;
 
   unsigned int mWindowPos = 0;
+  unsigned int mInputIndex = 0;  // Circular input index
+  unsigned int mOutputIndex = 0; // Circular output index
 
 #ifdef USE_TFLITE
   // LiteRT C API members

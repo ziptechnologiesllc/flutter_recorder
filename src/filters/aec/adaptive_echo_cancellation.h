@@ -11,6 +11,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 /**
@@ -92,7 +93,7 @@ public:
                                const std::vector<float> &micBuffer);
 
   // Stats
-  AecStats getStats();
+  AecStats getStats() const;
   void updateStats(float ref, float mic, float out);
 
   NeuralPostFilter *getNeuralFilter() { return mNeuralFilter.get(); }
@@ -126,8 +127,8 @@ public:
   // Calibration capture: capture frame-aligned ref/mic for delay estimation
   void startCalibrationCapture(size_t maxSamples = 96000); // 2 seconds @ 48kHz
   void stopCalibrationCapture();
-  const std::vector<float> &getAlignedRef() const { return mAlignedRefCapture; }
-  const std::vector<float> &getAlignedMic() const { return mAlignedMicCapture; }
+  std::vector<float> getAlignedRef() const;
+  std::vector<float> getAlignedMic() const;
   bool isCalibrationCaptureComplete() const;
 
   // AEC Mode Control (A/B Testing)
@@ -165,6 +166,11 @@ private:
 
   // Temporary buffer for reference signal
   std::vector<float> mRefBuffer;
+  // Buffer for block-based reference context (History + Current)
+  std::vector<float> mRefContextBuffer;
+  // Local mono buffers for block processing
+  std::vector<float> mLocalMicBuffer;
+  std::vector<float> mLocalErrorBuffer;
   // Temporary buffer for linear AEC output
   std::vector<float> mLinearOutputBuffer;
 
@@ -186,6 +192,8 @@ private:
   size_t mCalibrationMaxSamples = 0;
   std::vector<float> mAlignedRefCapture;
   std::vector<float> mAlignedMicCapture;
+  mutable std::mutex mCalibrationMutex;
+  mutable std::mutex mStatsMutex;
 
   // AEC Mode
   AecMode mAecMode = aecModeHybrid;

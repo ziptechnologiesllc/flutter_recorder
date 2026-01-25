@@ -1,22 +1,17 @@
-#include "calibration.h"
-#include "delay_estimator.h"
-#include "vss_nlms_filter.h"
-#include <algorithm>
-#include <cmath>
-#include <cstdarg>
-#include <cstdio>
-#include <cstring>
 #include <fstream>
+#include <mutex>
 
 // Log file for calibration debug output (visible to Flutter test)
 static std::ofstream sLogFile;
 static bool sLogFileOpened = false;
+static std::mutex sLogMutex;
 
 // Store log messages in memory so they can be retrieved via FFI
 static std::string sLogBuffer;
 static const size_t MAX_LOG_SIZE = 64 * 1024; // 64KB max
 
 void aecLog(const char *fmt, ...) {
+  std::lock_guard<std::mutex> lock(sLogMutex);
   char buffer[1024];
   va_list args;
   va_start(args, fmt);
@@ -36,10 +31,14 @@ void aecLog(const char *fmt, ...) {
 // FFI export to retrieve log buffer
 extern "C" {
 const char *flutter_recorder_aec_getCalibrationLog() {
+  std::lock_guard<std::mutex> lock(sLogMutex);
   return sLogBuffer.c_str();
 }
 
-void flutter_recorder_aec_clearCalibrationLog() { sLogBuffer.clear(); }
+void flutter_recorder_aec_clearCalibrationLog() {
+  std::lock_guard<std::mutex> lock(sLogMutex);
+  sLogBuffer.clear();
+}
 }
 
 // Static member initialization
@@ -148,36 +147,45 @@ CalibrationResult AECCalibration::analyze(unsigned int sampleRate) {
   int64_t counterDiff = static_cast<int64_t>(sCaptureFramesAtStart) -
                         static_cast<int64_t>(sOutputFramesAtStart);
 
-  aecLog("[AEC Calibration] Frame counter diff: capture=%zu - output=%zu = %lld\n",
-         sCaptureFramesAtStart, sOutputFramesAtStart, (long long)counterDiff);
+  aecLog(
+      "[AEC Calibration] Frame counter diff: capture=%zu - output=%zu = %lld\n",
+      sCaptureFramesAtStart, sOutputFramesAtStart, (long long)counterDiff);
 
   std::vector<float> preAlignedRef, preAlignedMic;
   if (counterDiff >= 0) {
     // Capture started after output -> mic is "ahead" in time
     // Trim mic start to align with ref start
-    size_t offset = std::min(static_cast<size_t>(counterDiff), sMicCapture.size());
+    size_t offset =
+        std::min(static_cast<size_t>(counterDiff), sMicCapture.size());
     preAlignedMic.assign(sMicCapture.begin() + offset, sMicCapture.end());
     preAlignedRef = sRefCapture;
-    aecLog("[AEC Calibration] Pre-aligned: trimmed %zu samples from mic start\n", offset);
+    aecLog(
+        "[AEC Calibration] Pre-aligned: trimmed %zu samples from mic start\n",
+        offset);
   } else {
     // Output started after capture -> ref is "ahead" in time
     // Trim ref start to align with mic start
-    size_t offset = std::min(static_cast<size_t>(-counterDiff), sRefCapture.size());
+    size_t offset =
+        std::min(static_cast<size_t>(-counterDiff), sRefCapture.size());
     preAlignedRef.assign(sRefCapture.begin() + offset, sRefCapture.end());
     preAlignedMic = sMicCapture;
-    aecLog("[AEC Calibration] Pre-aligned: trimmed %zu samples from ref start\n", offset);
+    aecLog(
+        "[AEC Calibration] Pre-aligned: trimmed %zu samples from ref start\n",
+        offset);
   }
 
   // Ensure we have enough data after alignment
   if (preAlignedRef.size() < 1024 || preAlignedMic.size() < 1024) {
-    aecLog("[AEC Calibration] Error: Not enough aligned data (ref=%zu, mic=%zu)\n",
-           preAlignedRef.size(), preAlignedMic.size());
+    aecLog(
+        "[AEC Calibration] Error: Not enough aligned data (ref=%zu, mic=%zu)\n",
+        preAlignedRef.size(), preAlignedMic.size());
     return result;
   }
 
   // Step 1: Alignment using DelayEstimator on pre-aligned signals
   // This now finds the ACOUSTIC delay only, not the thread timing offset
-  int estimatedDelay = DelayEstimator::estimateDelay(preAlignedRef, preAlignedMic);
+  int estimatedDelay =
+      DelayEstimator::estimateDelay(preAlignedRef, preAlignedMic);
 
   // Apply offset to place peak inside filter (causality margin)
   // Shift Mic BACK relative to Ref, so delay increases effectively?
@@ -331,20 +339,22 @@ CalibrationResult AECCalibration::analyze(unsigned int sampleRate) {
   return result;
 }
 
-CalibrationResult AECCalibration::analyzeAligned(
-    const std::vector<float>& alignedRef,
-    const std::vector<float>& alignedMic,
-    unsigned int sampleRate) {
+CalibrationResult
+AECCalibration::analyzeAligned(const std::vector<float> &alignedRef,
+                               const std::vector<float> &alignedMic,
+                               unsigned int sampleRate, int64_t initialOffset) {
 
   CalibrationResult result = {0, 0.0f, 0.0f, 0.0f, false, {}};
 
   if (alignedMic.empty() || alignedRef.empty()) {
-    aecLog("[AEC Calibration] analyzeAligned: Missing data (ref=%zu, mic=%zu)\n",
-           alignedRef.size(), alignedMic.size());
+    aecLog(
+        "[AEC Calibration] analyzeAligned: Missing data (ref=%zu, mic=%zu)\n",
+        alignedRef.size(), alignedMic.size());
     return result;
   }
 
-  aecLog("[AEC Calibration] analyzeAligned: Using frame-aligned buffers (ref=%zu, mic=%zu)\n",
+  aecLog("[AEC Calibration] analyzeAligned: Using frame-aligned buffers "
+         "(ref=%zu, mic=%zu)\n",
          alignedRef.size(), alignedMic.size());
 
   // Step 1: Delay estimation directly on aligned signals
@@ -366,7 +376,8 @@ CalibrationResult AECCalibration::analyzeAligned(
   // Step 2: Prepare Aligned Buffers for Training
   size_t trainingLen = 0;
   if (estimatedDelay >= 0 && estimatedDelay < (int)alignedMic.size()) {
-    trainingLen = std::min(alignedRef.size(), alignedMic.size() - estimatedDelay);
+    trainingLen =
+        std::min(alignedRef.size(), alignedMic.size() - estimatedDelay);
   }
 
   // Limit training length
@@ -392,7 +403,8 @@ CalibrationResult AECCalibration::analyzeAligned(
   // Step 3: Offline Training
   VssNlmsFilter trainer(2048);
 
-  aecLog("[AEC Calibration] Training filter on %zu aligned samples...\n", trainingLen);
+  aecLog("[AEC Calibration] Training filter on %zu aligned samples...\n",
+         trainingLen);
 
   trainer.setStepSize(1.0f);
   trainer.setSmoothingFactor(0.9f);
@@ -411,8 +423,8 @@ CalibrationResult AECCalibration::analyzeAligned(
     trainer.processSample(trainRef[i], trainMic[i]);
 
     if (i < 10 || (i % 5000) == 0) {
-      aecLog("[VSS-Aligned] i=%zu x=%.4f d=%.4f e=%.4f mu=%.6f wEnerg=%.6f\n", i,
-             trainRef[i], trainMic[i], trainer.getLastError(),
+      aecLog("[VSS-Aligned] i=%zu x=%.4f d=%.4f e=%.4f mu=%.6f wEnerg=%.6f\n",
+             i, trainRef[i], trainMic[i], trainer.getLastError(),
              trainer.getLastStepSize(), trainer.getCoeffEnergy());
     }
   }
@@ -435,7 +447,8 @@ CalibrationResult AECCalibration::analyzeAligned(
   result.correlation = trainer.getLastCorrelation();
 
   if (energy < 1e-6f) {
-    aecLog("[AEC Calibration] Warning: Low energy weights in aligned analysis.\n");
+    aecLog(
+        "[AEC Calibration] Warning: Low energy weights in aligned analysis.\n");
     result.success = false;
   } else {
     result.success = true;
@@ -449,12 +462,14 @@ CalibrationResult AECCalibration::analyzeAligned(
   aecLog("[AEC Calibration] Aligned Result: delay=%.2fms gain=%.3f corr=%.4f\n",
          result.delayMs, result.echoGain, result.correlation);
 
-  // The calibrated offset for position-based sync is simply the estimated delay
-  // since the aligned signals are already synchronized at frame level
-  result.calibratedOffset = result.delaySamples;
+  // The calibrated offset for position-based sync is the sum of the initial
+  // baseline offset (from hardware latency) and the discovered acoustic delay.
+  result.calibratedOffset = initialOffset + result.delaySamples;
 
-  aecLog("[AEC Calibration] Aligned calibratedOffset=%lld samples\n",
-         (long long)result.calibratedOffset);
+  aecLog("[AEC Calibration] Aligned calibratedOffset=%lld samples "
+         "(initial=%lld + acoustic=%d)\n",
+         (long long)result.calibratedOffset, (long long)initialOffset,
+         result.delaySamples);
 
   return result;
 }
@@ -468,7 +483,7 @@ void AECCalibration::reset() {
 }
 
 void AECCalibration::recordFrameCountersAtStart(size_t outputFrames,
-                                                 size_t captureFrames) {
+                                                size_t captureFrames) {
   sOutputFramesAtStart = outputFrames;
   sCaptureFramesAtStart = captureFrames;
   aecLog("[AEC Calibration] Frame counters recorded: output=%zu capture=%zu\n",

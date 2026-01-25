@@ -249,15 +249,14 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     }
   }
 
-  // Apply filters (SKIP during calibration to capture raw impulse response and
-  // save CPU)
-  static int filterDebugCounter = 0;
-  filterDebugCounter++;
   size_t filterCount = userData->mFilters->filters.size();
-  if (filterDebugCounter <= 5 || filterDebugCounter % 500 == 0) {
-    aecLog("[Capture CB #%d] filters=%zu calibActive=%d\n",
-           filterDebugCounter, filterCount, userData->mCalibrationActive);
+
+  static int captureCount = 0;
+  if (++captureCount % 187 == 0) {
+    aecLog("[Capture CB #%d] filters=%zu calibActive=%d\n", captureCount,
+           filterCount, userData->mCalibrationActive);
   }
+
   if (filterCount > 0 && !userData->mCalibrationActive) {
     // Set the capture frame count for AEC position-based sync BEFORE processing
     // This is the frame count at the START of this block (before we increment)
@@ -383,7 +382,8 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
 
   // Increment total frame counter for AEC synchronization
   // This must be done AFTER all processing to mark this block as complete
-  userData->mTotalFramesCaptured.fetch_add(frameCount, std::memory_order_release);
+  userData->mTotalFramesCaptured.fetch_add(frameCount,
+                                           std::memory_order_release);
 }
 
 // /////////////////////////////

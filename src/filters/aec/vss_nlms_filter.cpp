@@ -1,6 +1,5 @@
 #include "vss_nlms_filter.h"
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 
 extern void aecLog(const char *fmt, ...);
@@ -61,17 +60,23 @@ VssNlmsFilter::VssNlmsFilter(size_t taps) : filter_length(taps) {
   // so we use unaligned load/store intrinsics (loadu/storeu) which are fast on
   // modern CPUs.
   weights.resize(filter_length, 0.0f);
-  x_history.resize(filter_length, 0.0f);
+  x_history.resize(filter_length * 2, 0.0f);
+  mHistoryIndex = 0;
 }
 
 void VssNlmsFilter::reset() {
   std::fill(weights.begin(), weights.end(), 0.0f);
   std::fill(x_history.begin(), x_history.end(), 0.0f);
+  mHistoryIndex = 0;
   p_est = 0.0f;
   var_x = 0.0f;
   var_e = 0.0f;
   mLastE = 0.0f;
   mLastStep = 0.0f;
+  x_energy_total = 0.0f;
+  mMicEnergy = 0.0f;
+  mEchoEstEnergy = 0.0f;
+  mAppliedGain = 1.0f;
 }
 
 void VssNlmsFilter::resize(size_t newLength) {
@@ -84,7 +89,7 @@ void VssNlmsFilter::resize(size_t newLength) {
 
   // Resize and reinitialize vectors
   weights.resize(filter_length);
-  x_history.resize(filter_length);
+  x_history.resize(filter_length * 2);
 
   // Reset all state
   reset();
@@ -123,15 +128,19 @@ float VssNlmsFilter::getCoeffEnergy() const {
 }
 
 void VssNlmsFilter::updateHistory(float new_sample) {
-  // Shift history: x[n] -> x[n+1]
-  // memmove is generally highly optimized.
-  // For a circular buffer approach, we'd need more logic, but for < 4096 taps,
-  // this is negligible.
-  if (filter_length > 1) {
-    std::memmove(&x_history[1], &x_history[0],
-                 (filter_length - 1) * sizeof(float));
-  }
-  x_history[0] = new_sample;
+  // Mirrored circular buffer update
+  // We move the index backwards and mirror the sample to provide a contiguous
+  // chronological window starting at history[index].
+  mHistoryIndex = (mHistoryIndex == 0) ? filter_length - 1 : mHistoryIndex - 1;
+
+  float old_sample = x_history[mHistoryIndex]; // About to be overwritten
+  x_history[mHistoryIndex] = new_sample;
+  x_history[mHistoryIndex + filter_length] = new_sample;
+
+  // Incremental energy update: E = E + x[n]^2 - x[n-L]^2
+  x_energy_total += (new_sample * new_sample) - (old_sample * old_sample);
+  if (x_energy_total < 0.0f)
+    x_energy_total = 0.0f; // Safety against rounding drift
 }
 
 float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
@@ -148,23 +157,21 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   // and energy_x_inst = x_history * x_history
 
   // Raw pointers for speed
-  const float *p_x = x_history.data();
+  const float *p_x = x_history.data() + mHistoryIndex;
   float *p_w =
       weights.data(); // we will modify weights later, but for conv it reads
 
 #ifdef USE_NEON
   float32x4_t v_y_est = vdupq_n_f32(0.0f);
-  float32x4_t v_energy = vdupq_n_f32(0.0f);
 
   for (size_t i = 0; i < filter_length; i += 4) {
     float32x4_t v_x = vld1q_f32(p_x + i);
     float32x4_t v_w = vld1q_f32(p_w + i);
 
-    v_y_est = vmlaq_f32(v_y_est, v_w, v_x);   // y += w * x
-    v_energy = vmlaq_f32(v_energy, v_x, v_x); // energy += x * x
+    v_y_est = vmlaq_f32(v_y_est, v_w, v_x); // y += w * x
   }
   y_est = hsum_float32x4_nlms(v_y_est);
-  energy_x_inst = hsum_float32x4_nlms(v_energy);
+  energy_x_inst = x_energy_total;
 
 #elif defined(USE_AVX)
   __m256 v_y_est = _mm256_setzero_ps();
@@ -174,38 +181,60 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
     __m256 v_x = _mm256_loadu_ps(p_x + i);
     __m256 v_w = _mm256_loadu_ps(p_w + i);
 
-    // FMA is nice but simple mul/add is safer for compatibility if FMA flag is
-    // tricky
     v_y_est = _mm256_add_ps(v_y_est, _mm256_mul_ps(v_w, v_x));
-    v_energy = _mm256_add_ps(v_energy, _mm256_mul_ps(v_x, v_x));
   }
   y_est = hsum_float256_nlms(v_y_est);
-  energy_x_inst = hsum_float256_nlms(v_energy);
+  energy_x_inst = x_energy_total;
 
 #else
   // Scalar fallback
   for (size_t i = 0; i < filter_length; i++) {
     y_est += p_w[i] * p_x[i];
-    energy_x_inst += p_x[i] * p_x[i];
   }
+  energy_x_inst = x_energy_total;
 #endif
 
-  // 3. Calculate Error (Clean Signal)
-  float e = mic_input - y_est;
+  // 3. Ported Gain Limiting logic
+  // This prevents the echo estimate from exceeding the mic input amplitude,
+  // which eliminates "burbling" and "ringmod" sounds when the filter is
+  // partially diverged.
+  constexpr float GAIN_ENERGY_SMOOTH =
+      0.0005f; // Fast tracking for energy peaks
+  mMicEnergy = (1.0f - GAIN_ENERGY_SMOOTH) * mMicEnergy +
+               GAIN_ENERGY_SMOOTH * (mic_input * mic_input);
+  mEchoEstEnergy = (1.0f - GAIN_ENERGY_SMOOTH) * mEchoEstEnergy +
+                   GAIN_ENERGY_SMOOTH * (y_est * y_est);
+
+  float targetGain = 1.0f;
+  if (mEchoEstEnergy > 1e-9f && mMicEnergy > 1e-9f) {
+    float energyRatio = std::sqrt(mMicEnergy / mEchoEstEnergy);
+    targetGain = std::min(1.0f, energyRatio);
+  } else if (mEchoEstEnergy > mMicEnergy && mEchoEstEnergy > 1e-9f) {
+    // If mic is silent but we estimate echo, be conservative
+    targetGain = 0.0f;
+  }
+
+  // Smooth the gain factor itself to eliminate rapid amplitude modulation
+  constexpr float GAIN_SMOOTH_FACTOR = 0.0002f; // ~100ms smoothing
+  mAppliedGain = (1.0f - GAIN_SMOOTH_FACTOR) * mAppliedGain +
+                 GAIN_SMOOTH_FACTOR * targetGain;
+
+  // Apply smoothed gain to echo estimate
+  float adapted_y_est = mAppliedGain * y_est;
+
+  // 4. Calculate Error (Clean Signal)
+  float e = mic_input - adapted_y_est;
   mLastE = e;
-  mLastYEst = y_est; // Store for diagnostics
+  mLastYEst = adapted_y_est; // Store for diagnostics
 
-  // 4. Update VSS Statistics
-  // Is the error correlated with the reference?
-  // If e contains the loop (echo), it will be correlated with x.
-  // If e contains only clean guitar, it will be uncorrelated with x.
-
-  // We update p_est (Cross-Correlation Estimate)
+  // 5. Update VSS Statistics
+  // With alpha = 0.999, these statistics are averaged over ~1000 samples,
+  // preventing the step size from modulating at audio frequencies.
   p_est = alpha * p_est + (1.0f - alpha) * (e * aligned_ref);
   var_x = alpha * var_x + (1.0f - alpha) * (aligned_ref * aligned_ref);
   var_e = alpha * var_e + (1.0f - alpha) * (e * e);
 
-  // 5. Calculate Dynamic Step Size (Variable Step Size)
+  // 6. Calculate Dynamic Step Size (Variable Step Size)
   // Metric: (E[e*x])^2 / (E[e^2] * E[x^2]) -> Normalized Cross Correlation
   float correlation_metric = 0.0f;
   float denominator = var_e * var_x + epsilon;
@@ -213,9 +242,11 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
     correlation_metric = (p_est * p_est) / denominator;
   }
 
-  // Adapt step size: High correlation -> Large step. Low correlation -> Small
-  // step.
-  float mu_eff = mu_max * correlation_metric;
+  // Adapt step size: High correlation -> Large step.
+  // We use sqrt(correlation_metric) to use the linear correlation coefficient
+  // rather than squared correlation. This increases sensitivity for small
+  // correlations, helping the filter start converging from zero.
+  float mu_eff = mu_max * std::sqrt(correlation_metric);
 
   // Clamp for stability
   if (mu_eff > mu_max)
@@ -223,15 +254,14 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   mLastStep = mu_eff;
   mLastCorrelation = correlation_metric;
 
-  // 6. Update Weights
+  // 7. Update Weights
   // NLMS rule: w[n+1] = w[n] + (mu / (||x||^2 + eps)) * e[n] * x[n]
   float norm_factor = energy_x_inst + epsilon;
   float step = mu_eff / norm_factor;
   float final_step = step * e; // Pre-multiply error
 
-  static int vssDebugCount = 0;
   static int vssLogCount = 0;
-  if (vssLogCount++ % 500 == 0) {
+  if (vssLogCount++ % 48000 == 0) {
     aecLog("[VSS_RT] mu_eff=%.6f p_est=%.6f var_e=%.6f var_x=%.6f corr=%.6f\n",
            mu_eff, p_est, var_e, var_x, correlation_metric);
   }
@@ -249,7 +279,9 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
     float32x4_t v_x = vld1q_f32(p_x + i);
 
     // w = (w * leakage) + (step * x)
-    v_w = vmulq_f32(v_w, v_leak);
+    if (leakage < 0.99999f) {
+      v_w = vmulq_f32(v_w, v_leak);
+    }
     v_w = vmlaq_f32(v_w, v_step, v_x);
 
     vst1q_f32(p_w + i, v_w); // Store back
@@ -263,18 +295,169 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
     __m256 v_w = _mm256_loadu_ps(p_w + i);
     __m256 v_x = _mm256_loadu_ps(p_x + i);
 
-    v_w = _mm256_mul_ps(v_w, v_leak);
+    if (leakage < 0.99999f) {
+      v_w = _mm256_mul_ps(v_w, v_leak);
+    }
     v_w = _mm256_add_ps(v_w, _mm256_mul_ps(v_step, v_x));
 
     _mm256_storeu_ps(p_w + i, v_w);
   }
 #else
   for (size_t i = 0; i < filter_length; i++) {
-    p_w[i] = (p_w[i] * leakage) + (final_step * p_x[i]);
+    float w = p_w[i];
+    if (leakage < 0.99999f) {
+      w *= leakage;
+    }
+    p_w[i] = w + (final_step * p_x[i]);
   }
 #endif
 
   return e;
+}
+
+void VssNlmsFilter::processBlock(const float *ref_context,
+                                 const float *mic_input, float *out_error,
+                                 size_t num_samples) {
+  for (size_t s = 0; s < num_samples; ++s) {
+    // Current microphone sample
+    float mic_sample = mic_input[s];
+
+    // Reference context window for the current sample
+    // ref_context points to: [History (filter_length-1)] [Current Block
+    // (num_samples)] For sample 's', the relevant filter window starts at
+    // ref_context + s
+    const float *p_x = ref_context + s;
+    const float *p_w = weights.data();
+
+    float y_est = 0.0f;
+
+    // ============================================
+    // SIMD CONVOLUTION (Prediction)
+    // ============================================
+#ifdef USE_NEON
+    float32x4_t v_y_est = vdupq_n_f32(0.0f);
+    for (size_t i = 0; i < filter_length; i += 4) {
+      float32x4_t v_x = vld1q_f32(p_x + i);
+      float32x4_t v_w = vld1q_f32(p_w + i);
+      v_y_est = vmlaq_f32(v_y_est, v_w, v_x);
+    }
+    y_est = hsum_float32x4_nlms(v_y_est);
+#elif defined(USE_AVX)
+    __m256 v_y_est = _mm256_setzero_ps();
+    for (size_t i = 0; i < filter_length; i += 8) {
+      __m256 v_x = _mm256_loadu_ps(p_x + i);
+      __m256 v_w = _mm256_loadu_ps(p_w + i);
+      v_y_est = _mm256_add_ps(v_y_est, _mm256_mul_ps(v_w, v_x));
+    }
+    y_est = hsum_float256_nlms(v_y_est);
+#else
+    for (size_t i = 0; i < filter_length; i++) {
+      y_est += p_w[i] * p_x[i];
+    }
+#endif
+
+    // Gain Limiting
+    constexpr float GAIN_ENERGY_SMOOTH = 0.0005f;
+    mMicEnergy = (1.0f - GAIN_ENERGY_SMOOTH) * mMicEnergy +
+                 GAIN_ENERGY_SMOOTH * (mic_sample * mic_sample);
+    mEchoEstEnergy = (1.0f - GAIN_ENERGY_SMOOTH) * mEchoEstEnergy +
+                     GAIN_ENERGY_SMOOTH * (y_est * y_est);
+
+    float targetGain = 1.0f;
+    if (mEchoEstEnergy > 1e-9f && mMicEnergy > 1e-9f) {
+      targetGain = std::min(1.0f, std::sqrt(mMicEnergy / mEchoEstEnergy));
+    } else if (mEchoEstEnergy > mMicEnergy && mEchoEstEnergy > 1e-9f) {
+      targetGain = 0.0f;
+    }
+
+    constexpr float GAIN_SMOOTH_FACTOR = 0.0002f;
+    mAppliedGain = (1.0f - GAIN_SMOOTH_FACTOR) * mAppliedGain +
+                   GAIN_SMOOTH_FACTOR * targetGain;
+
+    float adapted_y_est = mAppliedGain * y_est;
+    float e = mic_sample - adapted_y_est;
+    out_error[s] = e;
+
+    mLastE = e;
+    mLastYEst = adapted_y_est;
+
+    // VSS Statistics
+    float ref_val =
+        p_x[filter_length - 1]; // Current sample in the context window
+    p_est = alpha * p_est + (1.0f - alpha) * (e * ref_val);
+    var_x = alpha * var_x + (1.0f - alpha) * (ref_val * ref_val);
+    var_e = alpha * var_e + (1.0f - alpha) * (e * e);
+
+    float correlation_metric = 0.0f;
+    float denominator = var_e * var_x + epsilon;
+    if (denominator > 1e-12f) {
+      correlation_metric = (p_est * p_est) / denominator;
+    }
+
+    float mu_eff = std::min(mu_max, mu_max * std::sqrt(correlation_metric));
+    mLastStep = mu_eff;
+    mLastCorrelation = correlation_metric;
+
+    // Weight Update Energy (Total energy of current window)
+    float energy_x = 0.0f;
+#ifdef USE_NEON
+    float32x4_t v_en = vdupq_n_f32(0.0f);
+    for (size_t i = 0; i < filter_length; i += 4) {
+      float32x4_t v_xi = vld1q_f32(p_x + i);
+      v_en = vmlaq_f32(v_en, v_xi, v_xi);
+    }
+    energy_x = hsum_float32x4_nlms(v_en);
+#elif defined(USE_AVX)
+    __m256 v_en = _mm256_setzero_ps();
+    for (size_t i = 0; i < filter_length; i += 8) {
+      __m256 v_xi = _mm256_loadu_ps(p_x + i);
+      v_en = _mm256_add_ps(v_en, _mm256_mul_ps(v_xi, v_xi));
+    }
+    energy_x = hsum_float256_nlms(v_en);
+#else
+    for (size_t i = 0; i < filter_length; i++) {
+      energy_x += p_x[i] * p_x[i];
+    }
+#endif
+
+    float step = mu_eff / (energy_x + epsilon);
+    float final_step = step * e;
+
+    // ============================================
+    // SIMD WEIGHT UPDATE
+    // ============================================
+    float *p_w_mutable = weights.data();
+#ifdef USE_NEON
+    float32x4_t v_step = vdupq_n_f32(final_step);
+    float32x4_t v_leak = vdupq_n_f32(leakage);
+    for (size_t i = 0; i < filter_length; i += 4) {
+      float32x4_t v_wi = vld1q_f32(p_w_mutable + i);
+      float32x4_t v_xi = vld1q_f32(p_x + i);
+      if (leakage < 0.99999f)
+        v_wi = vmulq_f32(v_wi, v_leak);
+      v_wi = vmlaq_f32(v_wi, v_step, v_xi);
+      vst1q_f32(p_w_mutable + i, v_wi);
+    }
+#elif defined(USE_AVX)
+    __m256 v_step = _mm256_set1_ps(final_step);
+    __m256 v_leak = _mm256_set1_ps(leakage);
+    for (size_t i = 0; i < filter_length; i += 8) {
+      __m256 v_wi = _mm256_loadu_ps(p_w_mutable + i);
+      __m256 v_xi = _mm256_loadu_ps(p_x + i);
+      if (leakage < 0.99999f)
+        v_wi = _mm256_mul_ps(v_wi, v_leak);
+      v_wi = _mm256_add_ps(v_wi, _mm256_mul_ps(v_step, v_xi));
+      _mm256_storeu_ps(p_w_mutable + i, v_wi);
+    }
+#else
+    for (size_t i = 0; i < filter_length; i++) {
+      float w = p_w_mutable[i];
+      if (leakage < 0.99999f)
+        w *= leakage;
+      p_w_mutable[i] = w + (final_step * p_x[i]);
+    }
+#endif
+  }
 }
 
 // ============================================
@@ -324,17 +507,6 @@ void VssNlmsFilter::warmStartWeights(const std::vector<float> &ref_signal,
     if (i < 5 || i % 10000 == 0) {
       aecLog("[VSS_DEBUG] i=%zu x=%.4f d=%.4f e=%.4f w[0]=%.4f p_est=%.4f\n", i,
              ref_signal[i], mic_signal[i], output, weights[0], p_est);
-    }
-    // Debug logging every 480 samples
-    if (i % 480 == 0) {
-      // Note: mu_eff, e, y, d, x_energy, ref_energy are not directly available
-      // here. 'output' is 'e' from processSample. 'mLastStep' is 'mu_eff'.
-      // 'mic_signal[i]' is 'd'.
-      // 'ref_signal[i]' is 'x'.
-      // 'y_est' is not directly available here.
-      // 'energy_x_inst' is not directly available here.
-      aecLog("[VSS_RT_TEST] i=%zu mu_eff=%.6f e=%.6f d=%.6f\n", i, mLastStep,
-             output, mic_signal[i]);
     }
   }
 

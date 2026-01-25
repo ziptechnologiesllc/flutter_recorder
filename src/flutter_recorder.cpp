@@ -433,7 +433,8 @@ FFI_PLUGIN_EXPORT void flutter_recorder_setMonitoringMode(int mode) {
 /////////////////////////
 
 // Callback function that SoLoud calls to send its output audio
-// Handles channel mismatch: converts SoLoud output to match reference buffer channels
+// Handles channel mismatch: converts SoLoud output to match reference buffer
+// channels
 static void aecOutputCallback(const float *data, size_t frameCount,
                               unsigned int channels) {
   if (g_aecReferenceBuffer == nullptr) {
@@ -446,9 +447,8 @@ static void aecOutputCallback(const float *data, size_t frameCount,
 
   unsigned int bufferCh = g_aecReferenceBuffer->channels();
 
-  // Log periodically with channel info
   static int callbackCount = 0;
-  if (++callbackCount % 100 == 0) {
+  if (++callbackCount % 187 == 0) {
     aecLog("[AEC Callback #%d] frames=%zu inputCh=%u bufferCh=%u\n",
            callbackCount, frameCount, channels, bufferCh);
   }
@@ -459,7 +459,8 @@ static void aecOutputCallback(const float *data, size_t frameCount,
   } else if (channels == 2 && bufferCh == 1) {
     // Stereo → Mono: average L+R
     static std::vector<float> mono;
-    if (mono.size() < frameCount) mono.resize(frameCount);
+    if (mono.size() < frameCount)
+      mono.resize(frameCount);
     for (size_t i = 0; i < frameCount; ++i) {
       mono[i] = (data[i * 2] + data[i * 2 + 1]) * 0.5f;
     }
@@ -467,7 +468,8 @@ static void aecOutputCallback(const float *data, size_t frameCount,
   } else if (channels == 1 && bufferCh == 2) {
     // Mono → Stereo: duplicate to both channels
     static std::vector<float> stereo;
-    if (stereo.size() < frameCount * 2) stereo.resize(frameCount * 2);
+    if (stereo.size() < frameCount * 2)
+      stereo.resize(frameCount * 2);
     for (size_t i = 0; i < frameCount; ++i) {
       stereo[i * 2] = stereo[i * 2 + 1] = data[i];
     }
@@ -541,8 +543,8 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_getMode() {
 /// Neural Model Control
 /////////////////////////
 
-FFI_PLUGIN_EXPORT int flutter_recorder_neural_loadModel(int modelType,
-                                                        const char *assetBasePath) {
+FFI_PLUGIN_EXPORT int
+flutter_recorder_neural_loadModel(int modelType, const char *assetBasePath) {
   if (!mFilters) {
     return 0; // Failure - filters not initialized
   }
@@ -946,8 +948,9 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationAnalysis(
     return 0;
   }
 
-  CalibrationResult result =
-      AECCalibration::analyzeAligned(alignedRef, alignedMic, sampleRate);
+  int64_t currentOffset = mFilters->getAecCalibratedOffset();
+  CalibrationResult result = AECCalibration::analyzeAligned(
+      alignedRef, alignedMic, sampleRate, currentOffset);
 
   *outDelaySamples = result.delaySamples;
   *outDelayMs = result.delayMs;
@@ -985,8 +988,9 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
     return 0;
   }
 
-  CalibrationResult result =
-      AECCalibration::analyzeAligned(alignedRef, alignedMic, sampleRate);
+  int64_t currentOffset = mFilters->getAecCalibratedOffset();
+  CalibrationResult result = AECCalibration::analyzeAligned(
+      alignedRef, alignedMic, sampleRate, currentOffset);
 
   *outDelaySamples = result.delaySamples;
   *outDelayMs = result.delayMs;
@@ -1010,4 +1014,3 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
 
   return result.success ? 1 : 0;
 }
-

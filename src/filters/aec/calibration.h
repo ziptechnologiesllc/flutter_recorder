@@ -1,11 +1,11 @@
 #ifndef AEC_CALIBRATION_H
 #define AEC_CALIBRATION_H
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <vector>
-#include <cmath>
 #include <random>
+#include <vector>
 
 /**
  * AEC Calibration System
@@ -22,129 +22,127 @@
  */
 
 struct CalibrationResult {
-    int delaySamples;      // Optimal delay in samples
-    float delayMs;         // Optimal delay in milliseconds (float for sub-ms precision)
-    float echoGain;        // Echo attenuation factor (0-1)
-    float correlation;     // Peak correlation coefficient (quality metric)
-    bool success;          // Whether calibration succeeded
-    std::vector<float> impulseResponse;  // NLMS initial coefficients from FFT deconvolution
-    int64_t calibratedOffset;  // Sample-accurate sync: captureFrame - offset = outputFrame
+  int delaySamples; // Optimal delay in samples
+  float delayMs;  // Optimal delay in milliseconds (float for sub-ms precision)
+  float echoGain; // Echo attenuation factor (0-1)
+  float correlation; // Peak correlation coefficient (quality metric)
+  bool success;      // Whether calibration succeeded
+  std::vector<float>
+      impulseResponse;      // NLMS initial coefficients from FFT deconvolution
+  int64_t calibratedOffset; // Sample-accurate sync: captureFrame - offset =
+                            // outputFrame
 };
 
 class AECCalibration {
 public:
-    // Click-based calibration: 5 clicks averaged for noise reduction
-    static constexpr int CLICK_COUNT = 5;              // Number of clicks to average
-    static constexpr int CLICK_SAMPLES = 5;            // Samples per click (short pulse)
-    static constexpr int CLICK_SPACING_MS = 600;       // 600ms between clicks for full IR capture
-    static constexpr int IR_LENGTH = 8192;             // Impulse response taps (~170ms @ 48kHz)
-    static constexpr float CLICK_AMPLITUDE = 0.8f;     // Loud but not clipping
-    static constexpr int TAIL_MS = 400;                // Silence after last click for full decay
-    static constexpr float MIN_PEAK_THRESHOLD = 0.01f; // Minimum peak to detect
+  // Click-based calibration: 5 clicks averaged for noise reduction
+  static constexpr int CLICK_COUNT = 5;   // Number of clicks to average
+  static constexpr int CLICK_SAMPLES = 5; // Samples per click (short pulse)
+  static constexpr int CLICK_SPACING_MS =
+      600; // 600ms between clicks for full IR capture
+  static constexpr int IR_LENGTH =
+      8192; // Impulse response taps (~170ms @ 48kHz)
+  static constexpr float CLICK_AMPLITUDE = 0.8f; // Loud but not clipping
+  static constexpr int TAIL_MS = 400; // Silence after last click for full decay
+  static constexpr float MIN_PEAK_THRESHOLD = 0.01f; // Minimum peak to detect
 
-    /**
-     * Generate calibration WAV file in memory.
-     * Contains: 5 clicks spaced 400ms apart + 400ms tail
-     * Total duration: ~2.4s
-     *
-     * @param sampleRate Sample rate in Hz
-     * @param channels Number of channels (1 or 2)
-     * @param outSize Output: size of returned buffer in bytes
-     * @return Pointer to WAV data (caller must free with delete[])
-     */
-    static uint8_t* generateCalibrationWav(
-        unsigned int sampleRate,
-        unsigned int channels,
-        size_t* outSize);
+  /**
+   * Generate calibration WAV file in memory.
+   * Contains: 5 clicks spaced 400ms apart + 400ms tail
+   * Total duration: ~2.4s
+   *
+   * @param sampleRate Sample rate in Hz
+   * @param channels Number of channels (1 or 2)
+   * @param outSize Output: size of returned buffer in bytes
+   * @return Pointer to WAV data (caller must free with delete[])
+   */
+  static uint8_t *generateCalibrationWav(unsigned int sampleRate,
+                                         unsigned int channels,
+                                         size_t *outSize);
 
-    /**
-     * Capture reference and mic signals for analysis.
-     * Call this AFTER calibration audio has finished playing.
-     *
-     * @param referenceBuffer Data from AEC reference buffer (clean playback)
-     * @param referenceLen Length in samples
-     * @param micBuffer Data from microphone ring buffer
-     * @param micLen Length in samples
-     */
-    static void captureSignals(
-        const float* referenceBuffer,
-        size_t referenceLen,
-        const float* micBuffer,
-        size_t micLen);
+  /**
+   * Capture reference and mic signals for analysis.
+   * Call this AFTER calibration audio has finished playing.
+   *
+   * @param referenceBuffer Data from AEC reference buffer (clean playback)
+   * @param referenceLen Length in samples
+   * @param micBuffer Data from microphone ring buffer
+   * @param micLen Length in samples
+   */
+  static void captureSignals(const float *referenceBuffer, size_t referenceLen,
+                             const float *micBuffer, size_t micLen);
 
-    /**
-     * Run cross-correlation analysis on captured signals.
-     *
-     * @param sampleRate Sample rate for converting delay to milliseconds
-     * @return Calibration results including optimal delay
-     */
-    static CalibrationResult analyze(unsigned int sampleRate);
+  /**
+   * Run cross-correlation analysis on captured signals.
+   *
+   * @param sampleRate Sample rate for converting delay to milliseconds
+   * @return Calibration results including optimal delay
+   */
+  static CalibrationResult analyze(unsigned int sampleRate);
 
-    /**
-     * Run analysis using frame-aligned ref/mic buffers from AEC processAudio.
-     * These buffers are captured from the same callback at the same time,
-     * providing perfect frame alignment for accurate delay estimation.
-     *
-     * @param alignedRef Reference signal from AEC processAudio (already aligned)
-     * @param alignedMic Mic signal from AEC processAudio (already aligned)
-     * @param sampleRate Sample rate for converting delay to milliseconds
-     * @return Calibration results including optimal delay
-     */
-    static CalibrationResult analyzeAligned(
-        const std::vector<float>& alignedRef,
-        const std::vector<float>& alignedMic,
-        unsigned int sampleRate);
+  /**
+   * Run analysis using frame-aligned ref/mic buffers from AEC processAudio.
+   * These buffers are captured from the same callback at the same time,
+   * providing perfect frame alignment for accurate delay estimation.
+   *
+   * @param alignedRef Reference signal from AEC processAudio (already aligned)
+   * @param alignedMic Mic signal from AEC processAudio (already aligned)
+   * @param sampleRate Sample rate for converting delay to milliseconds
+   * @return Calibration results including optimal delay
+   */
+  static CalibrationResult analyzeAligned(const std::vector<float> &alignedRef,
+                                          const std::vector<float> &alignedMic,
+                                          unsigned int sampleRate,
+                                          int64_t initialOffset = 0);
 
-    /**
-     * Clear captured signal buffers.
-     */
-    static void reset();
+  /**
+   * Clear captured signal buffers.
+   */
+  static void reset();
 
-    /**
-     * Record frame counters at calibration start.
-     * Call this when the calibration signal starts playing.
-     *
-     * @param outputFrames Current output frame count from reference buffer
-     * @param captureFrames Current capture frame count from Capture
-     */
-    static void recordFrameCountersAtStart(size_t outputFrames, size_t captureFrames);
+  /**
+   * Record frame counters at calibration start.
+   * Call this when the calibration signal starts playing.
+   *
+   * @param outputFrames Current output frame count from reference buffer
+   * @param captureFrames Current capture frame count from Capture
+   */
+  static void recordFrameCountersAtStart(size_t outputFrames,
+                                         size_t captureFrames);
 
-    /**
-     * Get captured reference signal for visualization.
-     * @param dest Destination buffer
-     * @param maxLength Maximum samples to copy
-     * @return Number of samples copied
-     */
-    static int getRefSignal(float* dest, int maxLength);
+  /**
+   * Get captured reference signal for visualization.
+   * @param dest Destination buffer
+   * @param maxLength Maximum samples to copy
+   * @return Number of samples copied
+   */
+  static int getRefSignal(float *dest, int maxLength);
 
-    /**
-     * Get captured mic signal for visualization.
-     * @param dest Destination buffer
-     * @param maxLength Maximum samples to copy
-     * @return Number of samples copied
-     */
-    static int getMicSignal(float* dest, int maxLength);
+  /**
+   * Get captured mic signal for visualization.
+   * @param dest Destination buffer
+   * @param maxLength Maximum samples to copy
+   * @return Number of samples copied
+   */
+  static int getMicSignal(float *dest, int maxLength);
 
 private:
-    /**
-     * Write WAV header to buffer.
-     */
-    static void writeWavHeader(
-        uint8_t* buffer,
-        unsigned int sampleRate,
-        unsigned int channels,
-        size_t numSamples);
+  /**
+   * Write WAV header to buffer.
+   */
+  static void writeWavHeader(uint8_t *buffer, unsigned int sampleRate,
+                             unsigned int channels, size_t numSamples);
 
-    // Internal buffers for captured signals
-    static std::vector<float> sRefCapture;
-    static std::vector<float> sMicCapture;
+  // Internal buffers for captured signals
+  static std::vector<float> sRefCapture;
+  static std::vector<float> sMicCapture;
 
-    // Generated calibration signal (stored for use as reference)
-    static std::vector<float> sGeneratedSignal;
+  // Generated calibration signal (stored for use as reference)
+  static std::vector<float> sGeneratedSignal;
 
-    // Frame counters recorded at calibration start
-    static size_t sOutputFramesAtStart;
-    static size_t sCaptureFramesAtStart;
+  // Frame counters recorded at calibration start
+  static size_t sOutputFramesAtStart;
+  static size_t sCaptureFramesAtStart;
 };
 
 #endif // AEC_CALIBRATION_H
