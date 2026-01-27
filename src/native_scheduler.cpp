@@ -11,6 +11,10 @@ extern std::atomic<bool> g_recordingScheduledOrActive;
 // External function from flutter_recorder.cpp to store recorded audio
 extern void storeRecordedAudio(float* data, size_t frameCount);
 
+// External WAV path storage - set by scheduler, used by worker thread
+extern char g_pendingWavPath[512];
+extern std::atomic<bool> g_pendingWavWrite;
+
 #ifdef _IS_ANDROID_
 #include <android/log.h>
 #define SCHED_LOG(fmt, ...) __android_log_print(ANDROID_LOG_INFO, "NativeScheduler", fmt, ##__VA_ARGS__)
@@ -138,6 +142,10 @@ uint32_t NativeScheduler::scheduleEvent(SchedulerAction action, int64_t targetFr
 }
 
 uint32_t NativeScheduler::scheduleQuantizedStart(const char* recordingPath) {
+    // CRITICAL: Clear any stale notifications from previous recordings
+    // Without this, Dart polling picks up old events and corrupts state
+    clearNotifications();
+
     int64_t currentFrame = mGlobalFramePosition.load(std::memory_order_acquire);
     int64_t loopFrames = mBaseLoopFrames.load(std::memory_order_acquire);
     int64_t loopStartFrame = mBaseLoopStartFrame.load(std::memory_order_acquire);
@@ -282,7 +290,7 @@ void NativeScheduler::processEvents(int64_t bufferStartFrame, uint32_t frameCoun
 void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                                     Capture* capture) {
     if (capture == nullptr) {
-        SCHED_LOG("executeEvent: capture is null!");
+        // AUDIO THREAD: No printf allowed
         return;
     }
 
@@ -290,9 +298,9 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
 
     switch (action) {
         case SchedulerAction::StartRecording:
+            // AUDIO THREAD: No printf allowed - use SCHED_DEBUG (disabled in production)
             if (event.recordingPath[0] != '\0') {
-                SCHED_LOG("executeEvent: startRecording path=%s at frame %lld",
-                          event.recordingPath, (long long)currentFrame);
+                SCHED_DEBUG("executeEvent: startRecording at frame %lld", (long long)currentFrame);
                 // Store path for stop callback
                 strncpy(mActiveRecordingPath, event.recordingPath, sizeof(mActiveRecordingPath) - 1);
                 mActiveRecordingPath[sizeof(mActiveRecordingPath) - 1] = '\0';
@@ -310,38 +318,34 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                     }
                     g_nativeRingBuffer->startRecording(latencyFrames > 0 ? (size_t)latencyFrames : 0);
                     mRecordingStartTotalFrame = g_nativeRingBuffer->getRecordingStartFrame();
-                    SCHED_LOG("Ring buffer recording started, startTotalFrame=%zu, latencyComp=%lld, loopMode=%s",
-                              mRecordingStartTotalFrame, (long long)latencyFrames,
-                              loopFrames > 0 ? "yes" : "no");
+                    SCHED_DEBUG("Ring buffer recording started, latencyComp=%lld", (long long)latencyFrames);
 
                     // Notify Dart that recording has started
                     if (dartRecordingStartedCallback != nullptr) {
                         dartRecordingStartedCallback(currentFrame, event.recordingPath);
                     }
-
-                    // NOTE: STOP event is now scheduled upfront in scheduleQuantizedStart()
-                    // when both START and STOP are queued together
                 } else {
-                    SCHED_LOG("executeEvent: WARNING - no ring buffer, falling back to capture");
+                    SCHED_DEBUG("executeEvent: no ring buffer, falling back to capture");
                     CaptureErrors err = capture->startRecording(event.recordingPath);
                     if (err != captureNoError) {
-                        SCHED_LOG("executeEvent: startRecording failed with error %d", (int)err);
+                        SCHED_DEBUG("executeEvent: startRecording failed with error %d", (int)err);
                         mActiveRecordingPath[0] = '\0';
                         g_recordingScheduledOrActive.store(false, std::memory_order_release);
                     } else {
-                        // Notify Dart that recording has started (fallback path)
                         if (dartRecordingStartedCallback != nullptr) {
                             dartRecordingStartedCallback(currentFrame, event.recordingPath);
                         }
                     }
                 }
             } else {
-                SCHED_LOG("executeEvent: StartRecording but no path!");
+                SCHED_DEBUG("executeEvent: StartRecording but no path!");
             }
             break;
 
         case SchedulerAction::StopRecording:
             {
+                // AUDIO THREAD: No printf/fprintf allowed here!
+                // All logging changed to SCHED_DEBUG (disabled in production)
                 SCHED_DEBUG("executeEvent: stopRecording at frame %lld", (long long)currentFrame);
 
                 // Determine WAV path: prefer mActiveRecordingPath (loop mode), fallback to event.recordingPath (free mode)
@@ -357,29 +361,24 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                     if (audioData != nullptr && frameCount > 0) {
                         recordedFrames = (int64_t)frameCount;
 
-                        // Store audio for Dart access (transfers ownership - do NOT delete audioData)
-                        // Dart can access this via flutter_recorder_getRecordedAudio()
-                        storeRecordedAudio(audioData, frameCount);
-                        SCHED_LOG("Stored %zu frames for Dart access", frameCount);
-
-                        // Also write to WAV file if path provided
+                        // Set pending WAV path for worker thread to write
+                        // This avoids file I/O on audio thread (glitch-free)
                         if (wavPath[0] != '\0') {
-                            SCHED_LOG("Writing to WAV: %s", wavPath);
-
-                            // Initialize WAV and write all at once
-                            CaptureErrors err = capture->startRecording(wavPath);
-                            if (err == captureNoError) {
-                                capture->wav.write((void*)audioData, frameCount);
-                                capture->stopRecording();
-                                SCHED_LOG("WAV file written successfully");
-                            } else {
-                                SCHED_LOG("Failed to create WAV file: error %d", (int)err);
-                            }
+                            strncpy(g_pendingWavPath, wavPath, sizeof(g_pendingWavPath) - 1);
+                            g_pendingWavPath[sizeof(g_pendingWavPath) - 1] = '\0';
+                            g_pendingWavWrite.store(true, std::memory_order_release);
+                            SCHED_DEBUG("WAV path set for worker thread: %s", wavPath);
                         }
-                        // Note: audioData ownership transferred to storeRecordedAudio - do NOT delete here
+
+                        // Store audio for worker thread (transfers ownership)
+                        // Worker will write WAV first, then pass to SoLoud
+                        storeRecordedAudio(audioData, frameCount);
+                        SCHED_DEBUG("Stored %zu frames for worker thread", frameCount);
+                        // Note: audioData ownership transferred - do NOT delete here
                     } else {
-                        SCHED_LOG("No audio data extracted (frames=%zu)", frameCount);
-                        if (audioData) delete[] audioData;
+                        SCHED_DEBUG("No audio data extracted (frames=%zu)", frameCount);
+                        // NOTE: Intentionally NOT calling delete[] on audio thread
+                        // Let it leak rather than risk blocking
                     }
                 } else {
                     // Fallback: capture was used directly
@@ -387,8 +386,7 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                     recordedFrames = currentFrame - mRecordingStartFrame;
                 }
 
-                SCHED_LOG("Recording stopped: %lld frames, path=%s",
-                          (long long)recordedFrames, wavPath);
+                SCHED_DEBUG("Recording stopped: %lld frames", (long long)recordedFrames);
 
                 if (dartRecordingStoppedCallback != nullptr && wavPath[0] != '\0') {
                     dartRecordingStoppedCallback(recordedFrames, wavPath);
@@ -463,6 +461,13 @@ bool NativeScheduler::hasNotifications() const {
     uint32_t readIdx = mNotifyReadIdx.load(std::memory_order_acquire);
     uint32_t writeIdx = mNotifyWriteIdx.load(std::memory_order_acquire);
     return readIdx != writeIdx;
+}
+
+void NativeScheduler::clearNotifications() {
+    // Reset queue indices to effectively clear all pending notifications
+    mNotifyWriteIdx.store(0, std::memory_order_release);
+    mNotifyReadIdx.store(0, std::memory_order_release);
+    SCHED_DEBUG("clearNotifications: queue cleared");
 }
 
 // ==================== STATE ACCESSORS ====================

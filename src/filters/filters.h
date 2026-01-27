@@ -100,12 +100,20 @@ public:
   std::atomic<uint64_t> mFilterMissCount{0};    // Times we skipped due to lock
   std::atomic<uint64_t> mFilterProcessCount{0}; // Times we successfully processed
 
+  // Lock-free filter count for hot path (updated when filters added/removed)
+  std::atomic<size_t> mFilterCountCached{0};
+
   // Thread-safe method to process all filters (for use in audio callback)
   void processAllFilters(void* pInput, ma_uint32 frameCount,
                          unsigned int channels, ma_format format);
 
   // Thread-safe method to get filter count (for use in audio callback)
   size_t getFilterCount() const;
+
+  // Lock-free check if any filters exist (for hot path optimization)
+  bool hasFilters() const {
+    return mFilterCountCached.load(std::memory_order_relaxed) > 0;
+  }
 
   // Debug stats for overlay
   uint64_t getFilterMissCount() const { return mFilterMissCount.load(std::memory_order_relaxed); }

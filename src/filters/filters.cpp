@@ -82,6 +82,9 @@ CaptureErrors Filters::addFilter(RecorderFilterType filterType) {
   /// processed inside the callback.
   filters.push_back(std::move(nfo));
 
+  // Update cached count for lock-free hot path check
+  mFilterCountCached.store(filters.size(), std::memory_order_release);
+
   aecLog("[Filters] Added filter type %d, now have %zu filters\n",
          static_cast<int>(filterType), filters.size());
 
@@ -99,6 +102,9 @@ CaptureErrors Filters::removeFilter(RecorderFilterType filterType) {
 
   /// remove the filter from the list
   filters.erase(filters.begin() + index);
+
+  // Update cached count for lock-free hot path check
+  mFilterCountCached.store(filters.size(), std::memory_order_release);
 
   return CaptureErrors::captureNoError;
 }

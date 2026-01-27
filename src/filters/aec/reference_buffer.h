@@ -151,9 +151,10 @@ public:
                "RMS=%.4f\n",
                mCalibrationData.size(), copyRms);
       }
-    } else {
-      mCalibrationCapturedFrames += frameCount;
     }
+    // Note: Don't increment mCalibrationCapturedFrames in else branch
+    // - it's only meaningful during active calibration
+    // - incrementing every write wastes cycles when AEC is disabled
 
     // Update write position atomically
     mWritePos.store((writePos + samplesToWrite) % mBuffer.size(),

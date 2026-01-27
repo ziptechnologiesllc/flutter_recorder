@@ -131,6 +131,9 @@ public:
     /// Check if there are pending notifications
     bool hasNotifications() const;
 
+    /// Clear all pending notifications (call before starting new recording)
+    void clearNotifications();
+
     // ===================== STATE ACCESSORS =====================
 
     /// Get current global frame position

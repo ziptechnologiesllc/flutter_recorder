@@ -96,10 +96,13 @@ public:
 
   /**
    * Stop recording and extract the recorded audio.
-   * Returns allocated buffer that caller must free, or nullptr on error.
+   * Returns pointer to pre-allocated output buffer (caller must NOT free).
+   * Buffer is valid until next stopRecording() call.
+   *
+   * AUDIO THREAD SAFE: No allocations, just memcpy to pre-allocated buffer.
    *
    * @param outFrameCount Output: number of frames in returned buffer
-   * @return Pointer to interleaved float samples (caller owns), or nullptr
+   * @return Pointer to interleaved float samples (ring buffer owns), or nullptr
    */
   float* stopRecording(size_t* outFrameCount);
 
@@ -193,6 +196,9 @@ private:
   size_t mRecordingStartWritePos{0};  // Buffer position when recording started
   size_t mMaxRecordingFrames{0};      // Pre-calculated max based on RAM
   bool mPreAllocated{false};          // Whether buffer is pre-allocated for recording
+
+  // Pre-allocated output buffer for stopRecording() - avoids allocation on audio thread
+  std::vector<float> mOutputBuffer;
 };
 
 // Global ring buffer pointer (set during initialization)

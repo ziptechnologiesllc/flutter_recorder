@@ -12,13 +12,15 @@
 #include "native_scheduler.h"
 #include "soloud_slave_bridge.h"
 
+#include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <thread>
-#include <atomic>
 
 #include "enums.h"
 
@@ -54,8 +56,15 @@ static LooperLoadAndPlayRawFunc g_looperBridge = nullptr;
 
 // Worker thread for looper bridge (avoids blocking audio thread)
 static std::thread g_looperWorkerThread;
-static std::atomic<bool> g_looperWorkReady{false};
 static std::atomic<bool> g_looperWorkerRunning{false};
+static std::mutex g_looperMutex;
+static std::condition_variable g_looperCondVar;
+static std::atomic<bool> g_looperWorkPending{false};
+
+// Pending WAV path for worker thread to write (set by scheduler, read by worker)
+// Not static - accessed from native_scheduler.cpp via extern
+char g_pendingWavPath[512] = {0};
+std::atomic<bool> g_pendingWavWrite{false};
 
 // Forward declarations for recorded audio storage (defined later in file)
 extern float* g_lastRecordedAudio;
@@ -63,53 +72,141 @@ extern size_t g_lastRecordedFrameCount;
 extern unsigned int g_lastRecordedChannels;
 extern unsigned int g_lastRecordedSampleRate;
 
-// Worker thread function - waits for work, calls looper bridge
+// Write WAV file from recorded float samples (called from worker thread)
+static void writeWavToFile(const char* path, const float* samples,
+                            size_t frameCount, unsigned int sampleRate,
+                            unsigned int channels) {
+  if (path == nullptr || path[0] == '\0' || samples == nullptr || frameCount == 0) {
+    return;
+  }
+
+  FILE* file = fopen(path, "wb");
+  if (file == nullptr) {
+    fprintf(stderr, "[Looper Worker] Failed to open WAV file for writing: %s\n", path);
+    return;
+  }
+
+  const size_t numSamples = frameCount * channels;
+  const size_t audioBytes = numSamples * sizeof(float);
+  const size_t wavSize = 44 + audioBytes;
+
+  // Build and write WAV header (44 bytes, F32LE format)
+  uint8_t header[44];
+  uint8_t* p = header;
+
+  // RIFF header
+  memcpy(p, "RIFF", 4); p += 4;
+  uint32_t chunkSize = (uint32_t)(wavSize - 8);
+  memcpy(p, &chunkSize, 4); p += 4;
+  memcpy(p, "WAVE", 4); p += 4;
+
+  // fmt subchunk
+  memcpy(p, "fmt ", 4); p += 4;
+  uint32_t subchunk1Size = 16;
+  memcpy(p, &subchunk1Size, 4); p += 4;
+  uint16_t audioFormat = 3;  // IEEE float
+  memcpy(p, &audioFormat, 2); p += 2;
+  uint16_t numCh = (uint16_t)channels;
+  memcpy(p, &numCh, 2); p += 2;
+  uint32_t sr = sampleRate;
+  memcpy(p, &sr, 4); p += 4;
+  uint32_t byteRate = sampleRate * channels * sizeof(float);
+  memcpy(p, &byteRate, 4); p += 4;
+  uint16_t blockAlign = (uint16_t)(channels * sizeof(float));
+  memcpy(p, &blockAlign, 2); p += 2;
+  uint16_t bitsPerSample = 32;
+  memcpy(p, &bitsPerSample, 2); p += 2;
+
+  // data subchunk
+  memcpy(p, "data", 4); p += 4;
+  uint32_t subchunk2Size = (uint32_t)audioBytes;
+  memcpy(p, &subchunk2Size, 4); p += 4;
+
+  // Write header
+  fwrite(header, 1, 44, file);
+
+  // Write audio data
+  fwrite(samples, 1, audioBytes, file);
+
+  fclose(file);
+
+  fprintf(stderr, "[Looper Worker] WAV written: %s (%zu frames @ %u Hz, %u ch)\n",
+          path, frameCount, sampleRate, channels);
+}
+
+// Worker thread function - waits for async notification, processes work
 static void looperWorkerThreadFunc() {
   fprintf(stderr, "[Looper Worker] Thread started\n");
 
   while (g_looperWorkerRunning.load(std::memory_order_acquire)) {
-    // Spin-wait for work (low latency, no syscalls)
-    if (g_looperWorkReady.load(std::memory_order_acquire)) {
-      g_looperWorkReady.store(false, std::memory_order_release);
-
-      // Do the actual work - this can block, we're not on audio thread
-      if (g_looperBridge != nullptr &&
-          g_lastRecordedAudio != nullptr &&
-          g_lastRecordedFrameCount > 0) {
-
-        unsigned int numSamples = g_lastRecordedFrameCount * g_lastRecordedChannels;
-        fprintf(stderr, "[Looper Worker] Starting playback: %u samples (%zu frames, %u ch @ %u Hz)\n",
-                numSamples, g_lastRecordedFrameCount, g_lastRecordedChannels, g_lastRecordedSampleRate);
-
-        unsigned int handle = 0;
-        // Pass raw float samples directly - no WAV container!
-        // copy=false: SoLoud uses our buffer directly (zero copy)
-        // takeOwnership=true: SoLoud will free the buffer when sound is disposed
-        unsigned int soundHash = g_looperBridge(
-            g_lastRecordedAudio,
-            numSamples,
-            (float)g_lastRecordedSampleRate,
-            g_lastRecordedChannels,
-            false,  // copy - NO COPY, use buffer directly
-            true,   // takeOwnership - SoLoud frees when done
-            &handle
-        );
-
-        if (soundHash != 0) {
-          // SoLoud now owns the buffer - clear our pointer
-          g_lastRecordedAudio = nullptr;
-          g_lastRecordedFrameCount = 0;
-          fprintf(stderr, "[Looper Worker] Playback started: hash=%u handle=%u (buffer ownership transferred)\n",
-                  soundHash, handle);
-        } else {
-          fprintf(stderr, "[Looper Worker] Failed to start playback\n");
-        }
-      }
+    // Wait for work notification (no polling, no CPU waste)
+    {
+      std::unique_lock<std::mutex> lock(g_looperMutex);
+      g_looperCondVar.wait(lock, [] {
+        return g_looperWorkPending.load(std::memory_order_acquire) ||
+               !g_looperWorkerRunning.load(std::memory_order_acquire);
+      });
+      g_looperWorkPending.store(false, std::memory_order_release);
     }
 
-    // Brief sleep to avoid burning CPU when idle
-    // 500us is still very low latency for playback start
-    std::this_thread::sleep_for(std::chrono::microseconds(500));
+    // Check if we're shutting down
+    if (!g_looperWorkerRunning.load(std::memory_order_acquire)) {
+      break;
+    }
+
+    // Do the actual work - this can block, we're not on audio thread
+    if (g_lastRecordedAudio != nullptr && g_lastRecordedFrameCount > 0) {
+      unsigned int numSamples = g_lastRecordedFrameCount * g_lastRecordedChannels;
+      fprintf(stderr, "[Looper Worker] Processing: %u samples (%zu frames, %u ch @ %u Hz)\n",
+              numSamples, g_lastRecordedFrameCount, g_lastRecordedChannels, g_lastRecordedSampleRate);
+
+      // STEP 1: Write WAV file BEFORE passing to SoLoud
+      // (SoLoud will deinterleave the data, so we must write first)
+      if (g_pendingWavPath[0] != '\0') {
+        writeWavToFile(g_pendingWavPath, g_lastRecordedAudio,
+                       g_lastRecordedFrameCount, g_lastRecordedSampleRate,
+                       g_lastRecordedChannels);
+        g_pendingWavPath[0] = '\0';  // Clear after writing
+        g_pendingWavWrite.store(false, std::memory_order_release);
+      }
+
+      // STEP 2: Start playback via looper bridge (if available)
+      if (g_looperBridge != nullptr) {
+        // Make a copy for SoLoud - the original buffer is owned by ring buffer
+        // Allocation is OK here since we're on the worker thread, not audio thread
+        float* audioCopy = new (std::nothrow) float[numSamples];
+        if (audioCopy != nullptr) {
+          std::memcpy(audioCopy, g_lastRecordedAudio, numSamples * sizeof(float));
+
+          unsigned int handle = 0;
+          unsigned int soundHash = g_looperBridge(
+              audioCopy,
+              numSamples,
+              (float)g_lastRecordedSampleRate,
+              g_lastRecordedChannels,
+              false,  // copy - NO COPY, we already copied
+              true,   // takeOwnership - SoLoud frees audioCopy when done
+              &handle
+          );
+
+          if (soundHash != 0) {
+            fprintf(stderr, "[Looper Worker] Playback started: hash=%u handle=%u\n",
+                    soundHash, handle);
+          } else {
+            fprintf(stderr, "[Looper Worker] Failed to start playback\n");
+            delete[] audioCopy;  // Clean up on failure
+          }
+        } else {
+          fprintf(stderr, "[Looper Worker] Failed to allocate audio copy\n");
+        }
+      } else {
+        fprintf(stderr, "[Looper Worker] No looper bridge, WAV only mode\n");
+      }
+
+      // Clear pointer (ring buffer still owns the memory)
+      g_lastRecordedAudio = nullptr;
+      g_lastRecordedFrameCount = 0;
+    }
   }
 
   fprintf(stderr, "[Looper Worker] Thread exiting\n");
@@ -132,7 +229,10 @@ static void stopLooperWorkerThread() {
     return; // Not running
   }
 
+  // Signal shutdown and wake worker thread
   g_looperWorkerRunning.store(false, std::memory_order_release);
+  g_looperCondVar.notify_one();
+
   if (g_looperWorkerThread.joinable()) {
     g_looperWorkerThread.join();
   }
@@ -1724,16 +1824,11 @@ FFI_PLUGIN_EXPORT void flutter_recorder_freeRecordedAudio() {
 
 // Internal: Store recorded audio from native ring buffer stopRecording
 // Called by native_scheduler.cpp when recording stops
+// AUDIO THREAD SAFE: No fprintf, no locks, no blocking allocations
 void storeRecordedAudio(float* data, size_t frameCount) {
-  // Free previous recording if any
-  if (g_lastRecordedAudio != nullptr) {
-    delete[] g_lastRecordedAudio;
-  }
-  if (g_recordedWavData != nullptr) {
-    delete[] g_recordedWavData;
-    g_recordedWavData = nullptr;
-    g_recordedWavSize = 0;
-  }
+  // NOTE: We intentionally do NOT free previous buffers here.
+  // delete[] can block on the audio thread. The worker thread
+  // or Dart should handle cleanup via freeRecordedAudio().
 
   g_lastRecordedAudio = data;
   g_lastRecordedFrameCount = frameCount;
@@ -1744,24 +1839,13 @@ void storeRecordedAudio(float* data, size_t frameCount) {
     g_lastRecordedSampleRate = g_nativeRingBuffer->sampleRate();
   }
 
-  size_t totalSamples = frameCount * g_lastRecordedChannels;
-  fprintf(stderr, "[Recorder] Stored recorded audio: %zu frames, %zu totalSamples @ %uHz, %u ch\n",
-          frameCount, totalSamples, g_lastRecordedSampleRate, g_lastRecordedChannels);
-
-  // Debug: Print first few samples to verify stereo interleaving
-  if (data != nullptr && frameCount > 10) {
-    fprintf(stderr, "[Recorder] First 8 samples (L R L R...): ");
-    for (int i = 0; i < 8 && i < (int)totalSamples; i++) {
-      fprintf(stderr, "%.4f ", data[i]);
-    }
-    fprintf(stderr, "\n");
-  }
-
-  // LOOPER BRIDGE: Signal worker thread to build WAV and start playback
-  // IMPORTANT: Audio thread does NO allocations, NO locks, NO syscalls
-  // Just set atomic flag - worker thread does the heavy lifting
-  if (g_looperBridge != nullptr && frameCount > 0) {
-    fprintf(stderr, "[Recorder] Signaling looper worker thread\n");
-    g_looperWorkReady.store(true, std::memory_order_release);
+  // Signal worker thread via condition variable
+  // AUDIO THREAD SAFE: notify_one() without lock is safe here because:
+  // 1. We set the atomic flag first (worker checks this in wait predicate)
+  // 2. notify_one() is lock-free on most platforms
+  // 3. If worker misses the notify, it will see the flag on next check
+  if (frameCount > 0) {
+    g_looperWorkPending.store(true, std::memory_order_release);
+    g_looperCondVar.notify_one();
   }
 }

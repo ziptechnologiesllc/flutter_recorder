@@ -94,14 +94,15 @@ void NativeRingBuffer::preAllocateForRecording() {
   // Calculate and cache max recording frames
   mMaxRecordingFrames = getMaxRecordingFrames();
 
-  // Pre-allocate buffer to max size (resize, not reserve - avoids reallocations during recording)
+  // Pre-allocate both input and output buffers
   size_t maxSamples = mMaxRecordingFrames * mChannels;
 
   printf("[RingBuffer] Pre-allocating %zu samples (%zu MB) for recording\n",
          maxSamples, (maxSamples * sizeof(float)) / (1024 * 1024));
 
   try {
-    mBuffer.resize(maxSamples, 0.0f);  // Actually allocate and zero
+    mBuffer.resize(maxSamples, 0.0f);       // Input buffer (recording)
+    mOutputBuffer.resize(maxSamples, 0.0f); // Output buffer (for stopRecording)
     mPreAllocated = true;
     printf("[RingBuffer] Pre-allocation successful (buffer size: %zu)\n", mBuffer.size());
   } catch (const std::bad_alloc& e) {
@@ -138,20 +139,10 @@ void NativeRingBuffer::write(const float *data, size_t frameCount, unsigned int 
   // Use actualChannels if provided (non-zero), otherwise use configured mChannels
   unsigned int channelsToUse = (actualChannels > 0) ? actualChannels : mChannels;
 
-  // Check for channel mismatch and auto-reconfigure
-  // Always update mChannels to match actual - this happens on first few callbacks
-  // before recording starts, so the channel count will be correct when we record
+  // Auto-reconfigure channels if actual differs from configured
+  // This happens on first few callbacks before recording starts
   if (actualChannels > 0 && actualChannels != mChannels) {
-    static int channelMismatchLogCount = 0;
-    if (channelMismatchLogCount < 3) {
-      printf("[RingBuffer] Channel mismatch: configured=%u, actual=%u - auto-reconfiguring\n",
-             mChannels, actualChannels);
-      channelMismatchLogCount++;
-    }
     mChannels = actualChannels;
-    // Note: buffer size is already allocated, just change the interpretation
-    // Any pre-existing data in ring buffer will be interpreted with new channel count,
-    // but this only matters for pre-roll which will refill quickly
   }
 
   const size_t samplesToWrite = frameCount * channelsToUse;
@@ -189,10 +180,8 @@ void NativeRingBuffer::write(const float *data, size_t frameCount, unsigned int 
 
     // Check if we'd exceed pre-allocated buffer (cap recording, don't resize from audio thread!)
     if (requiredSize > mBuffer.size()) {
-      // Recording exceeds max capacity - stop accepting new data
+      // Recording exceeds max capacity - silently drop new data
       // (Dart should check recording length and stop before this happens)
-      printf("[RingBuffer] WARNING: Recording exceeds max capacity! Capping at %zu samples\n",
-             mBuffer.size());
       return;
     }
 
@@ -372,13 +361,12 @@ void NativeRingBuffer::reset() {
   std::fill(mBuffer.begin(), mBuffer.end(), 0.0f);
 }
 
+// AUDIO THREAD SAFE: No printf/fprintf calls
 void NativeRingBuffer::startRecording(size_t latencyCompFrames) {
-
   size_t writePos = mWritePos.load(std::memory_order_acquire);
   size_t currentTotal = mTotalFramesWritten.load(std::memory_order_acquire);
 
   // Calculate where recording effectively starts (with latency compensation)
-  // This is where we'll start reading from when we stop
   if (latencyCompFrames > 0 && writePos >= latencyCompFrames) {
     mRecordingStartWritePos = writePos - latencyCompFrames;
   } else if (latencyCompFrames > 0 && currentTotal >= latencyCompFrames) {
@@ -390,14 +378,11 @@ void NativeRingBuffer::startRecording(size_t latencyCompFrames) {
 
   mRecordingStartTotalFrame = currentTotal;
   mRecordingActive.store(true, std::memory_order_release);
-
-  printf("[RingBuffer] startRecording: writePos=%zu, startWritePos=%zu, latencyComp=%zu, maxFrames=%zu\n",
-         writePos, mRecordingStartWritePos, latencyCompFrames, mMaxRecordingFrames);
 }
 
+// AUDIO THREAD SAFE: No allocations, no printf - just memcpy to pre-allocated buffer
 float* NativeRingBuffer::stopRecording(size_t* outFrameCount) {
   if (!mRecordingActive.load(std::memory_order_acquire)) {
-    printf("[RingBuffer] stopRecording: not recording!\n");
     if (outFrameCount) *outFrameCount = 0;
     return nullptr;
   }
@@ -408,8 +393,6 @@ float* NativeRingBuffer::stopRecording(size_t* outFrameCount) {
   size_t startWritePos = mRecordingStartWritePos;
 
   if (currentWritePos <= startWritePos) {
-    printf("[RingBuffer] stopRecording: no frames recorded (start=%zu, current=%zu)\n",
-           startWritePos, currentWritePos);
     if (outFrameCount) *outFrameCount = 0;
     return nullptr;
   }
@@ -417,38 +400,27 @@ float* NativeRingBuffer::stopRecording(size_t* outFrameCount) {
   size_t frameCount = currentWritePos - startWritePos;
   size_t sampleCount = frameCount * mChannels;
 
-  printf("[RingBuffer] stopRecording: extracting %zu frames (%zu samples), startPos=%zu, endPos=%zu, mChannels=%u\n",
-         frameCount, sampleCount, startWritePos, currentWritePos, mChannels);
-
-  // Allocate output buffer
-  float* output = new float[sampleCount];
-  if (!output) {
-    printf("[RingBuffer] stopRecording: failed to allocate %zu samples\n", sampleCount);
+  // Use pre-allocated output buffer (no allocation on audio thread!)
+  // If buffer is too small (shouldn't happen), return error
+  if (sampleCount > mOutputBuffer.size()) {
     if (outFrameCount) *outFrameCount = 0;
     return nullptr;
   }
 
-  // Extract directly from buffer (linear during recording, no wrap)
+  // Copy to pre-allocated output buffer
   size_t startSamplePos = startWritePos * mChannels;
-  std::memcpy(output, mBuffer.data() + startSamplePos, sampleCount * sizeof(float));
-
-  // Debug: Print first few extracted samples to verify interleaving
-  if (sampleCount >= 4) {
-    printf("[RingBuffer] stopRecording: First 4 extracted samples: %.4f %.4f %.4f %.4f\n",
-           output[0], output[1], output[2], output[3]);
-  }
+  std::memcpy(mOutputBuffer.data(), mBuffer.data() + startSamplePos, sampleCount * sizeof(float));
 
   // =========================================================================
   // CROSSFADE: Apply fade-in at start and fade-out at end to prevent clicks
   // =========================================================================
-  // 2.5ms crossfade duration (same as Dart-side was using)
   const float crossfadeDurationMs = 2.5f;
   size_t crossfadeFrames = (size_t)(mSampleRate * crossfadeDurationMs / 1000.0f);
-
-  // Clamp to available frames (in case recording is very short)
   crossfadeFrames = std::min(crossfadeFrames, frameCount / 2);
 
   if (crossfadeFrames > 0) {
+    float* output = mOutputBuffer.data();
+
     // Apply fade-in at the start (all channels)
     for (size_t frame = 0; frame < crossfadeFrames; ++frame) {
       float gain = (float)frame / (float)crossfadeFrames;
@@ -465,27 +437,12 @@ float* NativeRingBuffer::stopRecording(size_t* outFrameCount) {
         output[frame * mChannels + ch] *= gain;
       }
     }
-
-    printf("[RingBuffer] Applied crossfade: %zu frames (%.1fms) at start/end\n",
-           crossfadeFrames, crossfadeDurationMs);
   }
 
   // Reset write position to beginning (rewind the tape)
-  // DON'T resize buffer - it stays pre-allocated to avoid reallocations
   mWritePos.store(0, std::memory_order_release);
-  mTotalFramesWritten.store(0, std::memory_order_release);  // Reset for new ring cycle
-
-  // CRITICAL: Clear the ring buffer region to prevent stale data from being read
-  // as pre-roll in subsequent recordings. Only clear up to mCapacityFrames (the ring portion).
-  size_t ringBufferSamples = mCapacityFrames * mChannels;
-  if (ringBufferSamples <= mBuffer.size()) {
-    std::fill(mBuffer.begin(), mBuffer.begin() + ringBufferSamples, 0.0f);
-    printf("[RingBuffer] stopRecording: cleared ring buffer region (%zu samples)\n", ringBufferSamples);
-  }
-
-  printf("[RingBuffer] stopRecording: tape rewound to start (buffer size unchanged: %zu samples)\n",
-         mBuffer.size());
+  mTotalFramesWritten.store(0, std::memory_order_release);
 
   if (outFrameCount) *outFrameCount = frameCount;
-  return output;
+  return mOutputBuffer.data();  // Caller must NOT free - buffer owned by ring buffer
 }

@@ -483,32 +483,31 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   // Apply filters (SKIP during calibration to capture raw impulse response and
   // save CPU)
   // Note: mFilters may be null if callback runs before init() completes
-  if (userData->mFilters != nullptr) {
-    size_t filterCount = userData->mFilters->getFilterCount();  // Thread-safe access
+  // Use lock-free hasFilters() check to avoid mutex contention in hot path
+  if (userData->mFilters != nullptr && userData->mFilters->hasFilters() &&
+      !userData->mCalibrationActive) {
 #if DEBUG_CALLBACK_FILTERS
     static int filterDebugCounter = 0;
     if (++filterDebugCounter <= 5 || filterDebugCounter % 500 == 0) {
 #ifdef _IS_ANDROID_
       __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
-          "[Capture CB #%d] filters=%zu calibActive=%d",
-          filterDebugCounter, filterCount, userData->mCalibrationActive);
+          "[Capture CB #%d] hasFilters=true calibActive=%d",
+          filterDebugCounter, userData->mCalibrationActive);
 #endif
-      aecLog("[Capture CB #%d] filters=%zu calibActive=%d\n",
-             filterDebugCounter, filterCount, userData->mCalibrationActive);
+      aecLog("[Capture CB #%d] hasFilters=true calibActive=%d\n",
+             filterDebugCounter, userData->mCalibrationActive);
     }
 #endif
-    if (filterCount > 0 && !userData->mCalibrationActive) {
-      // Set the capture frame count for AEC position-based sync BEFORE processing
-      // This is the frame count at the START of this block (before we increment)
-      size_t captureFrameCount =
-          userData->mTotalFramesCaptured.load(std::memory_order_acquire);
-      userData->mFilters->setAecCaptureFrameCount(captureFrameCount);
+    // Set the capture frame count for AEC position-based sync BEFORE processing
+    // This is the frame count at the START of this block (before we increment)
+    size_t captureFrameCount =
+        userData->mTotalFramesCaptured.load(std::memory_order_acquire);
+    userData->mFilters->setAecCaptureFrameCount(captureFrameCount);
 
-      // Thread-safe filter processing (protects against concurrent addFilter/removeFilter)
-      userData->mFilters->processAllFilters(captured, frameCount,
-                                            captureChannels,
-                                            userData->deviceConfig.capture.format);
-    }
+    // Thread-safe filter processing (protects against concurrent addFilter/removeFilter)
+    userData->mFilters->processAllFilters(captured, frameCount,
+                                          captureChannels,
+                                          userData->deviceConfig.capture.format);
   }
 #if DEBUG_CALLBACK_FILTERS
   else {
