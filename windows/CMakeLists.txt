@@ -19,6 +19,8 @@ if (UNIX AND NOT WIN32 AND NOT APPLE)
 endif ()
 if (MSVC)
 	add_definitions (-D_CRT_SECURE_NO_WARNINGS)
+	# Prevent Windows min/max macros from conflicting with std::min/std::max
+	add_definitions (-DNOMINMAX)
 endif()
 if (NOT DEFINED LIB_POSTFIX)
   set (LIB_POSTFIX "")
