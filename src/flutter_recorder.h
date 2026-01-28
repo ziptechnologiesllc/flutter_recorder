@@ -26,6 +26,10 @@ FFI_PLUGIN_EXPORT void flutter_recorder_setRecordingStoppedCallback(
 FFI_PLUGIN_EXPORT void flutter_recorder_setRecordingStartedCallback(
     dartRecordingStartedCallback_t callback);
 
+// Set callback for when looper playback starts (from worker thread)
+FFI_PLUGIN_EXPORT void flutter_recorder_setLooperPlaybackStartedCallback(
+    dartLooperPlaybackStartedCallback_t callback);
+
 FFI_PLUGIN_EXPORT void flutter_recorder_nativeFree(void *pointer);
 
 FFI_PLUGIN_EXPORT void flutter_recorder_listCaptureDevices(char **devicesName,

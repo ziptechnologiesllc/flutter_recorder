@@ -354,9 +354,26 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                 int64_t recordedFrames = 0;
 
                 if (g_nativeRingBuffer != nullptr && g_nativeRingBuffer->isRecording()) {
+                    // Calculate expected frame count for sample-accurate loop multiples
+                    size_t expectedFrameCount = 0;
+                    int64_t loopFrames = mBaseLoopFrames.load(std::memory_order_acquire);
+                    if (loopFrames > 0 && mRecordingStartTotalFrame > 0) {
+                        // CRITICAL: Use ring buffer's total frames, NOT scheduler's global frame
+                        // The scheduler's globalFrame and ring buffer's totalFramesWritten can diverge
+                        // if they start counting at different times or have different frame sources.
+                        size_t currentRingBufferTotal = g_nativeRingBuffer->getTotalFramesWritten();
+                        int64_t framesRecorded = (int64_t)currentRingBufferTotal - (int64_t)mRecordingStartTotalFrame;
+                        int64_t loops = (framesRecorded + loopFrames / 2) / loopFrames; // Round to nearest
+                        if (loops < 1) loops = 1;
+                        expectedFrameCount = (size_t)(loops * loopFrames);
+                        SCHED_DEBUG("Loop mode: expecting %zu frames (%lld loops x %lld, ringTotal=%zu, startTotal=%zu)",
+                                    expectedFrameCount, (long long)loops, (long long)loopFrames,
+                                    currentRingBufferTotal, (size_t)mRecordingStartTotalFrame);
+                    }
+
                     // Extract recorded audio from ring buffer
                     size_t frameCount = 0;
-                    float* audioData = g_nativeRingBuffer->stopRecording(&frameCount);
+                    float* audioData = g_nativeRingBuffer->stopRecording(&frameCount, expectedFrameCount);
 
                     if (audioData != nullptr && frameCount > 0) {
                         recordedFrames = (int64_t)frameCount;

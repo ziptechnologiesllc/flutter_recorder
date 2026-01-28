@@ -178,3 +178,48 @@ autoGain.targetRms.value = newValue;
 final value = autoGain.targetRms.value;
 ```
 Available parameters: `targetRMS`, `attackTime`, `releaseTime`, `gainSmoothing`, `maxGain`, `minGain`.
+
+## 🔧 Debug Instrumentation
+
+For performance profiling and debugging, the native code includes timestamped logging that can be enabled at compile time.
+
+### Looper Worker Thread (`src/flutter_recorder.cpp`)
+
+Controls logging for the background worker thread that handles WAV writing and SoLoud playback handoff.
+
+```cpp
+#define DEBUG_LOOPER_WORKER 1  // Set to 0 to disable
+```
+
+Output format with timestamps (ms since first log):
+```
+[Looper 0.000ms] Thread started
+[Looper 1234.567ms] Processing: 253105 samples (126552 frames, 2 ch @ 48000 Hz)
+[Looper 1245.123ms] WAV written: /path/to/file.wav (126552 frames @ 48000 Hz, 2 ch)
+[Looper 1267.890ms] Playback started: hash=12345 handle=1 duration=2.636s
+[Looper 1268.012ms] Notifying Dart of playback start
+```
+
+### Native Scheduler (`src/native_scheduler.cpp`)
+
+Controls logging for the sample-accurate event scheduler (quantized recording start/stop).
+
+```cpp
+#define DEBUG_SCHEDULER 0  // Set to 1 to enable
+```
+
+### Audio Performance Monitor (`src/audio_perf_monitor.h`)
+
+Lock-free performance counter for tracking audio callback timing:
+
+```cpp
+// In audio callback:
+AudioPerfMonitor::instance().callbackStart();
+// ... audio processing ...
+AudioPerfMonitor::instance().callbackEnd();
+
+// From any thread:
+float load = AudioPerfMonitor::instance().getLoadPercent();      // Current CPU load %
+float peak = AudioPerfMonitor::instance().getPeakLoadPercent();  // Peak CPU load %
+uint64_t overruns = AudioPerfMonitor::instance().getOverrunCount(); // Buffer overruns
+```

@@ -3,7 +3,7 @@ library flutter_recorder;
 
 export 'src/audio_data_container.dart';
 export 'src/enums.dart'
-    show PCMFormat, RecorderChannels, CaptureDevice, CaptureErrors, CalibrationSignalType, RecordingStoppedEvent;
+    show PCMFormat, RecorderChannels, CaptureDevice, CaptureErrors, CalibrationSignalType, RecordingStoppedEvent, RecordingStartedEvent, LooperPlaybackStartedEvent;
 export 'src/filters/autogain.dart';
 export 'src/filters/echo_cancellation.dart';
 export 'src/filters/filters.dart' show RecorderFilterType;

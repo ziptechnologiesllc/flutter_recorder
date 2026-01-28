@@ -60,6 +60,12 @@ abstract class RecorderImpl {
   /// Set the recording started callback.
   Future<void> setRecordingStartedCallback() async {}
 
+  /// Stream of looper playback started events (fired from worker thread when loop playback starts).
+  Stream<LooperPlaybackStartedEvent> get looperPlaybackStartedStream;
+
+  /// Set the looper playback started callback.
+  Future<void> setLooperPlaybackStartedCallback() async {}
+
   /// Set Dart functions to call when an event occurs.
   @mustBeOverridden
   Future<void> setDartEventCallbacks();

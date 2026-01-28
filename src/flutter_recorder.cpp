@@ -27,6 +27,21 @@
 // External logging function defined in calibration.cpp
 extern void aecLog(const char *fmt, ...);
 
+// Debug logging for looper worker thread - disable in production to avoid I/O blocking
+#define DEBUG_LOOPER_WORKER 1
+
+#if DEBUG_LOOPER_WORKER
+#include <chrono>
+inline double looperTimestampMs() {
+    static auto start = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    return std::chrono::duration<double, std::milli>(now - start).count();
+}
+#define LOOPER_LOG(fmt, ...) fprintf(stderr, "[Looper %.3fms] " fmt "\n", looperTimestampMs(), ##__VA_ARGS__)
+#else
+#define LOOPER_LOG(fmt, ...) ((void)0)
+#endif
+
 // Define global callback pointers
 dartSilenceChangedCallback_t dartSilenceChangedCallback = nullptr;
 dartSilenceChangedCallback_t nativeSilenceChangedCallback = nullptr;
@@ -36,6 +51,7 @@ AecStatsCallback dartAecStatsCallback = nullptr;
 AecStatsCallback nativeAecStatsCallback = nullptr;
 dartRecordingStoppedCallback_t dartRecordingStoppedCallback = nullptr;
 dartRecordingStartedCallback_t dartRecordingStartedCallback = nullptr;
+dartLooperPlaybackStartedCallback_t dartLooperPlaybackStartedCallback = nullptr;
 
 //////////////////////////////////////////////////////////////
 /// NATIVE AUDIO SINK - Direct native-to-native streaming
@@ -82,7 +98,7 @@ static void writeWavToFile(const char* path, const float* samples,
 
   FILE* file = fopen(path, "wb");
   if (file == nullptr) {
-    fprintf(stderr, "[Looper Worker] Failed to open WAV file for writing: %s\n", path);
+    LOOPER_LOG("Failed to open WAV file for writing: %s", path);
     return;
   }
 
@@ -130,13 +146,12 @@ static void writeWavToFile(const char* path, const float* samples,
 
   fclose(file);
 
-  fprintf(stderr, "[Looper Worker] WAV written: %s (%zu frames @ %u Hz, %u ch)\n",
-          path, frameCount, sampleRate, channels);
+  LOOPER_LOG("WAV written: %s (%zu frames @ %u Hz, %u ch)", path, frameCount, sampleRate, channels);
 }
 
 // Worker thread function - waits for async notification, processes work
 static void looperWorkerThreadFunc() {
-  fprintf(stderr, "[Looper Worker] Thread started\n");
+  LOOPER_LOG("Thread started");
 
   while (g_looperWorkerRunning.load(std::memory_order_acquire)) {
     // Wait for work notification (no polling, no CPU waste)
@@ -157,7 +172,7 @@ static void looperWorkerThreadFunc() {
     // Do the actual work - this can block, we're not on audio thread
     if (g_lastRecordedAudio != nullptr && g_lastRecordedFrameCount > 0) {
       unsigned int numSamples = g_lastRecordedFrameCount * g_lastRecordedChannels;
-      fprintf(stderr, "[Looper Worker] Processing: %u samples (%zu frames, %u ch @ %u Hz)\n",
+      LOOPER_LOG("Processing: %u samples (%zu frames, %u ch @ %u Hz)",
               numSamples, g_lastRecordedFrameCount, g_lastRecordedChannels, g_lastRecordedSampleRate);
 
       // STEP 1: Write WAV file BEFORE passing to SoLoud
@@ -190,17 +205,25 @@ static void looperWorkerThreadFunc() {
           );
 
           if (soundHash != 0) {
-            fprintf(stderr, "[Looper Worker] Playback started: hash=%u handle=%u\n",
-                    soundHash, handle);
+            // Calculate duration from sample data
+            double durationSeconds = (double)(numSamples / g_lastRecordedChannels) / (double)g_lastRecordedSampleRate;
+            LOOPER_LOG("Playback started: hash=%u handle=%u duration=%.3fs",
+                    soundHash, handle, durationSeconds);
+
+            // Notify Dart via callback (if set)
+            if (dartLooperPlaybackStartedCallback != nullptr) {
+              LOOPER_LOG("Notifying Dart of playback start");
+              dartLooperPlaybackStartedCallback(soundHash, handle, durationSeconds);
+            }
           } else {
-            fprintf(stderr, "[Looper Worker] Failed to start playback\n");
+            LOOPER_LOG("Failed to start playback");
             delete[] audioCopy;  // Clean up on failure
           }
         } else {
-          fprintf(stderr, "[Looper Worker] Failed to allocate audio copy\n");
+          LOOPER_LOG("Failed to allocate audio copy");
         }
       } else {
-        fprintf(stderr, "[Looper Worker] No looper bridge, WAV only mode\n");
+        LOOPER_LOG("No looper bridge, WAV only mode");
       }
 
       // Clear pointer (ring buffer still owns the memory)
@@ -209,7 +232,7 @@ static void looperWorkerThreadFunc() {
     }
   }
 
-  fprintf(stderr, "[Looper Worker] Thread exiting\n");
+  LOOPER_LOG("Thread exiting");
 }
 
 // Start the looper worker thread
@@ -220,7 +243,7 @@ static void startLooperWorkerThread() {
 
   g_looperWorkerRunning.store(true, std::memory_order_release);
   g_looperWorkerThread = std::thread(looperWorkerThreadFunc);
-  fprintf(stderr, "[Looper Worker] Thread launched\n");
+  LOOPER_LOG("Thread launched");
 }
 
 // Stop the looper worker thread
@@ -236,7 +259,7 @@ static void stopLooperWorkerThread() {
   if (g_looperWorkerThread.joinable()) {
     g_looperWorkerThread.join();
   }
-  fprintf(stderr, "[Looper Worker] Thread stopped\n");
+  LOOPER_LOG("Thread stopped");
 }
 
 // Set AEC stats callback for Dart FFI
@@ -259,6 +282,14 @@ FFI_PLUGIN_EXPORT void
 flutter_recorder_setRecordingStartedCallback(dartRecordingStartedCallback_t callback) {
   dartRecordingStartedCallback = callback;
   fprintf(stderr, "[Recorder] Recording started callback %s\n", callback ? "set" : "cleared");
+}
+
+// Set looper playback started callback for Dart FFI
+// Called when looper bridge successfully starts playback (from worker thread)
+FFI_PLUGIN_EXPORT void
+flutter_recorder_setLooperPlaybackStartedCallback(dartLooperPlaybackStartedCallback_t callback) {
+  dartLooperPlaybackStartedCallback = callback;
+  fprintf(stderr, "[Recorder] Looper playback started callback %s\n", callback ? "set" : "cleared");
 }
 
 #ifdef __EMSCRIPTEN__

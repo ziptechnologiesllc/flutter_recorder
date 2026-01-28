@@ -294,6 +294,10 @@ interface class Recorder {
   Stream<RecordingStartedEvent> get recordingStartedStream =>
       _impl.recordingStartedStream;
 
+  /// Stream of looper playback started events (fired from worker thread when loop playback starts).
+  Stream<LooperPlaybackStartedEvent> get looperPlaybackStartedStream =>
+      _impl.looperPlaybackStartedStream;
+
   /// Enable or disable silence detection.
   ///
   /// [enable] wheter to enable or disable silence detection. Default to false.
@@ -383,6 +387,7 @@ interface class Recorder {
     await _impl.setAecStatsCallback();
     await _impl.setRecordingStoppedCallback();
     await _impl.setRecordingStartedCallback();
+    await _impl.setLooperPlaybackStartedCallback();
 
     // Sets the [_isInitialized].
     // Usefult when the consumer use the hot restart and that flag

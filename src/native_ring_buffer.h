@@ -102,9 +102,12 @@ public:
    * AUDIO THREAD SAFE: No allocations, just memcpy to pre-allocated buffer.
    *
    * @param outFrameCount Output: number of frames in returned buffer
+   * @param expectedFrameCount If non-zero, extract exactly this many frames
+   *                           (for sample-accurate loop multiples). If zero,
+   *                           uses actual recorded frame count.
    * @return Pointer to interleaved float samples (ring buffer owns), or nullptr
    */
-  float* stopRecording(size_t* outFrameCount);
+  float* stopRecording(size_t* outFrameCount, size_t expectedFrameCount = 0);
 
   /**
    * Check if recording is active.

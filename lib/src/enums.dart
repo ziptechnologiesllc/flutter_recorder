@@ -209,6 +209,30 @@ class RecordingStartedEvent {
   }
 }
 
+/// Event fired when native looper playback starts (from worker thread).
+class LooperPlaybackStartedEvent {
+  /// Constructs a new [LooperPlaybackStartedEvent].
+  const LooperPlaybackStartedEvent({
+    required this.soundHash,
+    required this.handle,
+    required this.durationSeconds,
+  });
+
+  /// The SoLoud sound hash for the playing loop.
+  final int soundHash;
+
+  /// The SoLoud playback handle.
+  final int handle;
+
+  /// Duration of the loop in seconds.
+  final double durationSeconds;
+
+  @override
+  String toString() {
+    return 'LooperPlaybackStartedEvent(hash: $soundHash, handle: $handle, duration: ${durationSeconds}s)';
+  }
+}
+
 /// AEC Mode for A/B testing
 enum AecMode {
   /// Raw microphone input (no AEC)

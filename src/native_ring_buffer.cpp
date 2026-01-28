@@ -381,7 +381,7 @@ void NativeRingBuffer::startRecording(size_t latencyCompFrames) {
 }
 
 // AUDIO THREAD SAFE: No allocations, no printf - just memcpy to pre-allocated buffer
-float* NativeRingBuffer::stopRecording(size_t* outFrameCount) {
+float* NativeRingBuffer::stopRecording(size_t* outFrameCount, size_t expectedFrameCount) {
   if (!mRecordingActive.load(std::memory_order_acquire)) {
     if (outFrameCount) *outFrameCount = 0;
     return nullptr;
@@ -397,7 +397,16 @@ float* NativeRingBuffer::stopRecording(size_t* outFrameCount) {
     return nullptr;
   }
 
-  size_t frameCount = currentWritePos - startWritePos;
+  size_t availableFrames = currentWritePos - startWritePos;
+
+  // Use expected frame count if provided (for sample-accurate loop multiples)
+  // Only use it if we have enough data available
+  size_t frameCount;
+  if (expectedFrameCount > 0 && expectedFrameCount <= availableFrames) {
+    frameCount = expectedFrameCount;
+  } else {
+    frameCount = availableFrames;
+  }
   size_t sampleCount = frameCount * mChannels;
 
   // Use pre-allocated output buffer (no allocation on audio thread!)

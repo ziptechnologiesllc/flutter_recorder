@@ -47,6 +47,12 @@ class RecorderWeb extends RecorderImpl {
   @override
   Future<void> setRecordingStartedCallback() async {}
 
+  @override
+  Stream<LooperPlaybackStartedEvent> get looperPlaybackStartedStream => Stream.empty();
+
+  @override
+  Future<void> setLooperPlaybackStartedCallback() async {}
+
   SilenceCallback? _silenceCallback;
 
   /// Create the worker in the WASM Module and listen for events coming

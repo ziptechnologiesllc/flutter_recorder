@@ -211,6 +211,38 @@ class RecorderFfi extends RecorderImpl {
     );
   }
 
+  // Looper playback started callback - fired from worker thread when loop playback starts
+  final _looperPlaybackStartedController =
+      StreamController<LooperPlaybackStartedEvent>.broadcast();
+
+  @override
+  Stream<LooperPlaybackStartedEvent> get looperPlaybackStartedStream =>
+      _looperPlaybackStartedController.stream;
+
+  ffi.NativeCallable<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double)>?
+      _nativeLooperPlaybackStartedCallable;
+
+  void _looperPlaybackStartedCallback(int soundHash, int handle, double durationSeconds) {
+    if (_looperPlaybackStartedController.isClosed) return;
+    _looperPlaybackStartedController.add(
+      LooperPlaybackStartedEvent(
+        soundHash: soundHash,
+        handle: handle,
+        durationSeconds: durationSeconds,
+      ),
+    );
+  }
+
+  @override
+  Future<void> setLooperPlaybackStartedCallback() async {
+    _nativeLooperPlaybackStartedCallable = ffi
+        .NativeCallable<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double)>
+        .listener(_looperPlaybackStartedCallback);
+    _bindings.flutter_recorder_setLooperPlaybackStartedCallback(
+      _nativeLooperPlaybackStartedCallable!.nativeFunction,
+    );
+  }
+
   @override
   void setSilenceDetection({
     required bool enable,
