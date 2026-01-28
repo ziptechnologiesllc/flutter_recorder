@@ -1,6 +1,13 @@
 #ifndef AEC_REFERENCE_BUFFER_H
 #define AEC_REFERENCE_BUFFER_H
 
+// Prevent Windows min/max macros from conflicting with std::min/std::max
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -123,7 +130,7 @@ public:
     // overwrite it
     if (!mCalibrationDataValid &&
         mCalibrationCapturedFrames < mCalibrationExpectedFrames) {
-      size_t framesToAppend = std::min(
+      size_t framesToAppend = (std::min)(
           frameCount, mCalibrationExpectedFrames - mCalibrationCapturedFrames);
       size_t oldSize = mCalibrationData.size();
       mCalibrationData.resize(oldSize + framesToAppend);
@@ -218,7 +225,7 @@ public:
     if (++readDebugCount <= 5 || readDebugCount % 500 == 0) {
       // Calculate energy of what we're about to read
       float energy = 0.0f;
-      for (size_t i = 0; i < std::min(samplesToRead, (size_t)100); ++i) {
+      for (size_t i = 0; i < (std::min)(samplesToRead, (size_t)100); ++i) {
         float v = mBuffer[(readPos + i) % bufferSize];
         energy += v * v;
       }
@@ -514,7 +521,7 @@ public:
     }
 
     // Read from preserved calibration data (not from live buffer)
-    size_t framesToRead = std::min(sampleCount, mCalibrationData.size());
+    size_t framesToRead = (std::min)(sampleCount, mCalibrationData.size());
 
     float energy = 0.0f;
     float maxVal = 0.0f;
