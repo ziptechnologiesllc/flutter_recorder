@@ -1,6 +1,13 @@
 #ifndef AEC_REFERENCE_BUFFER_H
 #define AEC_REFERENCE_BUFFER_H
 
+// Prevent Windows min/max macros from conflicting with std::min/std::max
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cmath>
