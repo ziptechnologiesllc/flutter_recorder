@@ -10,6 +10,7 @@
 #include "flutter_recorder.h"
 #include "native_ring_buffer.h"
 #include "native_scheduler.h"
+#include "playback_ready_buffer.h"
 #include "soloud_slave_bridge.h"
 
 #include <atomic>
@@ -28,7 +29,7 @@
 extern void aecLog(const char *fmt, ...);
 
 // Debug logging for looper worker thread - disable in production to avoid I/O blocking
-#define DEBUG_LOOPER_WORKER 1
+#define DEBUG_LOOPER_WORKER 0
 
 #if DEBUG_LOOPER_WORKER
 #include <chrono>
@@ -70,6 +71,16 @@ static std::atomic<bool> g_nativeAudioSinkEnabled{false};
 // Looper bridge - direct native-to-SoLoud playback (raw PCM, no WAV)
 static LooperLoadAndPlayRawFunc g_looperBridge = nullptr;
 
+// Looper bridge for planar audio - skips deinterleaving for instant playback
+typedef unsigned int (*LooperLoadAndPlayPlanarFunc)(float** channelData,
+                                                     unsigned int frameCount,
+                                                     float sampleRate,
+                                                     unsigned int channels,
+                                                     bool copy,
+                                                     bool takeOwnership,
+                                                     unsigned int* outHandle);
+static LooperLoadAndPlayPlanarFunc g_looperBridgePlanar = nullptr;
+
 // Worker thread for looper bridge (avoids blocking audio thread)
 static std::thread g_looperWorkerThread;
 static std::atomic<bool> g_looperWorkerRunning{false};
@@ -87,6 +98,11 @@ extern float* g_lastRecordedAudio;
 extern size_t g_lastRecordedFrameCount;
 extern unsigned int g_lastRecordedChannels;
 extern unsigned int g_lastRecordedSampleRate;
+
+// Planar audio data for instant SoLoud playback (from PlaybackReadyBuffer)
+static float* g_planarChannelData[8] = {nullptr};  // Max 8 channels
+static size_t g_planarFrameCount = 0;
+static bool g_hasPlanarData = false;
 
 // Write WAV file from recorded float samples (called from worker thread)
 static void writeWavToFile(const char* path, const float* samples,
@@ -161,7 +177,9 @@ static void looperWorkerThreadFunc() {
         return g_looperWorkPending.load(std::memory_order_acquire) ||
                !g_looperWorkerRunning.load(std::memory_order_acquire);
       });
-      g_looperWorkPending.store(false, std::memory_order_release);
+      // NOTE: We intentionally do NOT clear g_looperWorkPending here.
+      // If work fails (data not visible yet), we want to retry on next wake.
+      // The flag is cleared only after successful work processing below.
     }
 
     // Check if we're shutting down
@@ -169,62 +187,126 @@ static void looperWorkerThreadFunc() {
       break;
     }
 
+    // DEBUG: Log that worker woke up
+    LOOPER_LOG("Worker woke: pending=%d audio=%p frames=%zu",
+               g_looperWorkPending.load(std::memory_order_acquire),
+               (void*)g_lastRecordedAudio, g_lastRecordedFrameCount);
+
+    // MEMORY FENCE: Ensure we see all writes from storeRecordedAudio().
+    // This pairs with the release fence in storeRecordedAudio() to guarantee
+    // visibility of g_lastRecordedAudio and g_lastRecordedFrameCount.
+    std::atomic_thread_fence(std::memory_order_acquire);
+
     // Do the actual work - this can block, we're not on audio thread
     if (g_lastRecordedAudio != nullptr && g_lastRecordedFrameCount > 0) {
       unsigned int numSamples = g_lastRecordedFrameCount * g_lastRecordedChannels;
-      LOOPER_LOG("Processing: %u samples (%zu frames, %u ch @ %u Hz)",
-              numSamples, g_lastRecordedFrameCount, g_lastRecordedChannels, g_lastRecordedSampleRate);
+      LOOPER_LOG("Processing: %u samples (%zu frames, %u ch @ %u Hz), hasPlanar=%d",
+              numSamples, g_lastRecordedFrameCount, g_lastRecordedChannels,
+              g_lastRecordedSampleRate, g_hasPlanarData);
 
-      // STEP 1: Write WAV file BEFORE passing to SoLoud
-      // (SoLoud will deinterleave the data, so we must write first)
-      if (g_pendingWavPath[0] != '\0') {
-        writeWavToFile(g_pendingWavPath, g_lastRecordedAudio,
-                       g_lastRecordedFrameCount, g_lastRecordedSampleRate,
-                       g_lastRecordedChannels);
-        g_pendingWavPath[0] = '\0';  // Clear after writing
-        g_pendingWavWrite.store(false, std::memory_order_release);
+      // =====================================================================
+      // STEP 1: Start playback FIRST using planar data (FAST - no deinterleave!)
+      // This is the critical optimization - playback starts immediately.
+      // =====================================================================
+      bool playbackStarted = false;
+      unsigned int soundHash = 0;
+      unsigned int handle = 0;
+      double durationSeconds = 0.0;
+
+      if (g_hasPlanarData && g_looperBridgePlanar != nullptr && g_planarFrameCount > 0) {
+        LOOPER_LOG("Using PLANAR path for instant playback (%zu frames)", g_planarFrameCount);
+
+        // OPTIMIZATION: Pass channel pointers directly to SoLoud with copy=true
+        // SoLoud will do one memcpy per channel internally, which is faster than
+        // us doing it here + SoLoud doing another copy. We avoid allocation overhead.
+        soundHash = g_looperBridgePlanar(
+            g_planarChannelData,
+            static_cast<unsigned int>(g_planarFrameCount),
+            static_cast<float>(g_lastRecordedSampleRate),
+            g_lastRecordedChannels,
+            true,   // copy - SoLoud copies data (PlaybackReadyBuffer owns originals)
+            false,  // takeOwnership - we keep ownership, SoLoud uses copy
+            &handle
+        );
+
+        if (soundHash != 0) {
+          durationSeconds = static_cast<double>(g_planarFrameCount) /
+                            static_cast<double>(g_lastRecordedSampleRate);
+          playbackStarted = true;
+          LOOPER_LOG("PLANAR playback started: hash=%u handle=%u duration=%.3fs",
+                  soundHash, handle, durationSeconds);
+
+          // Notify Dart immediately - player is ready NOW
+          if (dartLooperPlaybackStartedCallback != nullptr) {
+            LOOPER_LOG("Notifying Dart of playback start (PLANAR path)");
+            dartLooperPlaybackStartedCallback(soundHash, handle, durationSeconds);
+          }
+        } else {
+          LOOPER_LOG("PLANAR playback failed, falling back to interleaved");
+        }
+
+        // Clear planar data references (buffer owned by PlaybackReadyBuffer)
+        g_hasPlanarData = false;
+        g_planarFrameCount = 0;
+        for (int ch = 0; ch < 8; ++ch) g_planarChannelData[ch] = nullptr;
       }
 
-      // STEP 2: Start playback via looper bridge (if available)
-      if (g_looperBridge != nullptr) {
-        // Make a copy for SoLoud - the original buffer is owned by ring buffer
-        // Allocation is OK here since we're on the worker thread, not audio thread
+      // Fallback: Use interleaved path if planar failed or unavailable
+      if (!playbackStarted && g_looperBridge != nullptr) {
+        LOOPER_LOG("Using INTERLEAVED path (fallback)");
         float* audioCopy = new (std::nothrow) float[numSamples];
         if (audioCopy != nullptr) {
           std::memcpy(audioCopy, g_lastRecordedAudio, numSamples * sizeof(float));
 
-          unsigned int handle = 0;
-          unsigned int soundHash = g_looperBridge(
+          soundHash = g_looperBridge(
               audioCopy,
               numSamples,
-              (float)g_lastRecordedSampleRate,
+              static_cast<float>(g_lastRecordedSampleRate),
               g_lastRecordedChannels,
-              false,  // copy - NO COPY, we already copied
-              true,   // takeOwnership - SoLoud frees audioCopy when done
+              false,  // copy - already copied
+              true,   // takeOwnership
               &handle
           );
 
           if (soundHash != 0) {
-            // Calculate duration from sample data
-            double durationSeconds = (double)(numSamples / g_lastRecordedChannels) / (double)g_lastRecordedSampleRate;
-            LOOPER_LOG("Playback started: hash=%u handle=%u duration=%.3fs",
+            durationSeconds = static_cast<double>(numSamples / g_lastRecordedChannels) /
+                              static_cast<double>(g_lastRecordedSampleRate);
+            playbackStarted = true;
+            LOOPER_LOG("INTERLEAVED playback started: hash=%u handle=%u duration=%.3fs",
                     soundHash, handle, durationSeconds);
 
-            // Notify Dart via callback (if set)
             if (dartLooperPlaybackStartedCallback != nullptr) {
-              LOOPER_LOG("Notifying Dart of playback start");
+              LOOPER_LOG("Notifying Dart of playback start (INTERLEAVED path)");
               dartLooperPlaybackStartedCallback(soundHash, handle, durationSeconds);
             }
           } else {
-            LOOPER_LOG("Failed to start playback");
-            delete[] audioCopy;  // Clean up on failure
+            LOOPER_LOG("INTERLEAVED playback failed");
+            delete[] audioCopy;
           }
         } else {
           LOOPER_LOG("Failed to allocate audio copy");
         }
-      } else {
+      }
+
+      if (!playbackStarted && g_looperBridge == nullptr && g_looperBridgePlanar == nullptr) {
         LOOPER_LOG("No looper bridge, WAV only mode");
       }
+
+      // =====================================================================
+      // STEP 2: Write WAV file AFTER playback starts (non-blocking for playback)
+      // This can take time but playback is already running!
+      // =====================================================================
+      if (g_pendingWavPath[0] != '\0') {
+        LOOPER_LOG("Writing WAV file (async, playback already started)");
+        writeWavToFile(g_pendingWavPath, g_lastRecordedAudio,
+                       g_lastRecordedFrameCount, g_lastRecordedSampleRate,
+                       g_lastRecordedChannels);
+        g_pendingWavPath[0] = '\0';
+        g_pendingWavWrite.store(false, std::memory_order_release);
+      }
+
+      // Work was successful - clear the pending flag now.
+      g_looperWorkPending.store(false, std::memory_order_release);
 
       // Clear pointer (ring buffer still owns the memory)
       g_lastRecordedAudio = nullptr;
@@ -448,6 +530,12 @@ FFI_PLUGIN_EXPORT void flutter_recorder_setLooperBridge(LooperLoadAndPlayRawFunc
   if (func != nullptr) {
     startLooperWorkerThread();
   }
+}
+
+/// Set the planar looper bridge for instant playback (skips deinterleaving)
+FFI_PLUGIN_EXPORT void flutter_recorder_setLooperBridgePlanar(LooperLoadAndPlayPlanarFunc func) {
+  g_looperBridgePlanar = func;
+  fprintf(stderr, "[Recorder] Planar looper bridge %s\n", func ? "set" : "cleared");
 }
 
 /// Clear the looper bridge
@@ -1694,6 +1782,20 @@ FFI_PLUGIN_EXPORT void flutter_recorder_createRingBuffer(
   // Pre-allocate for recording (10% of available RAM)
   // This happens at init time so no allocations during audio streaming
   g_nativeRingBuffer->preAllocateForRecording();
+
+  // Create/configure the playback ready buffer (pre-deinterleaved for instant SoLoud playback)
+  // Uses the same max recording frames as the ring buffer
+  size_t maxRecordingFrames = g_nativeRingBuffer->getMaxRecordingFrames();
+  if (g_playbackReadyBuffer != nullptr) {
+    g_playbackReadyBuffer->configure(maxRecordingFrames, channels, sampleRate);
+    fprintf(stderr, "[Recorder] Playback ready buffer reconfigured: %zu frames @ %uHz, %u ch\n",
+            maxRecordingFrames, sampleRate, channels);
+  } else {
+    g_playbackReadyBuffer = new PlaybackReadyBuffer();
+    g_playbackReadyBuffer->configure(maxRecordingFrames, channels, sampleRate);
+    fprintf(stderr, "[Recorder] Playback ready buffer created: %zu frames @ %uHz, %u ch\n",
+            maxRecordingFrames, sampleRate, channels);
+  }
 }
 
 // Destroy/reset the native ring buffer
@@ -1702,6 +1804,11 @@ FFI_PLUGIN_EXPORT void flutter_recorder_destroyRingBuffer() {
     delete g_nativeRingBuffer;
     g_nativeRingBuffer = nullptr;
     fprintf(stderr, "[Recorder] Native ring buffer destroyed\n");
+  }
+  if (g_playbackReadyBuffer != nullptr) {
+    delete g_playbackReadyBuffer;
+    g_playbackReadyBuffer = nullptr;
+    fprintf(stderr, "[Recorder] Playback ready buffer destroyed\n");
   }
 }
 
@@ -1870,6 +1977,12 @@ void storeRecordedAudio(float* data, size_t frameCount) {
     g_lastRecordedSampleRate = g_nativeRingBuffer->sampleRate();
   }
 
+  // MEMORY FENCE: Ensure all writes above are visible to other threads
+  // before we set the work pending flag. Without this fence, the worker
+  // thread might see g_looperWorkPending=true but stale values for the
+  // audio data pointer/count due to CPU/compiler reordering.
+  std::atomic_thread_fence(std::memory_order_release);
+
   // Signal worker thread via condition variable
   // AUDIO THREAD SAFE: notify_one() without lock is safe here because:
   // 1. We set the atomic flag first (worker checks this in wait predicate)
@@ -1879,4 +1992,33 @@ void storeRecordedAudio(float* data, size_t frameCount) {
     g_looperWorkPending.store(true, std::memory_order_release);
     g_looperCondVar.notify_one();
   }
+}
+
+// Internal: Store planar audio data for instant SoLoud playback
+// Called by native_scheduler.cpp when recording stops, AFTER storeRecordedAudio()
+// AUDIO THREAD SAFE: No fprintf, no locks, no blocking allocations
+void storePlanarAudioForPlayback(PlaybackReadyBuffer* planarBuffer, size_t frameCount) {
+  if (planarBuffer == nullptr || frameCount == 0) {
+    g_hasPlanarData = false;
+    g_planarFrameCount = 0;
+    return;
+  }
+
+  // Store pointers to planar channel data (data owned by PlaybackReadyBuffer)
+  unsigned int channels = planarBuffer->channels();
+  for (unsigned int ch = 0; ch < channels && ch < 8; ++ch) {
+    g_planarChannelData[ch] = planarBuffer->getChannelData(ch);
+  }
+  // Clear remaining slots
+  for (unsigned int ch = channels; ch < 8; ++ch) {
+    g_planarChannelData[ch] = nullptr;
+  }
+
+  g_planarFrameCount = frameCount;
+
+  // MEMORY FENCE: Ensure channel pointers and frame count are visible
+  // before setting the hasPlanarData flag
+  std::atomic_thread_fence(std::memory_order_release);
+
+  g_hasPlanarData = true;
 }

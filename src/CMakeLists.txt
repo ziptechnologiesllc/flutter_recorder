@@ -22,6 +22,7 @@ add_library(flutter_recorder SHARED
   "capture.cpp"
   "native_ring_buffer.cpp"
   "native_scheduler.cpp"
+  "playback_ready_buffer.cpp"
   "soloud_slave_bridge.cpp"
   "fft/soloud_fft.cpp"
   "filters/filters.cpp"
@@ -40,6 +41,17 @@ set_target_properties(flutter_recorder PROPERTIES
   PUBLIC_HEADER flutter_recorder.h
   OUTPUT_NAME "flutter_recorder"
 )
+
+# CRITICAL: Always optimize audio code, even in debug builds
+# Real-time audio cannot tolerate -O0 debug builds - causes dropouts
+# This matches how professional DAWs like Ableton handle their audio engines
+if (NOT WIN32)
+  # For GCC/Clang: -O2 for speed, -ffast-math for SIMD, SSE for vectorization
+  target_compile_options(flutter_recorder PRIVATE -O2 -ffast-math -msse2 -msse3)
+else()
+  # For MSVC: /O2 for speed
+  target_compile_options(flutter_recorder PRIVATE /O2)
+endif()
 
 target_compile_definitions(flutter_recorder PUBLIC DART_SHARED_LIB)
 

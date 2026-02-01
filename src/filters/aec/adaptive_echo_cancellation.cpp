@@ -337,6 +337,10 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   }
 
   // DEBUG: Dump ref and mic to files for alignment verification
+  // DISABLED: File I/O in audio callback causes glitches
+  // To enable, set AEC_DEBUG_DUMP_FILES=1 and rebuild
+#define AEC_DEBUG_DUMP_FILES 0
+#if AEC_DEBUG_DUMP_FILES
   static FILE *refFile = nullptr;
   static FILE *micFile = nullptr;
   static int dumpFrames = 0;
@@ -378,6 +382,7 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       aecLog("[AEC DEBUG] Finished dumping %d frames to files\n", dumpFrames);
     }
   }
+#endif
 
   // Calibration capture: save frame-aligned ref+mic for delay estimation
   // These are perfectly aligned since they come from the same callback

@@ -202,6 +202,21 @@ private:
 
   // Pre-allocated output buffer for stopRecording() - avoids allocation on audio thread
   std::vector<float> mOutputBuffer;
+
+  // Debug: track dropped frames when buffer overflows during recording
+  std::atomic<size_t> mDroppedFrames{0};
+
+public:
+  /**
+   * Get count of frames dropped due to buffer overflow during recording.
+   * Useful for debugging when recordings are shorter than expected.
+   */
+  size_t getDroppedFrames() const { return mDroppedFrames.load(std::memory_order_acquire); }
+
+  /**
+   * Reset the dropped frames counter.
+   */
+  void resetDroppedFrames() { mDroppedFrames.store(0, std::memory_order_release); }
 };
 
 // Global ring buffer pointer (set during initialization)

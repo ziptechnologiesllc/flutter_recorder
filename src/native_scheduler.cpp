@@ -2,6 +2,7 @@
 #include "capture.h"
 #include "common.h"
 #include "native_ring_buffer.h"
+#include "playback_ready_buffer.h"
 #include <cstdio>
 #include <vector>
 
@@ -10,6 +11,9 @@ extern std::atomic<bool> g_recordingScheduledOrActive;
 
 // External function from flutter_recorder.cpp to store recorded audio
 extern void storeRecordedAudio(float* data, size_t frameCount);
+
+// External function from flutter_recorder.cpp to store planar audio for instant playback
+extern void storePlanarAudioForPlayback(PlaybackReadyBuffer* planarBuffer, size_t frameCount);
 
 // External WAV path storage - set by scheduler, used by worker thread
 extern char g_pendingWavPath[512];
@@ -320,6 +324,12 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                     mRecordingStartTotalFrame = g_nativeRingBuffer->getRecordingStartFrame();
                     SCHED_DEBUG("Ring buffer recording started, latencyComp=%lld", (long long)latencyFrames);
 
+                    // Also start recording on the playback ready buffer (planar format for SoLoud)
+                    if (g_playbackReadyBuffer != nullptr) {
+                        g_playbackReadyBuffer->startRecording();
+                        SCHED_DEBUG("Playback ready buffer recording started");
+                    }
+
                     // Notify Dart that recording has started
                     if (dartRecordingStartedCallback != nullptr) {
                         dartRecordingStartedCallback(currentFrame, event.recordingPath);
@@ -353,6 +363,17 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
 
                 int64_t recordedFrames = 0;
 
+                // DEBUG: Track execution path with minimal atomic writes (safe on audio thread)
+                static std::atomic<int> dbgStopFired{0};
+                static std::atomic<int> dbgRingBufOk{0};
+                static std::atomic<int> dbgAudioExtracted{0};
+                static std::atomic<int> dbgStoreAudioCalled{0};
+                static std::atomic<size_t> dbgFrameCount{0};
+                dbgStopFired.fetch_add(1, std::memory_order_relaxed);
+
+                bool ringBufReady = (g_nativeRingBuffer != nullptr && g_nativeRingBuffer->isRecording());
+                if (ringBufReady) dbgRingBufOk.fetch_add(1, std::memory_order_relaxed);
+
                 if (g_nativeRingBuffer != nullptr && g_nativeRingBuffer->isRecording()) {
                     // Calculate expected frame count for sample-accurate loop multiples
                     size_t expectedFrameCount = 0;
@@ -371,11 +392,22 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                                     currentRingBufferTotal, (size_t)mRecordingStartTotalFrame);
                     }
 
-                    // Extract recorded audio from ring buffer
+                    // STEP 1: Finalize PlaybackReadyBuffer to get planar audio (INSTANT - no conversion!)
+                    // This must happen BEFORE ring buffer stop because both buffers share the same
+                    // recording state, and we want planar data ready for instant playback.
+                    size_t planarFrameCount = 0;
+                    if (g_playbackReadyBuffer != nullptr && g_playbackReadyBuffer->isRecording()) {
+                        g_playbackReadyBuffer->finalizeAndGetPlanar(&planarFrameCount);
+                        SCHED_DEBUG("PlaybackReadyBuffer finalized: %zu frames (planar)", planarFrameCount);
+                    }
+
+                    // STEP 2: Extract recorded audio from ring buffer (interleaved, for WAV file)
                     size_t frameCount = 0;
                     float* audioData = g_nativeRingBuffer->stopRecording(&frameCount, expectedFrameCount);
+                    dbgFrameCount.store(frameCount, std::memory_order_relaxed);
 
                     if (audioData != nullptr && frameCount > 0) {
+                        dbgAudioExtracted.fetch_add(1, std::memory_order_relaxed);
                         recordedFrames = (int64_t)frameCount;
 
                         // Set pending WAV path for worker thread to write
@@ -387,8 +419,18 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                             SCHED_DEBUG("WAV path set for worker thread: %s", wavPath);
                         }
 
-                        // Store audio for worker thread (transfers ownership)
-                        // Worker will write WAV first, then pass to SoLoud
+                        // STEP 3: Store planar audio for instant SoLoud playback
+                        // This must happen BEFORE storeRecordedAudio() because storeRecordedAudio()
+                        // signals the worker thread, and we want planar data ready when worker wakes.
+                        if (planarFrameCount > 0) {
+                            storePlanarAudioForPlayback(g_playbackReadyBuffer, planarFrameCount);
+                            SCHED_DEBUG("Stored planar audio: %zu frames for instant playback", planarFrameCount);
+                        }
+
+                        // STEP 4: Store interleaved audio and wake worker thread
+                        // Worker will: 1) Start SoLoud playback from planar data (INSTANT)
+                        //              2) Write WAV file from interleaved data (async)
+                        dbgStoreAudioCalled.fetch_add(1, std::memory_order_relaxed);
                         storeRecordedAudio(audioData, frameCount);
                         SCHED_DEBUG("Stored %zu frames for worker thread", frameCount);
                         // Note: audioData ownership transferred - do NOT delete here
@@ -404,6 +446,12 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                 }
 
                 SCHED_DEBUG("Recording stopped: %lld frames", (long long)recordedFrames);
+
+                // DEBUG: Log summary AFTER all work is done (one fprintf, non-blocking path)
+                fprintf(stderr, "[NativeScheduler] StopRecording: fired=%d ringBufOk=%d extracted=%d stored=%d frames=%zu wavPath=%s\n",
+                        dbgStopFired.load(), dbgRingBufOk.load(), dbgAudioExtracted.load(),
+                        dbgStoreAudioCalled.load(), dbgFrameCount.load(),
+                        (wavPath && wavPath[0]) ? "set" : "empty");
 
                 if (dartRecordingStoppedCallback != nullptr && wavPath[0] != '\0') {
                     dartRecordingStoppedCallback(recordedFrames, wavPath);

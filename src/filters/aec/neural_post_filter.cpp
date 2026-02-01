@@ -22,6 +22,7 @@ static inline void* portable_aligned_alloc(size_t alignment, size_t size) {
 #include "litert/c/litert_options.h"
 #include "litert/c/litert_tensor_buffer.h"
 #include "litert/c/litert_tensor_buffer_types.h"
+#include "litert/c/litert_tensor_buffer_requirements.h"
 #endif
 
 #include "../../fft/soloud_fft.h"
@@ -85,7 +86,7 @@ void NeuralPostFilter::reset() {
   mContextFrameCount = 0;
 
 #ifdef USE_TFLITE
-  // Destroy existing buffers and models
+  // Destroy tensor buffers first (before freeing host memory)
   for (auto &buffer : mInputBuffers) {
     if (buffer)
       LiteRtDestroyTensorBuffer(buffer);
@@ -98,10 +99,10 @@ void NeuralPostFilter::reset() {
   }
   mOutputBuffers.clear();
 
-  // Free host memory (after destroying tensor buffers that reference it)
-  for (auto &mem : mHostMemory) {
-    if (mem)
-      free(mem);
+  // Free host memory allocations (after tensor buffers are destroyed)
+  for (auto &hostMem : mHostMemory) {
+    if (hostMem)
+      free(hostMem);
   }
   mHostMemory.clear();
 
@@ -165,7 +166,7 @@ bool NeuralPostFilter::loadModel(const std::string &modelPath) {
     return false;
   }
 
-  // Set up input and output buffers using zero-copy host memory
+  // Get model signature to determine number of inputs/outputs
   LiteRtSignature signature;
   if (LiteRtGetModelSignature(mModel, 0, &signature) != kLiteRtStatusOk) {
     aecLog("[NeuralPostFilter] Failed to get model signature\n");
@@ -179,52 +180,97 @@ bool NeuralPostFilter::loadModel(const std::string &modelPath) {
   }
   aecLog("[NeuralPostFilter] Model has %u inputs\n", numInputs);
 
+  // First, resize input tensors to resolve dynamic dimensions (batch=1)
   for (uint32_t i = 0; i < numInputs; ++i) {
+    LiteRtTensor tensor;
+    if (LiteRtGetSignatureInputTensorByIndex(signature, i, &tensor) != kLiteRtStatusOk) {
+      continue;
+    }
+    LiteRtRankedTensorType type;
+    if (LiteRtGetRankedTensorType(tensor, &type) != kLiteRtStatusOk) {
+      continue;
+    }
+
+    // Check if any dimension is dynamic
+    bool hasDynamic = false;
+    int dims[8];
+    for (int32_t d = 0; d < type.layout.rank && d < 8; ++d) {
+      dims[d] = (type.layout.dimensions[d] <= 0) ? 1 : type.layout.dimensions[d];
+      if (type.layout.dimensions[d] <= 0) hasDynamic = true;
+    }
+
+    if (hasDynamic) {
+      aecLog("[NeuralPostFilter] Resizing input %u to resolve dynamic dims\n", i);
+      LiteRtStatus resizeStatus = LiteRtCompiledModelResizeInputTensor(
+          mCompiledModel, 0, i, dims, type.layout.rank);
+      if (resizeStatus != kLiteRtStatusOk) {
+        aecLog("[NeuralPostFilter] Failed to resize input %u (status=%d)\n", i, resizeStatus);
+      }
+    }
+  }
+
+  // Use direct host memory allocation (bypasses buffer requirements API issues)
+  // Input: [1, 16, 1026] = 16416 floats = 65664 bytes
+  const size_t INPUT_SIZE = 1 * CONTEXT_FRAMES * N_BINS * 2 * sizeof(float);
+  constexpr size_t ALIGNMENT = 64;  // LITERT_HOST_MEMORY_BUFFER_ALIGNMENT
+
+  for (uint32_t i = 0; i < numInputs; ++i) {
+    // Get element type from original tensor
     LiteRtTensor tensor;
     if (LiteRtGetSignatureInputTensorByIndex(signature, i, &tensor) != kLiteRtStatusOk) {
       aecLog("[NeuralPostFilter] Failed to get input tensor %u\n", i);
       continue;
     }
+    LiteRtRankedTensorType origType;
+    if (LiteRtGetRankedTensorType(tensor, &origType) != kLiteRtStatusOk) {
+      aecLog("[NeuralPostFilter] Failed to get input tensor type %u\n", i);
+      continue;
+    }
 
+    // Get layout AFTER resizing (with resolved dimensions)
+    LiteRtLayout resolvedLayout;
+    if (LiteRtGetCompiledModelInputTensorLayout(mCompiledModel, 0, i, &resolvedLayout) != kLiteRtStatusOk) {
+      aecLog("[NeuralPostFilter] Failed to get resolved layout for input %u\n", i);
+      continue;
+    }
+
+    // Construct tensor type with resolved dimensions
     LiteRtRankedTensorType type;
-    if (LiteRtGetRankedTensorType(tensor, &type) != kLiteRtStatusOk) {
-      aecLog("[NeuralPostFilter] Failed to get tensor type for input %u\n", i);
-      continue;
-    }
+    type.element_type = origType.element_type;
+    type.layout = resolvedLayout;
 
-    // Calculate buffer size from tensor dimensions
-    // Handle dynamic dimensions (-1) by treating them as 1 (batch size)
-    size_t numElements = 1;
+    // Log all dimensions
+    aecLog("[NeuralPostFilter] Input %u: rank=%d, dims=[", i, type.layout.rank);
     for (int32_t d = 0; d < type.layout.rank; ++d) {
-      int32_t dim = type.layout.dimensions[d];
-      if (dim <= 0) {
-        // Dynamic dimension - use 1 (we process single batches)
-        dim = 1;
-      }
-      numElements *= (size_t)dim;
+      aecLog("%d%s", type.layout.dimensions[d], d < type.layout.rank - 1 ? ", " : "");
     }
-    size_t bufferSize = numElements * sizeof(float); // Assuming float32
+    aecLog("]\n");
 
-    aecLog("[NeuralPostFilter] Input %u: rank=%d, elements=%zu, size=%zu\n",
-           i, type.layout.rank, numElements, bufferSize);
-
-    // Allocate aligned host memory for zero-copy
-    void* hostMem = aligned_alloc(LITERT_HOST_MEMORY_BUFFER_ALIGNMENT, bufferSize);
-    if (!hostMem) {
-      aecLog("[NeuralPostFilter] Failed to allocate host memory for input %u\n", i);
+    // Allocate aligned host memory
+    void* hostMem = nullptr;
+    if (posix_memalign(&hostMem, ALIGNMENT, INPUT_SIZE) != 0) {
+      aecLog("[NeuralPostFilter] Failed to allocate aligned memory for input %u\n", i);
       continue;
     }
-    memset(hostMem, 0, bufferSize);
+    memset(hostMem, 0, INPUT_SIZE);
     mHostMemory.push_back(hostMem);
 
+    // Create tensor buffer from host memory (zero-copy)
     LiteRtTensorBuffer buffer;
-    if (LiteRtCreateTensorBufferFromHostMemory(&type, hostMem, bufferSize,
-                                                nullptr, &buffer) == kLiteRtStatusOk) {
+    LiteRtStatus status = LiteRtCreateTensorBufferFromHostMemory(
+        &type, hostMem, INPUT_SIZE, nullptr, &buffer);
+    if (status == kLiteRtStatusOk) {
       mInputBuffers.push_back(buffer);
+      aecLog("[NeuralPostFilter] Created input buffer %u (size=%zu)\n", i, INPUT_SIZE);
     } else {
-      aecLog("[NeuralPostFilter] Failed to create input buffer %u\n", i);
+      aecLog("[NeuralPostFilter] Failed to create input buffer %u (status=%d)\n", i, status);
+      free(hostMem);
+      mHostMemory.pop_back();
     }
   }
+
+  // Output: [1, 513] = 513 floats = 2052 bytes
+  const size_t OUTPUT_SIZE = 1 * N_BINS * sizeof(float);
 
   LiteRtParamIndex numOutputs = 0;
   if (LiteRtGetNumSignatureOutputs(signature, &numOutputs) != kLiteRtStatusOk) {
@@ -233,49 +279,60 @@ bool NeuralPostFilter::loadModel(const std::string &modelPath) {
   }
   aecLog("[NeuralPostFilter] Model has %u outputs\n", numOutputs);
 
+  // Get all output layouts at once (after input resize propagates to outputs)
+  std::vector<LiteRtLayout> outputLayouts(numOutputs);
+  if (LiteRtGetCompiledModelOutputTensorLayouts(mCompiledModel, 0, numOutputs,
+                                                 outputLayouts.data(), true) != kLiteRtStatusOk) {
+    aecLog("[NeuralPostFilter] Failed to get output tensor layouts\n");
+    return false;
+  }
+
+  // Create output buffers using direct host memory
   for (uint32_t i = 0; i < numOutputs; ++i) {
+    // Get element type from original tensor
     LiteRtTensor tensor;
     if (LiteRtGetSignatureOutputTensorByIndex(signature, i, &tensor) != kLiteRtStatusOk) {
       aecLog("[NeuralPostFilter] Failed to get output tensor %u\n", i);
       continue;
     }
+    LiteRtRankedTensorType origType;
+    if (LiteRtGetRankedTensorType(tensor, &origType) != kLiteRtStatusOk) {
+      aecLog("[NeuralPostFilter] Failed to get output tensor type %u\n", i);
+      continue;
+    }
 
+    // Construct tensor type with resolved dimensions from output layouts
     LiteRtRankedTensorType type;
-    if (LiteRtGetRankedTensorType(tensor, &type) != kLiteRtStatusOk) {
-      aecLog("[NeuralPostFilter] Failed to get tensor type for output %u\n", i);
-      continue;
-    }
+    type.element_type = origType.element_type;
+    type.layout = outputLayouts[i];
 
-    // Handle dynamic dimensions (-1) by treating them as 1 (batch size)
-    size_t numElements = 1;
+    // Log all dimensions
+    aecLog("[NeuralPostFilter] Output %u: rank=%d, dims=[", i, type.layout.rank);
     for (int32_t d = 0; d < type.layout.rank; ++d) {
-      int32_t dim = type.layout.dimensions[d];
-      if (dim <= 0) {
-        // Dynamic dimension - use 1 (we process single batches)
-        dim = 1;
-      }
-      numElements *= (size_t)dim;
+      aecLog("%d%s", type.layout.dimensions[d], d < type.layout.rank - 1 ? ", " : "");
     }
-    size_t bufferSize = numElements * sizeof(float);
+    aecLog("]\n");
 
-    aecLog("[NeuralPostFilter] Output %u: rank=%d, elements=%zu, size=%zu\n",
-           i, type.layout.rank, numElements, bufferSize);
-
-    // Allocate aligned host memory for zero-copy
-    void* hostMem = aligned_alloc(LITERT_HOST_MEMORY_BUFFER_ALIGNMENT, bufferSize);
-    if (!hostMem) {
-      aecLog("[NeuralPostFilter] Failed to allocate host memory for output %u\n", i);
+    // Allocate aligned host memory
+    void* hostMem = nullptr;
+    if (posix_memalign(&hostMem, ALIGNMENT, OUTPUT_SIZE) != 0) {
+      aecLog("[NeuralPostFilter] Failed to allocate aligned memory for output %u\n", i);
       continue;
     }
-    memset(hostMem, 0, bufferSize);
+    memset(hostMem, 0, OUTPUT_SIZE);
     mHostMemory.push_back(hostMem);
 
+    // Create tensor buffer from host memory (zero-copy)
     LiteRtTensorBuffer buffer;
-    if (LiteRtCreateTensorBufferFromHostMemory(&type, hostMem, bufferSize,
-                                                nullptr, &buffer) == kLiteRtStatusOk) {
+    LiteRtStatus status = LiteRtCreateTensorBufferFromHostMemory(
+        &type, hostMem, OUTPUT_SIZE, nullptr, &buffer);
+    if (status == kLiteRtStatusOk) {
       mOutputBuffers.push_back(buffer);
+      aecLog("[NeuralPostFilter] Created output buffer %u (size=%zu)\n", i, OUTPUT_SIZE);
     } else {
-      aecLog("[NeuralPostFilter] Failed to create output buffer %u\n", i);
+      aecLog("[NeuralPostFilter] Failed to create output buffer %u (status=%d)\n", i, status);
+      free(hostMem);
+      mHostMemory.pop_back();
     }
   }
 
@@ -425,23 +482,22 @@ void NeuralPostFilter::processSingleStage(const float *micSignal,
 
   // 3. Prepare input tensor: [1, 16, 1026] in temporal order (oldest→newest)
   //    Model has internal log compression: log1p(x*10)/3.0
+  //    Using direct host memory access (no lock/unlock needed for host buffers)
   void *inputPtr = nullptr;
-  if (LiteRtLockTensorBuffer(mInputBuffers[0], &inputPtr,
-                             kLiteRtTensorBufferLockModeWrite) ==
-      kLiteRtStatusOk) {
-    float *inputData = (float *)inputPtr;
+  if (LiteRtGetTensorBufferHostMemory(mInputBuffers[0], &inputPtr) != kLiteRtStatusOk) {
+    return;
+  }
+  float *inputData = (float *)inputPtr;
 
-    // Copy frames in temporal order: oldest first, newest (current) last
-    // mContextWritePos now points to the oldest frame (just wrapped)
-    for (int f = 0; f < CONTEXT_FRAMES; ++f) {
-      size_t srcFrame = (mContextWritePos + f) % CONTEXT_FRAMES;
-      size_t srcOffset = srcFrame * N_BINS * 2;
-      size_t dstOffset = f * N_BINS * 2;
+  // Copy frames in temporal order: oldest first, newest (current) last
+  // mContextWritePos now points to the oldest frame (just wrapped)
+  for (int f = 0; f < CONTEXT_FRAMES; ++f) {
+    size_t srcFrame = (mContextWritePos + f) % CONTEXT_FRAMES;
+    size_t srcOffset = srcFrame * N_BINS * 2;
+    size_t dstOffset = f * N_BINS * 2;
 
-      std::memcpy(inputData + dstOffset, mContextBuffer.data() + srcOffset,
-                  N_BINS * 2 * sizeof(float));
-    }
-    LiteRtUnlockTensorBuffer(mInputBuffers[0]);
+    std::memcpy(inputData + dstOffset, mContextBuffer.data() + srcOffset,
+                N_BINS * 2 * sizeof(float));
   }
 
   // 4. Run inference
@@ -454,14 +510,12 @@ void NeuralPostFilter::processSingleStage(const float *micSignal,
 
   // 5. Apply sigmoid mask to current frame magnitude
   void *outputPtr = nullptr;
-  if (LiteRtLockTensorBuffer(mOutputBuffers[0], &outputPtr,
-                             kLiteRtTensorBufferLockModeRead) ==
-      kLiteRtStatusOk) {
-    float *mask = (float *)outputPtr;
-    for (int i = 0; i < N_BINS; ++i) {
-      mMagMic[i] *= mask[i];
-    }
-    LiteRtUnlockTensorBuffer(mOutputBuffers[0]);
+  if (LiteRtGetTensorBufferHostMemory(mOutputBuffers[0], &outputPtr) != kLiteRtStatusOk) {
+    return;
+  }
+  float *mask = (float *)outputPtr;
+  for (int i = 0; i < N_BINS; ++i) {
+    mMagMic[i] *= mask[i];
   }
 #endif
 }

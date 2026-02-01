@@ -1,6 +1,7 @@
 #include "capture.h"
 #include "circular_buffer.h"
 #include "native_ring_buffer.h"
+#include "playback_ready_buffer.h"
 #include "soloud_slave_bridge.h"
 #include "filters/aec/reference_buffer.h"
 #include "native_scheduler.h"
@@ -521,6 +522,14 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   }
 #endif
 
+  // =========================================================================
+  // PLAYBACK READY BUFFER: Pre-deinterleaved buffer for instant SoLoud playback
+  // Write after filters are applied so processed audio is captured in both buffers
+  // =========================================================================
+  if (g_playbackReadyBuffer != nullptr && captured != nullptr) {
+    g_playbackReadyBuffer->write(captured, frameCount);
+  }
+
   // Do something with the captured audio data...
   // LOCK-FREE: Write to the current write buffer, then swap atomically
   {
@@ -546,45 +555,49 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   }
 
   // Calibration capture: accumulate samples if calibration is active
+  // LOCK-FREE: Use try_lock to avoid blocking the audio thread
   if (userData->mCalibrationActive) {
-    std::lock_guard<std::mutex> lock(userData->mCalibrationMutex);
-    size_t samplesToCapture = frameCount;
-    size_t spaceLeft =
-        userData->mCalibrationBuffer.size() - userData->mCalibrationWritePos;
-    if (samplesToCapture > spaceLeft) {
-      samplesToCapture = spaceLeft;
-    }
-    if (samplesToCapture > 0) {
-      // Copy to calibration buffer (Mono Downmix)
-      // Use captureChannels (actual device value) for correct buffer interpretation
+    std::unique_lock<std::mutex> lock(userData->mCalibrationMutex, std::try_to_lock);
+    if (lock.owns_lock()) {
+      size_t samplesToCapture = frameCount;
+      size_t spaceLeft =
+          userData->mCalibrationBuffer.size() - userData->mCalibrationWritePos;
+      if (samplesToCapture > spaceLeft) {
+        samplesToCapture = spaceLeft;
+      }
+      if (samplesToCapture > 0) {
+        // Copy to calibration buffer (Mono Downmix)
+        // Use captureChannels (actual device value) for correct buffer interpretation
 #if DEBUG_CALLBACK_CALIBRATION
-      float debugBatchSum = 0.0f;
+        float debugBatchSum = 0.0f;
 #endif
-      for (size_t i = 0; i < samplesToCapture; ++i) {
-        float sample;
-        if (captureChannels >= 2) {
-          // Downmix stereo to mono: (L + R) * 0.5
-          sample = (captured[i * captureChannels] + captured[i * captureChannels + 1]) * 0.5f;
-        } else {
-          sample = captured[i * captureChannels]; // Already mono
+        for (size_t i = 0; i < samplesToCapture; ++i) {
+          float sample;
+          if (captureChannels >= 2) {
+            // Downmix stereo to mono: (L + R) * 0.5
+            sample = (captured[i * captureChannels] + captured[i * captureChannels + 1]) * 0.5f;
+          } else {
+            sample = captured[i * captureChannels]; // Already mono
+          }
+          userData->mCalibrationBuffer[userData->mCalibrationWritePos + i] = sample;
+#if DEBUG_CALLBACK_CALIBRATION
+          debugBatchSum += fabsf(sample);
+#endif
         }
-        userData->mCalibrationBuffer[userData->mCalibrationWritePos + i] = sample;
-#if DEBUG_CALLBACK_CALIBRATION
-        debugBatchSum += fabsf(sample);
-#endif
-      }
 
 #if DEBUG_CALLBACK_CALIBRATION
-      static int logCounter = 0;
-      if (++logCounter % 100 == 0) {
-        printf("[Calibration Capture] Added %zu samples. Avg energy in batch: "
-               "%.6f\n",
-               samplesToCapture, debugBatchSum / (samplesToCapture + 0.0001f));
-      }
+        static int logCounter = 0;
+        if (++logCounter % 100 == 0) {
+          printf("[Calibration Capture] Added %zu samples. Avg energy in batch: "
+                 "%.6f\n",
+                 samplesToCapture, debugBatchSum / (samplesToCapture + 0.0001f));
+        }
 #endif
 
-      userData->mCalibrationWritePos += samplesToCapture;
+        userData->mCalibrationWritePos += samplesToCapture;
+      }
     }
+    // If lock wasn't acquired, skip this buffer - better than blocking
   }
 
   // Calculate energy for FFT visualization

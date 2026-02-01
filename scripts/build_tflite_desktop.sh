@@ -7,7 +7,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_DIR="$(dirname "$SCRIPT_DIR")"
-TFLITE_VERSION="v2.14.0"
+TFLITE_VERSION="v2.20.0"
 BUILD_DIR="$PLUGIN_DIR/build_tflite"
 OUTPUT_DIR="$PLUGIN_DIR/prebuilt"
 

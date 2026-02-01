@@ -127,6 +127,10 @@ bool NativeRingBuffer::configure(size_t capacityFrames, unsigned int channels,
   mChannels = channels;
   mSampleRate = sampleRate;
   mBuffer.resize(capacityFrames * channels, 0.0f);
+  // Reset pre-allocation flag so next preAllocateForRecording() will re-expand buffer
+  // Without this, buffer stays at ring capacity (5s) instead of recording capacity (10min)
+  mPreAllocated = false;
+  mMaxRecordingFrames = 0;
   reset();
   return true;
 }
@@ -180,8 +184,9 @@ void NativeRingBuffer::write(const float *data, size_t frameCount, unsigned int 
 
     // Check if we'd exceed pre-allocated buffer (cap recording, don't resize from audio thread!)
     if (requiredSize > mBuffer.size()) {
-      // Recording exceeds max capacity - silently drop new data
-      // (Dart should check recording length and stop before this happens)
+      // Recording exceeds max capacity - track dropped frames for debugging
+      // This typically indicates preAllocateForRecording() wasn't called or buffer was reconfigured
+      mDroppedFrames.fetch_add(frameCount, std::memory_order_relaxed);
       return;
     }
 
@@ -377,6 +382,8 @@ void NativeRingBuffer::startRecording(size_t latencyCompFrames) {
   }
 
   mRecordingStartTotalFrame = currentTotal;
+  // Reset dropped frame counter for this recording session
+  mDroppedFrames.store(0, std::memory_order_release);
   mRecordingActive.store(true, std::memory_order_release);
 }
 
