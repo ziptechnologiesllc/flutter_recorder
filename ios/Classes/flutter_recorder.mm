@@ -15,6 +15,9 @@
 #include "../../src/filters/autogain.cpp"
 #include "../../src/filters/echo_cancellation.cpp"
 #include "../../src/filters/filters.cpp"
+#include "../../src/native_ring_buffer.cpp"
+#include "../../src/native_scheduler.cpp"
+#include "../../src/soloud_slave_bridge.cpp"
 
 #import <AVFoundation/AVFoundation.h>
 

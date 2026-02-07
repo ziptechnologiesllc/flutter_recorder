@@ -18,7 +18,7 @@ A new Flutter FFI plugin project.
   # paths, so Classes contains a forwarder C file that relatively imports
   # `../src/*` so that the C sources can be shared among all target platforms.
   s.source           = { :path => '.' }
-  s.source_files = 'Classes/**/*'
+  s.source_files = 'Classes/**/*', '../src/**/*.{c,cpp,h}', '../src/filters/**/*.{c,cpp,h}'
   s.dependency 'FlutterMacOS'
 
   # LiteRT for macOS: use prebuilt binary (built from google-ai-edge/LiteRT)
@@ -34,11 +34,7 @@ A new Flutter FFI plugin project.
       exit 1
     fi
 
-    # Fix install name if needed
-    install_name_tool -id "@rpath/libLiteRt.dylib" "../prebuilt/macos/libLiteRt.dylib" 2>/dev/null || true
-
-    # Re-sign after modification
-    codesign --force --sign - "../prebuilt/macos/libLiteRt.dylib" 2>/dev/null || true
+    # install_name already set to @rpath/libLiteRt.dylib by build script
   CMD
 
   s.platform = :osx, '14.0'
@@ -80,12 +76,7 @@ A new Flutter FFI plugin project.
         cp -f "$DYLIB_PATH" "$FRAMEWORK_DIR/"
         echo "Copied libLiteRt.dylib to $FRAMEWORK_DIR"
 
-        # Update install name to use @loader_path (relative to framework binary)
-        # This ensures that when flutter_recorder is loaded, it looks for libLiteRt.dylib in the same dir
-        install_name_tool -id "@loader_path/libLiteRt.dylib" "$FRAMEWORK_DIR/libLiteRt.dylib"
-
-        # Re-sign the dylib
-        codesign --force --sign - "$FRAMEWORK_DIR/libLiteRt.dylib"
+        # install_name already set to @rpath/libLiteRt.dylib by build script
       else
         echo "WARNING: libLiteRt.dylib not found at $DYLIB_PATH"
       fi
