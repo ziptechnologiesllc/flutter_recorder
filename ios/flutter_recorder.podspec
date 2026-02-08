@@ -41,6 +41,13 @@ A new Flutter FFI plugin project.
       'LIBRARY_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/../prebuilt/ios',
       'OTHER_LDFLAGS' => '-lLiteRt'
     }
+    # Force-load the static archive in the final app binary.
+    # With use_frameworks! :linkage => :static, pod_target_xcconfig linker flags
+    # don't propagate to the app target. user_target_xcconfig ensures the archive
+    # is force-loaded during the final link step.
+    s.user_target_xcconfig = {
+      'OTHER_LDFLAGS' => '-force_load $(SRCROOT)/../plugins/flutter_recorder/prebuilt/ios/libLiteRt.a'
+    }
   elsif prebuilt_dylib
     s.vendored_libraries = '../prebuilt/ios/libLiteRt.dylib'
     s.pod_target_xcconfig = {
