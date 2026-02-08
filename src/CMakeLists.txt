@@ -46,8 +46,12 @@ set_target_properties(flutter_recorder PROPERTIES
 # Real-time audio cannot tolerate -O0 debug builds - causes dropouts
 # This matches how professional DAWs like Ableton handle their audio engines
 if (NOT WIN32)
-  # For GCC/Clang: -O2 for speed, -ffast-math for SIMD, SSE for vectorization
-  target_compile_options(flutter_recorder PRIVATE -O2 -ffast-math -msse2 -msse3)
+  # For GCC/Clang: -O2 for speed, -ffast-math for SIMD
+  target_compile_options(flutter_recorder PRIVATE -O2 -ffast-math)
+  # SSE flags are x86-only — skip on ARM (Android arm64, Apple Silicon)
+  if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i[3-6]86" AND NOT ANDROID)
+    target_compile_options(flutter_recorder PRIVATE -msse2 -msse3)
+  endif()
 else()
   # For MSVC: /O2 for speed
   target_compile_options(flutter_recorder PRIVATE /O2)
