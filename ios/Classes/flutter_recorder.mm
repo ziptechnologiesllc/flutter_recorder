@@ -18,6 +18,7 @@
 #include "../../src/native_ring_buffer.cpp"
 #include "../../src/native_scheduler.cpp"
 #include "../../src/soloud_slave_bridge.cpp"
+#include "../../src/stubs/signpost_profiler_stub.cpp"
 
 #import <AVFoundation/AVFoundation.h>
 
