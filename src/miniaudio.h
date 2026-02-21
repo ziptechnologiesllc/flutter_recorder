@@ -1,4 +1,12 @@
 /*
+ * CLOUDLOOP PATCH: Hide miniaudio symbols to avoid 1206 duplicate symbol errors
+ * when linking with flutter_soloud (which also embeds miniaudio).
+ * MA_API = hidden visibility means these symbols won't be exported from the
+ * flutter_recorder framework, so only flutter_soloud's copy is globally visible.
+ */
+/* CLOUDLOOP: MA_API override removed — see Podfile for linking strategy */
+
+/*
 Audio playback and capture library. Choice of public domain or MIT-0. See license statements at the end of this file.
 miniaudio - v0.11.22 - 2025-02-24
 
