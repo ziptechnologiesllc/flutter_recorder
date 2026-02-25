@@ -455,6 +455,8 @@ FFI_PLUGIN_EXPORT size_t flutter_recorder_getRecordedWavSize();
 // Free the recorded audio and WAV buffers
 FFI_PLUGIN_EXPORT void flutter_recorder_freeRecordedAudio();
 
+FFI_PLUGIN_EXPORT int flutter_recorder_wasDuplexDenied();
+
 #ifdef __cplusplus
 }
 #endif
