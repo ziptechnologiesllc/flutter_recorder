@@ -56,6 +56,10 @@ public:
 
     bool isDeviceStarted();
 
+    /// Returns true if duplex mode was requested but capture couldn't get exclusive mode.
+    /// Dart should fall back to standard (non-slave) SoLoud when this is true.
+    bool wasDuplexDenied() const { return mDuplexDenied; }
+
     CaptureErrors start();
 
     void stop();
@@ -186,6 +190,10 @@ private:
 
     /// true when the capture device is initialized.
     bool mInited;
+
+    /// true when duplex was requested but capture fell to shared mode
+    /// (exclusive denied by HAL). Dart should use standard SoLoud instead of slave.
+    bool mDuplexDenied = false;
 
     /// true when the context has been initialized (keep alive across init/dispose cycles)
     bool mContextInited;

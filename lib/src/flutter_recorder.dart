@@ -791,6 +791,13 @@ interface class Recorder {
     return _impl.isSlaveAudioReady();
   }
 
+  /// Returns true if duplex mode was requested but capture couldn't get
+  /// exclusive mode (fell to shared). Caller should use standard SoLoud
+  /// (non-slave) instead of slave mode when this is true.
+  bool wasDuplexDenied() {
+    return _impl.wasDuplexDenied();
+  }
+
   // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////

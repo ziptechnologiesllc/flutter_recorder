@@ -975,6 +975,7 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   printf("[Capture::init] Calling ma_device_init...\n");
   fflush(stdout);
 
+  mDuplexDenied = false;  // Reset on each init
   result = ma_device_init(&context, &deviceConfig, &device);
   if (result != MA_SUCCESS) {
     printf("Failed to initialize capture device. Error: %d\n", result);
@@ -984,6 +985,57 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   }
 
   printf("[Capture::init] Device initialized successfully\n");
+
+#ifdef _IS_ANDROID_
+  // CRITICAL: Check if duplex got exclusive mode on capture.
+  // If capture fell to SHARED mode, the buffer sizes will be mismatched
+  // (capture: 4096 frames/85ms vs playback: 512 frames/10ms) causing
+  // half-speed playback and eventual static corruption.
+  // Fix: deinit duplex, re-init as capture-only. Dart will use standard SoLoud.
+  if (!captureOnly && device.aaudio.pStreamCapture != nullptr) {
+    void* aaudioLib = context.aaudio.hAAudio;
+    auto getSharingMode = aaudioLib ?
+      (int32_t (*)(void*))dlsym(aaudioLib, "AAudioStream_getSharingMode") : nullptr;
+    if (getSharingMode) {
+      int32_t captureShareMode = getSharingMode(device.aaudio.pStreamCapture);
+      if (captureShareMode != 0) {  // 0 = EXCLUSIVE, 1 = SHARED
+        __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
+            "[Capture::init] DUPLEX DENIED: capture got sharingMode=%d (SHARED). "
+            "Re-initializing as CAPTURE-ONLY for clean exclusive fast path.",
+            captureShareMode);
+        
+        // Deinit the broken duplex device
+        ma_device_uninit(&device);
+        
+        // Re-init as capture-only with same fast-path settings
+        deviceConfig = ma_device_config_init(ma_device_type_capture);
+        deviceConfig.performanceProfile = ma_performance_profile_low_latency;
+        deviceConfig.periodSizeInFrames = 480;
+        deviceConfig.aaudio.inputPreset = ma_aaudio_input_preset_voice_recognition;
+        deviceConfig.aaudio.usage = ma_aaudio_usage_game;
+        deviceConfig.aaudio.contentType = ma_aaudio_content_type_music;
+        deviceConfig.capture.shareMode = ma_share_mode_exclusive;
+        deviceConfig.capture.format = ma_format_s16;
+        deviceConfig.capture.channels = 2;
+        deviceConfig.sampleRate = 48000;
+        deviceConfig.dataCallback = data_callback;
+        deviceConfig.pUserData = this;
+        
+        result = ma_device_init(&context, &deviceConfig, &device);
+        if (result != MA_SUCCESS) {
+          __android_log_print(ANDROID_LOG_ERROR, LOG_TAG,
+              "[Capture::init] Capture-only re-init also failed: %d", result);
+          ma_context_uninit(&context);
+          return captureInitFailed;
+        }
+        
+        mDuplexDenied = true;
+        __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+            "[Capture::init] Capture-only re-init SUCCESS. Dart should use standard SoLoud.");
+      }
+    }
+  }
+#endif
 
   // If format was unknown, now set bytesPerSample based on actual device format
   if (bytesPerSample == 0) {

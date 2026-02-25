@@ -741,6 +741,10 @@ class RecorderFfi extends RecorderImpl {
     return _bindings.flutter_recorder_isSlaveAudioReady() == 1;
   }
 
+  bool wasDuplexDenied() {
+    return _bindings.flutter_recorder_wasDuplexDenied() == 1;
+  }
+
   // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////

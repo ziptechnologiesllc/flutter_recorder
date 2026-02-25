@@ -353,6 +353,8 @@ abstract class RecorderImpl {
   @mustBeOverridden
   bool isSlaveAudioReady();
 
+  bool wasDuplexDenied();
+
   // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////

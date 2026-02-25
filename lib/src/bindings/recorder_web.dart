@@ -444,6 +444,10 @@ class RecorderWeb extends RecorderImpl {
     return true;
   }
 
+  bool wasDuplexDenied() {
+    return false;
+  }
+
   // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////

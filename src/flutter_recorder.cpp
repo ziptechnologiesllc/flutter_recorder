@@ -922,6 +922,11 @@ FFI_PLUGIN_EXPORT int flutter_recorder_isSlaveAudioReady() {
   return soloud_isSlaveAudioReady() ? 1 : 0;
 }
 
+FFI_PLUGIN_EXPORT int flutter_recorder_wasDuplexDenied() {
+  if (capture == nullptr) return 0;
+  return capture->wasDuplexDenied() ? 1 : 0;
+}
+
 /////////////////////////
 /// AEC (Adaptive Echo Cancellation)
 /////////////////////////

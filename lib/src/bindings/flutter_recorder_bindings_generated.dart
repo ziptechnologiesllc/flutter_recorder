@@ -588,6 +588,16 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_isSlaveAudioReady =
       _flutter_recorder_isSlaveAudioReadyPtr.asFunction<int Function()>();
 
+  int flutter_recorder_wasDuplexDenied() {
+    return _flutter_recorder_wasDuplexDenied();
+  }
+
+  late final _flutter_recorder_wasDuplexDeniedPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_wasDuplexDenied');
+  late final _flutter_recorder_wasDuplexDenied =
+      _flutter_recorder_wasDuplexDeniedPtr.asFunction<int Function()>();
+
   /// Set native audio sink for direct recorder-to-player streaming
   void flutter_recorder_setNativeAudioSink(
     NativeAudioSinkCallback callback,
