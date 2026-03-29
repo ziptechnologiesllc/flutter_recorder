@@ -1,5 +1,9 @@
+// Hide miniaudio symbols so they don't conflict with flutter_soloud's copy
+// when both plugins are force-loaded into the same binary.
+#define MA_API static
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
+#undef MA_API
 
 #include "analyzer.h"
 #include "capture.h"

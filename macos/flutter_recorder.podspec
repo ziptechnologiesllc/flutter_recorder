@@ -13,74 +13,42 @@ A new Flutter FFI plugin project.
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'Your Company' => 'email@example.com' }
 
-  # This will ensure the source files in Classes/ are included in the native
-  # builds of apps using this FFI plugin. Podspec does not support relative
-  # paths, so Classes contains a forwarder C file that relatively imports
-  # `../src/*` so that the C sources can be shared among all target platforms.
   s.source           = { :path => '.' }
-  s.source_files = 'Classes/**/*', '../src/**/*.{c,cpp,h}', '../src/filters/**/*.{c,cpp,h}'
+  s.source_files     = 'Classes/**/*.{h,mm,c}'
   s.dependency 'FlutterMacOS'
 
-  # LiteRT for macOS: use prebuilt binary (built from google-ai-edge/LiteRT)
-  # Located at: prebuilt/macos/libLiteRt.dylib
-  s.vendored_libraries = '../prebuilt/macos/libLiteRt.dylib'
-
-  # Ensure the dylib is copied to the app bundle at runtime
-  s.prepare_command = <<-CMD
-    # Verify dylib exists
-    if [ ! -f "../prebuilt/macos/libLiteRt.dylib" ]; then
-      echo "Error: libLiteRt.dylib not found. Please build LiteRT first."
-      echo "See: https://ai.google.dev/edge/litert/next/cpp"
-      exit 1
-    fi
-
-    # install_name already set to @rpath/libLiteRt.dylib by build script
-  CMD
+  # LiteRT disabled on macOS for now — no prebuilt Intel/ARM binary yet
 
   s.platform = :osx, '14.0'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     "CLANG_CXX_LANGUAGE_STANDARD" => "c++17",
-    # Enhanced optimization flags
-    'OTHER_CFLAGS' => '-O3 -ffast-math -flto -funroll-loops -pthread -Wno-strict-prototypes',
-    'OTHER_CPLUSPLUSFLAGS' => '-O3 -ffast-math -flto -funroll-loops -pthread -Wno-strict-prototypes',
+    'OTHER_CFLAGS' => '-O3 -ffast-math -flto -funroll-loops -pthread -Wno-strict-prototypes -fvisibility=hidden',
+    'OTHER_CPLUSPLUSFLAGS' => '-O3 -ffast-math -flto -funroll-loops -pthread -Wno-strict-prototypes -fvisibility=hidden -fvisibility-inlines-hidden',
     'GCC_OPTIMIZATION_LEVEL' => '3',
-    # Add audio and threading optimization flags - enable USE_TFLITE for neural post-filter
-    'GCC_PREPROCESSOR_DEFINITIONS' => 'MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1 USE_TFLITE=1',
-    'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/../src $(PODS_TARGET_SRCROOT)/../prebuilt/include',
-    'LIBRARY_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/../prebuilt/macos',
-    'OTHER_LDFLAGS' => '-lLiteRt -Wl,-rpath,@executable_path/../Frameworks -Wl,-rpath,@loader_path',
-    # Universal binary support
+    'GCC_PREPROCESSOR_DEFINITIONS' => 'MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1',
+    'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/../src',
     'EXCLUDED_ARCHS[sdk=macosx*]' => ''
   }
 
-  # Also set on user target
-  s.user_target_xcconfig = {
-    'EXCLUDED_ARCHS[sdk=macosx*]' => ''
-  }
+  # Preserve FFI symbols using CMake-built static lib with hidden visibility.
+  # Both plugins embed miniaudio and shared analyzer/fft code — hidden visibility
+  # on the CMake lib prevents duplicate symbol conflicts with flutter_soloud.
+  plugin_root = '${PODS_ROOT}/../Flutter/ephemeral/.symlinks/plugins/flutter_recorder/macos'
 
-  # Embed the dylib as a resource so it gets copied to the framework
-  s.resource = '../prebuilt/macos/libLiteRt.dylib'
-
-  # Add a script phase to copy the dylib to the Frameworks directory
   s.script_phase = {
-    :name => 'Embed LiteRT Library',
-    :execution_position => :after_compile,
-    :script => <<-SCRIPT
-      echo "Embedding libLiteRt.dylib into framework"
-      DYLIB_PATH="${PODS_TARGET_SRCROOT}/../prebuilt/macos/libLiteRt.dylib"
-      FRAMEWORK_DIR="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.framework/Versions/A"
+    :name => 'Build flutter_recorder with CMake',
+    :script => 'bash "${PODS_TARGET_SRCROOT}/build_cmake.sh"',
+    :execution_position => :before_compile,
+    :output_files => ['$(PODS_TARGET_SRCROOT)/cmake_build/macosx/libflutter_recorder_plugin.a'],
+  }
 
-      if [ -f "$DYLIB_PATH" ]; then
-        mkdir -p "$FRAMEWORK_DIR"
-        cp -f "$DYLIB_PATH" "$FRAMEWORK_DIR/"
-        echo "Copied libLiteRt.dylib to $FRAMEWORK_DIR"
-
-        # install_name already set to @rpath/libLiteRt.dylib by build script
-      else
-        echo "WARNING: libLiteRt.dylib not found at $DYLIB_PATH"
-      fi
-SCRIPT
+  s.user_target_xcconfig = {
+    'OTHER_LDFLAGS' => "$(inherited) -force_load #{plugin_root}/cmake_build/macosx/libflutter_recorder_plugin.a -lc++",
+    'LIBRARY_SEARCH_PATHS' => "$(inherited) \"#{plugin_root}/cmake_build/macosx\"",
+    'STRIP_STYLE' => 'debugging',
+    'DEBUG_INFORMATION_FORMAT' => 'dwarf-with-dsym',
+    'EXCLUDED_ARCHS[sdk=macosx*]' => ''
   }
 
   s.swift_version = '5.0'

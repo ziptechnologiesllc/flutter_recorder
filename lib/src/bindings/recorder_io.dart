@@ -50,7 +50,13 @@ class RecorderFfi extends RecorderImpl {
   /// can be found.
   static final ffi.DynamicLibrary _dylib = () {
     if (Platform.isMacOS || Platform.isIOS) {
-      return ffi.DynamicLibrary.open('$_libName.framework/$_libName');
+      // CocoaPods may produce a static library (linked into the runner)
+      // or a dynamic framework — try dynamic first, fall back to process.
+      try {
+        return ffi.DynamicLibrary.open('$_libName.framework/$_libName');
+      } catch (_) {
+        return ffi.DynamicLibrary.process();
+      }
     }
     if (Platform.isAndroid || Platform.isLinux) {
       return ffi.DynamicLibrary.open('lib$_libName.so');

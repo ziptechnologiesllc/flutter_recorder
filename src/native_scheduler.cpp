@@ -521,3 +521,17 @@ int64_t NativeScheduler::getNextLoopBoundaryFrom(int64_t fromFrame) const {
 
     return fromFrame + framesToNextBoundary;
 }
+
+// Extern C accessors for looper_bridge.cpp (in flutter_soloud plugin).
+// These cross the plugin boundary — called from the worker thread.
+extern "C" {
+    int64_t looper_getGlobalFrame() {
+        return NativeScheduler::instance().getGlobalFrame();
+    }
+    int64_t looper_getBaseLoopFrames() {
+        return NativeScheduler::instance().getBaseLoopFrames();
+    }
+    int64_t looper_getBaseLoopStartFrame() {
+        return NativeScheduler::instance().getBaseLoopStartFrame();
+    }
+}

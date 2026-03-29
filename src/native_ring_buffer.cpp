@@ -361,19 +361,55 @@ void NativeRingBuffer::reset() {
   std::fill(mBuffer.begin(), mBuffer.end(), 0.0f);
 }
 
-// AUDIO THREAD SAFE: No printf/fprintf calls
+// AUDIO THREAD SAFE: No printf/fprintf calls, no allocations
 void NativeRingBuffer::startRecording(size_t latencyCompFrames) {
   size_t writePos = mWritePos.load(std::memory_order_acquire);
   size_t currentTotal = mTotalFramesWritten.load(std::memory_order_acquire);
 
-  // Calculate where recording effectively starts (with latency compensation)
-  if (latencyCompFrames > 0 && writePos >= latencyCompFrames) {
-    mRecordingStartWritePos = writePos - latencyCompFrames;
-  } else if (latencyCompFrames > 0 && currentTotal >= latencyCompFrames) {
-    // Handle wrap-around case in ring buffer
-    mRecordingStartWritePos = (writePos + mCapacityFrames - latencyCompFrames) % mCapacityFrames;
+  // Transition from wrapped ring mode to linear recording mode.
+  // We copy the latency-compensation pre-roll from the ring to position 0,
+  // then set mWritePos so new audio appends linearly after it.
+  // This avoids the wrapped-position-as-linear-position bug where
+  // stopRecording() would extract from the wrong buffer offset.
+
+  if (latencyCompFrames > 0 && currentTotal >= latencyCompFrames) {
+    // Copy pre-roll data from ring buffer to beginning of linear buffer.
+    // The ring may wrap, so handle both cases.
+    size_t preRollSamples = latencyCompFrames * mChannels;
+    size_t ringCapacitySamples = mCapacityFrames * mChannels;
+
+    if (writePos >= latencyCompFrames) {
+      // No wrap — pre-roll is contiguous before writePos
+      size_t srcPos = (writePos - latencyCompFrames) * mChannels;
+      // memmove because src and dst may overlap (both in mBuffer)
+      std::memmove(mBuffer.data(), mBuffer.data() + srcPos, preRollSamples * sizeof(float));
+    } else {
+      // Wrap-around — pre-roll spans end and start of ring
+      size_t tailFrames = mCapacityFrames - (mCapacityFrames + writePos - latencyCompFrames) % mCapacityFrames;
+      // Clamp: the tail is from the wrapped start position to end of ring
+      size_t wrapStart = (writePos + mCapacityFrames - latencyCompFrames) % mCapacityFrames;
+      size_t firstPartFrames = mCapacityFrames - wrapStart;
+      size_t secondPartFrames = latencyCompFrames - firstPartFrames;
+
+      size_t firstPartSamples = firstPartFrames * mChannels;
+      size_t secondPartSamples = secondPartFrames * mChannels;
+
+      // Copy tail of ring (end portion) to beginning of buffer
+      std::memmove(mBuffer.data(), mBuffer.data() + wrapStart * mChannels,
+                   firstPartSamples * sizeof(float));
+      // Copy head of ring (start portion) right after
+      std::memmove(mBuffer.data() + firstPartSamples, mBuffer.data(),
+                   secondPartSamples * sizeof(float));
+    }
+
+    // Linear recording starts after the pre-roll
+    mRecordingStartWritePos = 0;
+    mWritePos.store(latencyCompFrames, std::memory_order_release);
   } else {
-    mRecordingStartWritePos = writePos;
+    // No latency compensation (quantized loop recording) or not enough data.
+    // Start linear recording from position 0.
+    mRecordingStartWritePos = 0;
+    mWritePos.store(0, std::memory_order_release);
   }
 
   mRecordingStartTotalFrame = currentTotal;
@@ -448,9 +484,10 @@ float* NativeRingBuffer::stopRecording(size_t* outFrameCount, size_t expectedFra
     }
   }
 
-  // Reset write position to beginning (rewind the tape)
+  // Reset write position for ring mode (startRecording will reset again for linear)
   mWritePos.store(0, std::memory_order_release);
-  mTotalFramesWritten.store(0, std::memory_order_release);
+  // NOTE: Do NOT reset mTotalFramesWritten — it's the global frame counter used
+  // by the scheduler to calculate frame offsets for subsequent recordings.
 
   if (outFrameCount) *outFrameCount = frameCount;
   return mOutputBuffer.data();  // Caller must NOT free - buffer owned by ring buffer

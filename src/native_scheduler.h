@@ -142,6 +142,9 @@ public:
     /// Get base loop length in frames (0 if no base loop)
     int64_t getBaseLoopFrames() const { return mBaseLoopFrames.load(std::memory_order_acquire); }
 
+    /// Get the global frame where the base loop started
+    int64_t getBaseLoopStartFrame() const { return mBaseLoopStartFrame.load(std::memory_order_acquire); }
+
     /// Get frame of next loop boundary from current position
     int64_t getNextLoopBoundary() const;
 
