@@ -225,16 +225,18 @@ class RecorderFfi extends RecorderImpl {
   Stream<LooperPlaybackStartedEvent> get looperPlaybackStartedStream =>
       _looperPlaybackStartedController.stream;
 
-  ffi.NativeCallable<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double)>?
+  ffi.NativeCallable<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double, ffi.Pointer<ffi.Char>)>?
       _nativeLooperPlaybackStartedCallable;
 
-  void _looperPlaybackStartedCallback(int soundHash, int handle, double durationSeconds) {
+  void _looperPlaybackStartedCallback(int soundHash, int handle, double durationSeconds, ffi.Pointer<ffi.Char> wavPath) {
     if (_looperPlaybackStartedController.isClosed) return;
+    final path = wavPath.cast<Utf8>().toDartString();
     _looperPlaybackStartedController.add(
       LooperPlaybackStartedEvent(
         soundHash: soundHash,
         handle: handle,
         durationSeconds: durationSeconds,
+        wavPath: path,
       ),
     );
   }
@@ -242,7 +244,7 @@ class RecorderFfi extends RecorderImpl {
   @override
   Future<void> setLooperPlaybackStartedCallback() async {
     _nativeLooperPlaybackStartedCallable = ffi
-        .NativeCallable<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double)>
+        .NativeCallable<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double, ffi.Pointer<ffi.Char>)>
         .listener(_looperPlaybackStartedCallback);
     _bindings.flutter_recorder_setLooperPlaybackStartedCallback(
       _nativeLooperPlaybackStartedCallable!.nativeFunction,

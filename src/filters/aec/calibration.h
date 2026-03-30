@@ -43,7 +43,7 @@ public:
     static constexpr int CLICK_COUNT = 5;              // Number of clicks to average
     static constexpr int CLICK_SAMPLES = 48;           // Samples per click (~1ms @ 48kHz, audible pulse)
     static constexpr int CLICK_SPACING_MS = 600;       // 600ms between clicks for full IR capture
-    static constexpr int IR_LENGTH = 2048;             // Impulse response taps (~42ms @ 48kHz)
+    static constexpr int IR_LENGTH = 4096;             // Impulse response taps (~85ms @ 48kHz)
     static constexpr float CLICK_AMPLITUDE = 1.0f;     // Full scale for max SNR
     static constexpr int TAIL_MS = 400;                // Silence after last click for full decay
     static constexpr float MIN_PEAK_THRESHOLD = 0.005f; // Lower threshold for detection

@@ -216,6 +216,7 @@ class LooperPlaybackStartedEvent {
     required this.soundHash,
     required this.handle,
     required this.durationSeconds,
+    required this.wavPath,
   });
 
   /// The SoLoud sound hash for the playing loop.
@@ -227,9 +228,13 @@ class LooperPlaybackStartedEvent {
   /// Duration of the loop in seconds.
   final double durationSeconds;
 
+  /// Path to the WAV file that was loaded for playback.
+  /// Contains the recording UUID for matching back to the correct recording.
+  final String wavPath;
+
   @override
   String toString() {
-    return 'LooperPlaybackStartedEvent(hash: $soundHash, handle: $handle, duration: ${durationSeconds}s)';
+    return 'LooperPlaybackStartedEvent(hash: $soundHash, handle: $handle, duration: ${durationSeconds}s, path: $wavPath)';
   }
 }
 

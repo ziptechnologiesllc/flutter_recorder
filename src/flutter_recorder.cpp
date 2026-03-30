@@ -158,10 +158,12 @@ static void looperWorkerThreadFunc() {
   LOOPER_LOG("Thread started");
 
   while (g_looperWorkerRunning.load(std::memory_order_acquire)) {
-    // Wait for work notification (no polling, no CPU waste)
+    // Wait for work notification with 5ms timeout fallback.
+    // The timeout ensures we catch the flag even if notify_one() is missed
+    // (can happen in release builds without mutex synchronization).
     {
       std::unique_lock<std::mutex> lock(g_looperMutex);
-      g_looperCondVar.wait(lock, [] {
+      g_looperCondVar.wait_for(lock, std::chrono::milliseconds(5), [] {
         return g_looperWorkPending.load(std::memory_order_acquire) ||
                !g_looperWorkerRunning.load(std::memory_order_acquire);
       });
@@ -181,7 +183,11 @@ static void looperWorkerThreadFunc() {
 
       // STEP 1: Write WAV file BEFORE passing to SoLoud
       // (SoLoud will deinterleave the data, so we must write first)
+      // Static so pointer remains valid for async Dart callback (NativeCallable.listener)
+      static char savedWavPath[512];
+      savedWavPath[0] = '\0';
       if (g_pendingWavPath[0] != '\0') {
+        strncpy(savedWavPath, g_pendingWavPath, sizeof(savedWavPath) - 1);
         writeWavToFile(g_pendingWavPath, g_lastRecordedAudio,
                        g_lastRecordedFrameCount, g_lastRecordedSampleRate,
                        g_lastRecordedChannels);
@@ -215,9 +221,10 @@ static void looperWorkerThreadFunc() {
                     soundHash, handle, durationSeconds);
 
             // Notify Dart via callback (if set)
+            // Pass wavPath so Dart can match this playback to the correct recording
             if (dartLooperPlaybackStartedCallback != nullptr) {
               LOOPER_LOG("Notifying Dart of playback start");
-              dartLooperPlaybackStartedCallback(soundHash, handle, durationSeconds);
+              dartLooperPlaybackStartedCallback(soundHash, handle, durationSeconds, savedWavPath);
             }
           } else {
             LOOPER_LOG("Failed to start playback");
@@ -1879,10 +1886,9 @@ void storeRecordedAudio(float* data, size_t frameCount) {
   }
 
   // Signal worker thread via condition variable
-  // AUDIO THREAD SAFE: notify_one() without lock is safe here because:
-  // 1. We set the atomic flag first (worker checks this in wait predicate)
-  // 2. notify_one() is lock-free on most platforms
-  // 3. If worker misses the notify, it will see the flag on next check
+  // Wake the looper worker thread — lock-free on the audio thread.
+  // Set the flag first, then notify. If the worker misses the notify_one(),
+  // its wait_for() timeout (5ms) will catch the flag on the next poll.
   if (frameCount > 0) {
     g_looperWorkPending.store(true, std::memory_order_release);
     g_looperCondVar.notify_one();

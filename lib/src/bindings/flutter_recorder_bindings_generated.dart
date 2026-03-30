@@ -93,7 +93,7 @@ class FlutterRecorderBindings {
               ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>>)>();
 
   void flutter_recorder_setLooperPlaybackStartedCallback(
-    ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double)>> callback,
+    ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double, ffi.Pointer<ffi.Char>)>> callback,
   ) {
     return _flutter_recorder_setLooperPlaybackStartedCallback(callback);
   }
@@ -101,12 +101,12 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_setLooperPlaybackStartedCallbackPtr = _lookup<
       ffi.NativeFunction<
           ffi.Void Function(
-              ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double)>>)>>(
+              ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double, ffi.Pointer<ffi.Char>)>>)>>(
       'flutter_recorder_setLooperPlaybackStartedCallback');
   late final _flutter_recorder_setLooperPlaybackStartedCallback =
       _flutter_recorder_setLooperPlaybackStartedCallbackPtr.asFunction<
           void Function(
-              ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double)>>)>();
+              ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Uint32, ffi.Uint32, ffi.Double, ffi.Pointer<ffi.Char>)>>)>();
 
   void flutter_recorder_nativeFree(
     ffi.Pointer<ffi.Void> pointer,

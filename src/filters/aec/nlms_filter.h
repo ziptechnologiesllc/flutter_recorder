@@ -19,8 +19,8 @@ extern void aecLog(const char *fmt, ...);
  */
 class NLMSFilter {
 public:
-  // Filter length: ~42ms @ 48kHz for typical room acoustics
-  static constexpr int DEFAULT_FILTER_LENGTH = 2048;
+  // Filter length: ~85ms @ 48kHz — covers direct path + early reflections + room tail
+  static constexpr int DEFAULT_FILTER_LENGTH = 4096;
 
   NLMSFilter(int filterLength = DEFAULT_FILTER_LENGTH,
              float stepSize = 0.0f,       // Unused, kept for API compatibility

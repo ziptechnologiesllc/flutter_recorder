@@ -23,7 +23,7 @@
 class VssNlmsFilter {
 public:
   static constexpr int DEFAULT_FILTER_LENGTH =
-      2048; // ~42ms at 48kHz, covers typical room acoustics
+      4096; // ~85ms at 48kHz, covers direct path + early reflections + room tail
 
   /**
    * @param taps Filter length in samples. Will be rounded up to nearest

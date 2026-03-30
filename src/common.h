@@ -57,8 +57,8 @@ typedef void (*dartRecordingStoppedCallback_t)(int64_t recordedFrames, const cha
 typedef void (*dartRecordingStartedCallback_t)(int64_t startFrame, const char* wavPath);
 
 // Callback when looper playback starts (called from worker thread after g_looperBridge succeeds)
-// Parameters: soundHash, handle, durationSeconds
-typedef void (*dartLooperPlaybackStartedCallback_t)(unsigned int soundHash, unsigned int handle, double durationSeconds);
+// Parameters: soundHash, handle, durationSeconds, wavPath (null-terminated, contains recording UUID)
+typedef void (*dartLooperPlaybackStartedCallback_t)(unsigned int soundHash, unsigned int handle, double durationSeconds, const char* wavPath);
 
 // To be used by `NativeCallable` since it will be called inside the audio thread,
 // these functions must return void.
@@ -78,6 +78,6 @@ extern void (*dartRecordingStoppedCallback)(int64_t recordedFrames, const char* 
 extern void (*dartRecordingStartedCallback)(int64_t startFrame, const char* wavPath);
 
 // Looper playback started callback - called from worker thread when loop playback starts
-extern void (*dartLooperPlaybackStartedCallback)(unsigned int soundHash, unsigned int handle, double durationSeconds);
+extern void (*dartLooperPlaybackStartedCallback)(unsigned int soundHash, unsigned int handle, double durationSeconds, const char* wavPath);
 
 #endif // COMMON_H
