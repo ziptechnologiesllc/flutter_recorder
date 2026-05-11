@@ -405,14 +405,19 @@ void NativeRingBuffer::startRecording(size_t latencyCompFrames) {
     // Linear recording starts after the pre-roll
     mRecordingStartWritePos = 0;
     mWritePos.store(latencyCompFrames, std::memory_order_release);
+    // The recording effectively starts latencyCompFrames before the current
+    // write position — that's where the copied pre-roll begins in real time.
+    // Loop mode passes (audioFrameCount - offsetInBuffer) here, which makes
+    // mRecordingStartTotalFrame equal the scheduler's target frame.
+    mRecordingStartTotalFrame = currentTotal - latencyCompFrames;
   } else {
     // No latency compensation (quantized loop recording) or not enough data.
     // Start linear recording from position 0.
     mRecordingStartWritePos = 0;
     mWritePos.store(0, std::memory_order_release);
+    mRecordingStartTotalFrame = currentTotal;
   }
 
-  mRecordingStartTotalFrame = currentTotal;
   mRecordingActive.store(true, std::memory_order_release);
 }
 

@@ -181,7 +181,7 @@ private:
     std::atomic<int64_t> mBaseLoopFrames{0};
     std::atomic<int64_t> mBaseLoopStartFrame{0};
     std::atomic<int64_t> mLatencyCompensationFrames{0};  // Frames to rewind at recording start
-    std::atomic<bool> mAutoStopEnabled{true};  // When true, auto-schedule STOP with START
+    std::atomic<bool> mAutoStopEnabled{false};  // When true, auto-schedule STOP with START
 
     // ===================== NOTIFICATION QUEUE (SPSC) =====================
     // Single-Producer (audio thread) / Single-Consumer (Dart poll)
@@ -203,8 +203,13 @@ private:
     /// Push notification to queue (called from audio thread)
     void pushNotification(const EventNotification& notif);
 
-    /// Execute a single event (called from processEvents)
-    void executeEvent(ScheduledEvent& event, int64_t currentFrame, Capture* capture);
+    /// Execute a single event (called from processEvents).
+    /// [audioFrameCount] is the size in frames of the audio buffer that fired
+    /// the event — used to compute the sub-buffer offset of the target frame
+    /// so loop-mode StartRecording can capture the post-target tail of the
+    /// firing buffer as pre-roll (eliminates the one-buffer phase shift).
+    void executeEvent(ScheduledEvent& event, int64_t currentFrame,
+                      uint32_t audioFrameCount, Capture* capture);
 };
 
 #endif // NATIVE_SCHEDULER_H

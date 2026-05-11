@@ -246,11 +246,19 @@ void NativeScheduler::processEvents(int64_t bufferStartFrame, uint32_t frameCoun
         if (state != EventState::Pending) continue;
 
         int64_t targetFrame = mEvents[i].targetFrame.load(std::memory_order_acquire);
+        SchedulerAction action = mEvents[i].action.load(std::memory_order_acquire);
 
-        // Check if event should fire in this buffer
-        // Fire if target frame is within [bufferStartFrame, bufferEndFrame)
-        // or if target frame is in the past (we're late)
-        if (targetFrame <= bufferEndFrame) {
+        // StopRecording must fire on the buffer AFTER the one containing target,
+        // so that the buffer covering [target-frameCount, target] has been
+        // written to the ring buffer. Otherwise stopRecording extracts up to
+        // (E - S) * frameCount frames where E is the firing buffer and S is the
+        // recording start — short of the requested loops*loopFrames by up to
+        // one full buffer (~256 frames @ 48k), causing per-take drift.
+        // Other actions still fire on the buffer containing target.
+        const bool shouldFire = (action == SchedulerAction::StopRecording)
+            ? (targetFrame < bufferStartFrame)
+            : (targetFrame <= bufferEndFrame);
+        if (shouldFire) {
             // Try to claim this event for execution
             EventState expected = EventState::Pending;
             if (mEvents[i].state.compare_exchange_strong(
@@ -270,7 +278,7 @@ void NativeScheduler::processEvents(int64_t bufferStartFrame, uint32_t frameCoun
                             (long long)targetFrame, (long long)bufferStartFrame, latencyFrames);
 
                 // Execute the event
-                executeEvent(mEvents[i], bufferStartFrame, capture);
+                executeEvent(mEvents[i], bufferStartFrame, frameCount, capture);
 
                 // Push notification for Dart
                 EventNotification notif;
@@ -288,41 +296,57 @@ void NativeScheduler::processEvents(int64_t bufferStartFrame, uint32_t frameCoun
 }
 
 void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
-                                    Capture* capture) {
+                                    uint32_t audioFrameCount, Capture* capture) {
     if (capture == nullptr) {
         // AUDIO THREAD: No printf allowed
         return;
     }
 
     SchedulerAction action = event.action.load(std::memory_order_acquire);
+    int64_t targetFrame = event.targetFrame.load(std::memory_order_acquire);
 
     switch (action) {
         case SchedulerAction::StartRecording:
             // AUDIO THREAD: No printf allowed - use SCHED_DEBUG (disabled in production)
             if (event.recordingPath[0] != '\0') {
-                SCHED_DEBUG("executeEvent: startRecording at frame %lld", (long long)currentFrame);
+                SCHED_DEBUG("executeEvent: startRecording at frame %lld (target=%lld)",
+                            (long long)currentFrame, (long long)targetFrame);
                 // Store path for stop callback
                 strncpy(mActiveRecordingPath, event.recordingPath, sizeof(mActiveRecordingPath) - 1);
                 mActiveRecordingPath[sizeof(mActiveRecordingPath) - 1] = '\0';
-                mRecordingStartFrame = currentFrame;
+                // Recording start is the actual audio target frame, not the firing
+                // buffer's start. The buffer that fires the event covers
+                // [currentFrame, currentFrame + audioFrameCount); target lands
+                // somewhere inside it.
+                mRecordingStartFrame = targetFrame;
 
-                // Start recording on ring buffer - it will track the start position
-                // Only apply latency compensation in FREE MODE (no base loop).
-                // In loop mode, start/stop are quantized to loop boundaries - no human latency to compensate.
                 if (g_nativeRingBuffer != nullptr) {
                     int64_t loopFrames = mBaseLoopFrames.load(std::memory_order_acquire);
-                    int64_t latencyFrames = 0;
-                    if (loopFrames <= 0) {
+                    int64_t preRollFrames = 0;
+                    if (loopFrames > 0) {
+                        // Loop mode: the firing buffer has already been written to the
+                        // ring (capture writes before processEvents). Pull the tail of
+                        // that buffer — frames [target, bufferEnd) — out of the wrap
+                        // region as pre-roll so linear[0..] represents audio starting
+                        // exactly at target. Without this, linear[0..] starts one full
+                        // audio buffer late (the ~5.3ms phase shift on every overdub).
+                        int64_t offsetInBuffer = targetFrame - currentFrame;
+                        if (offsetInBuffer < 0) offsetInBuffer = 0;
+                        if (offsetInBuffer > (int64_t)audioFrameCount)
+                            offsetInBuffer = (int64_t)audioFrameCount;
+                        preRollFrames = (int64_t)audioFrameCount - offsetInBuffer;
+                    } else {
                         // Free mode: apply latency compensation for touch/bluetooth latency
-                        latencyFrames = mLatencyCompensationFrames.load(std::memory_order_acquire);
+                        preRollFrames = mLatencyCompensationFrames.load(std::memory_order_acquire);
                     }
-                    g_nativeRingBuffer->startRecording(latencyFrames > 0 ? (size_t)latencyFrames : 0);
+                    g_nativeRingBuffer->startRecording(preRollFrames > 0 ? (size_t)preRollFrames : 0);
                     mRecordingStartTotalFrame = g_nativeRingBuffer->getRecordingStartFrame();
-                    SCHED_DEBUG("Ring buffer recording started, latencyComp=%lld", (long long)latencyFrames);
+                    SCHED_DEBUG("Ring buffer recording started, preRoll=%lld", (long long)preRollFrames);
 
-                    // Notify Dart that recording has started
+                    // Notify Dart with the actual audio start frame (target) so
+                    // _recordingStartGlobalSample matches the scheduler's view.
                     if (dartRecordingStartedCallback != nullptr) {
-                        dartRecordingStartedCallback(currentFrame, event.recordingPath);
+                        dartRecordingStartedCallback(targetFrame, event.recordingPath);
                     }
                 } else {
                     SCHED_DEBUG("executeEvent: no ring buffer, falling back to capture");
@@ -333,7 +357,7 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                         g_recordingScheduledOrActive.store(false, std::memory_order_release);
                     } else {
                         if (dartRecordingStartedCallback != nullptr) {
-                            dartRecordingStartedCallback(currentFrame, event.recordingPath);
+                            dartRecordingStartedCallback(targetFrame, event.recordingPath);
                         }
                     }
                 }
