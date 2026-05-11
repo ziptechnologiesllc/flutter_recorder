@@ -18,13 +18,18 @@ struct Command {
     StartRecording,    // begin recording slot `id` at `targetFrame`
                        //   (0 = immediate, else quantized to that frame)
     StopRecording,     // stop recording slot `id` at `targetFrame`
-    SetBaseLoop,       // set the base loop: lengthFrames, anchored at frame
-                       //   given by current global frame minus lengthFrames
-                       //   (engine computes this from its transport)
-    ClearBaseLoop,     // free mode; no quantization
+    SetBaseLoop,       // legacy: set base loop length+anchor; deprecated in
+                       //   Phase 2c. Today: derives tempo (assuming
+                       //   quantum=4) and forwards to LocalClock.
+    ClearBaseLoop,     // legacy: clears tempo too. Deprecated in 2c.
     StartPlayback,     // begin voice `id` for sound `soundHash` at targetFrame
     StopPlayback,      // stop voice `id` at targetFrame
     SetLatencyComp,    // free-mode pre-roll in frames (`lengthFrames`)
+    SetTempo,          // tempoBPM in lengthFrames (type-pun: see Dart side),
+                       //   quantum in flags, anchor frame in targetFrame
+    ClearTempo,        // back to free mode (no quantization)
+    SetSyncSource,     // `id` = SyncSourceKind enum value
+    SetMetronome,      // flags: bit 0 = enable, bit 1 = downbeat-only
   };
 
   Type           type{Type::None};

@@ -6,6 +6,7 @@
 #undef MA_API
 
 #include "analyzer.h"
+#include "audio_engine/audio_engine.h"
 #include "capture.h"
 #include "filters/aec/aec_test.h"
 #include "filters/aec/calibration.h"
@@ -1894,3 +1895,39 @@ void storeRecordedAudio(float* data, size_t frameCount) {
     g_looperCondVar.notify_one();
   }
 }
+
+// ============================================================================
+// AUDIO ENGINE FFI (Phase 1)
+// ============================================================================
+// Thin C wrappers around AudioEngine. The Dart side allocates struct buffers
+// matching the layouts in audio_engine/{command,event,snapshot}.h and passes
+// pointers in/out. All three functions are lock-free and safe to call from any
+// thread — postCommand and drainEvent are SPSC and Dart is the sole user;
+// loadSnapshot uses the seqlock.
+//
+// Must be `extern "C"` so the symbols are emitted with C linkage (unmangled)
+// and `dlsym`-discoverable by name. Other FFI exports in this file inherit
+// C linkage via flutter_recorder.h's wrapping declarations; these exports
+// don't have header declarations, so we wrap them explicitly here.
+
+extern "C" {
+
+FFI_PLUGIN_EXPORT void flutter_recorder_engine_loadSnapshot(
+    flowstate::audio_engine::Snapshot* out) {
+  if (out == nullptr) return;
+  *out = flowstate::audio_engine::AudioEngine::instance().loadSnapshot();
+}
+
+FFI_PLUGIN_EXPORT bool flutter_recorder_engine_drainEvent(
+    flowstate::audio_engine::Event* out) {
+  if (out == nullptr) return false;
+  return flowstate::audio_engine::AudioEngine::instance().drainEvent(out);
+}
+
+FFI_PLUGIN_EXPORT bool flutter_recorder_engine_postCommand(
+    const flowstate::audio_engine::Command* cmd) {
+  if (cmd == nullptr) return false;
+  return flowstate::audio_engine::AudioEngine::instance().postCommand(*cmd);
+}
+
+}  // extern "C"

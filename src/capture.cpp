@@ -1,4 +1,5 @@
 #include "capture.h"
+#include "audio_engine/audio_engine.h"
 #include "circular_buffer.h"
 #include "native_ring_buffer.h"
 #include "soloud_slave_bridge.h"
@@ -679,6 +680,16 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   int64_t bufferStartFrame = static_cast<int64_t>(
       userData->mTotalFramesCaptured.load(std::memory_order_acquire));
   NativeScheduler::instance().processEvents(bufferStartFrame, frameCount, userData);
+
+  // =========================================================================
+  // AUDIO ENGINE (Phase 1): publish snapshot of transport state.
+  // Runs AFTER NativeScheduler so we observe the same per-buffer view.
+  // No DSP yet; Phase 2+ will fold scheduling/recording into the engine.
+  // =========================================================================
+  flowstate::audio_engine::AudioEngine::instance().process(
+      bufferStartFrame, frameCount,
+      static_cast<uint32_t>(pDevice->sampleRate),
+      static_cast<uint16_t>(captureChannels));
 
   // Increment total frame counter for AEC synchronization
   // This must be done AFTER all processing to mark this block as complete

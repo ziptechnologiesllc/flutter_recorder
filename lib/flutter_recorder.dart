@@ -2,6 +2,15 @@
 library flutter_recorder;
 
 export 'src/audio_data_container.dart';
+export 'src/audio_engine/engine_binding.dart'
+    show
+        Snapshot,
+        Event,
+        EventType,
+        Command,
+        CommandType,
+        EngineBinding,
+        SyncSourceKind;
 export 'src/enums.dart'
     show PCMFormat, RecorderChannels, CaptureDevice, CaptureErrors, CalibrationSignalType, RecordingStoppedEvent, RecordingStartedEvent, LooperPlaybackStartedEvent;
 export 'src/filters/autogain.dart';

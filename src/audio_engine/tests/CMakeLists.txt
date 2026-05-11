@@ -35,6 +35,37 @@ add_executable(seqlock_test seqlock_test.cpp)
 target_link_libraries(seqlock_test PRIVATE Threads::Threads)
 target_compile_options(seqlock_test PRIVATE -Wall -Wextra -Wpedantic -O2)
 
+# Engine simulation tests — drive AudioEngine::process() with synthetic
+# buffers and assert on snapshot + drained events. Links audio_engine.cpp
+# directly (not via the plugin shared library).
+add_executable(audio_engine_test
+  audio_engine_test.cpp
+  ../audio_engine.cpp
+  ../local_clock.cpp
+  ../inference.cpp
+)
+target_include_directories(audio_engine_test PRIVATE ..)
+target_link_libraries(audio_engine_test PRIVATE Threads::Threads)
+target_compile_options(audio_engine_test PRIVATE -Wall -Wextra -Wpedantic -O2)
+
+add_executable(local_clock_test
+  local_clock_test.cpp
+  ../local_clock.cpp
+)
+target_include_directories(local_clock_test PRIVATE ..)
+target_link_libraries(local_clock_test PRIVATE Threads::Threads)
+target_compile_options(local_clock_test PRIVATE -Wall -Wextra -Wpedantic -O2)
+
+add_executable(inference_test
+  inference_test.cpp
+  ../inference.cpp
+)
+target_include_directories(inference_test PRIVATE ..)
+target_compile_options(inference_test PRIVATE -Wall -Wextra -Wpedantic -O2)
+
 enable_testing()
-add_test(NAME spsc_queue COMMAND spsc_queue_test)
-add_test(NAME seqlock    COMMAND seqlock_test)
+add_test(NAME spsc_queue   COMMAND spsc_queue_test)
+add_test(NAME seqlock      COMMAND seqlock_test)
+add_test(NAME audio_engine COMMAND audio_engine_test)
+add_test(NAME local_clock  COMMAND local_clock_test)
+add_test(NAME inference    COMMAND inference_test)

@@ -21,8 +21,17 @@ struct Event {
     PlaybackStarted,     // voice `id` began at `frame`, length `framesProcessed`
                          //   for sound `soundHash`
     PlaybackEnded,       // voice `id` ended at `frame`
-    BaseLoopSet,         // base loop installed at frame, length framesProcessed
-    BaseLoopCleared,     // free mode resumed
+    BaseLoopSet,         // legacy: base loop installed (kept during 2 parallel-run)
+    BaseLoopCleared,     // legacy
+    TempoSet,            // new tempo active at `frame`; loop length frames
+                         //   in `framesProcessed`; `code` packs quantum
+    TempoCleared,        // tempo cleared at `frame`
+    SyncSourceChanged,   // `id` = new SyncSourceKind enum value
+    DownbeatFired,       // metronome downbeat at `frame` (beat = `id`)
+    BeatFired,           // metronome non-downbeat beat at `frame`
+    TempoInferred,       // worker thread: `id` = clipId,
+                         //   bpm bit-cast into `framesProcessed` lower 8 bytes
+    KeyInferred,         // worker thread: `id` = clipId, `code` = packed key
     Error,               // diagnostic; semantic in `code`
   };
 
