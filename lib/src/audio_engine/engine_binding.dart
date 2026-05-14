@@ -177,6 +177,17 @@ enum EventType {
   beatFired,
   tempoInferred,      // worker thread, after recording analysis
   keyInferred,        // worker thread, after recording analysis
+  // Phase 2c: tap-to-mute / MIDI Performance. Fired sample-accurately when
+  // a queued mute/unmute/gain change reaches its scheduled boundary.
+  voiceMuted,
+  voiceUnmuted,
+  gainChanged,
+  // Phase 1 native transport. Fired on the audio thread the moment a queued
+  // pause / unpause reaches its launch boundary, alongside the bridged
+  // SoLoud setter call. UI consumes for transport state; the audible
+  // change is already in flight.
+  voicePaused,
+  voiceUnpaused,
   error,
 }
 
@@ -199,6 +210,38 @@ class Command {
   final int flags;
 }
 
+/// Convert a `KeyInferred` event to a human-readable label like "C", "F#m",
+/// or "—" for unknown. Decodes the wire format set by the C++ side.
+String keyEventLabel(Event e) {
+  if (e.type != EventType.keyInferred) return '—';
+  if (e.id == 255) return '—';
+  const names = [
+    'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B',
+  ];
+  if (e.id >= names.length) return '—';
+  final isMinor = (e.code & 0x1) != 0;
+  return isMinor ? '${names[e.id]}m' : names[e.id];
+}
+
+/// Unpack the float confidence packed into `soundHash` by the C++ side.
+double keyEventConfidence(Event e) {
+  if (e.type != EventType.keyInferred) return 0.0;
+  final bd = ByteData(4)..setUint32(0, e.soundHash, Endian.host);
+  return bd.getFloat32(0, Endian.host);
+}
+
+/// Pitch class encoded in the event's `id` field (0–11, or 255 = unknown).
+int keyEventPitchClass(Event e) {
+  if (e.type != EventType.keyInferred) return 255;
+  return e.id;
+}
+
+/// Whether the inferred key is minor mode.
+bool keyEventIsMinor(Event e) {
+  if (e.type != EventType.keyInferred) return false;
+  return (e.code & 0x1) != 0;
+}
+
 enum CommandType {
   none,
   startRecording,
@@ -212,6 +255,29 @@ enum CommandType {
   clearTempo,
   setSyncSource,
   setMetronome,
+  reportKeyInferred,   // worker → audio (internal)
+  // Phase 2c: tap-to-mute / MIDI Performance.
+  queueMute,
+  queueUnmute,
+  setTrackGain,
+  cancelPendingQueue,
+  // Phase 1 native transport.
+  queuePause,
+  queueUnpause,
+  queueStop,
+  registerTrackHandle,
+  unregisterTrackHandle,
+}
+
+/// Launch quantize value in 1/16 units. Names mirror Ableton's clip-launch
+/// dropdown so the vocabulary is familiar.
+class LaunchQuantize {
+  static const int free    = 0;   // immediate / stab mode
+  static const int s16th   = 1;
+  static const int s8th    = 2;
+  static const int quarter = 4;
+  static const int half    = 8;
+  static const int bar     = 16;
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +548,16 @@ class EngineBinding {
         return EventType.tempoInferred;
       case NativeEventType.keyInferred:
         return EventType.keyInferred;
+      case NativeEventType.voiceMuted:
+        return EventType.voiceMuted;
+      case NativeEventType.voiceUnmuted:
+        return EventType.voiceUnmuted;
+      case NativeEventType.gainChanged:
+        return EventType.gainChanged;
+      case NativeEventType.voicePaused:
+        return EventType.voicePaused;
+      case NativeEventType.voiceUnpaused:
+        return EventType.voiceUnpaused;
       case NativeEventType.error:
         return EventType.error;
       default:
@@ -515,6 +591,26 @@ class EngineBinding {
         return NativeCommandType.setSyncSource;
       case CommandType.setMetronome:
         return NativeCommandType.setMetronome;
+      case CommandType.reportKeyInferred:
+        return NativeCommandType.reportKeyInferred;
+      case CommandType.queueMute:
+        return NativeCommandType.queueMute;
+      case CommandType.queueUnmute:
+        return NativeCommandType.queueUnmute;
+      case CommandType.setTrackGain:
+        return NativeCommandType.setTrackGain;
+      case CommandType.cancelPendingQueue:
+        return NativeCommandType.cancelPendingQueue;
+      case CommandType.queuePause:
+        return NativeCommandType.queuePause;
+      case CommandType.queueUnpause:
+        return NativeCommandType.queueUnpause;
+      case CommandType.queueStop:
+        return NativeCommandType.queueStop;
+      case CommandType.registerTrackHandle:
+        return NativeCommandType.registerTrackHandle;
+      case CommandType.unregisterTrackHandle:
+        return NativeCommandType.unregisterTrackHandle;
     }
   }
 
@@ -559,6 +655,163 @@ class EngineBinding {
       type: CommandType.setMetronome,
       flags: flags,
     ));
+  }
+
+  // ── Phase 2c: tap-to-mute helpers ───────────────────────────────────────
+
+  /// Queue a mute on `trackIndex`. Fires sample-accurately at the next launch
+  /// boundary defined by `quantize` (a [LaunchQuantize] value). The audio
+  /// thread emits a [EventType.voiceMuted] event at the fire frame.
+  bool queueMute({
+    required int trackIndex,
+    int quantize = LaunchQuantize.bar,
+  }) {
+    return postCommand(Command(
+      type: CommandType.queueMute,
+      id: trackIndex,
+      flags: quantize,
+    ));
+  }
+
+  /// Queue an unmute on `trackIndex` with `velocity` ∈ [0, 1]. Fires at the
+  /// next launch boundary defined by `quantize`. The audio thread emits a
+  /// [EventType.voiceUnmuted] event carrying the velocity at the fire frame.
+  bool queueUnmute({
+    required int trackIndex,
+    double velocity = 1.0,
+    int quantize = LaunchQuantize.bar,
+  }) {
+    // Bit-cast float32 → uint32 to fit the command's `soundHash` slot.
+    final bd = ByteData(4)..setFloat32(0, velocity, Endian.host);
+    final velBits = bd.getUint32(0, Endian.host);
+    return postCommand(Command(
+      type: CommandType.queueUnmute,
+      id: trackIndex,
+      soundHash: velBits,
+      flags: quantize,
+    ));
+  }
+
+  /// Queue a gain change on `trackIndex`. `gain` is typically in [0, 1+].
+  /// Fires at the next launch boundary defined by `quantize`. The audio
+  /// thread emits a [EventType.gainChanged] event at the fire frame.
+  bool setTrackGain({
+    required int trackIndex,
+    required double gain,
+    int quantize = LaunchQuantize.free,
+  }) {
+    final bd = ByteData(4)..setFloat32(0, gain, Endian.host);
+    final gainBits = bd.getUint32(0, Endian.host);
+    return postCommand(Command(
+      type: CommandType.setTrackGain,
+      id: trackIndex,
+      soundHash: gainBits,
+      flags: quantize,
+    ));
+  }
+
+  /// Remove any pending mute/unmute/gain entry for `trackIndex`. Used to
+  /// "unqueue" a tap before its fire boundary arrives. No-op if nothing is
+  /// pending.
+  bool cancelPendingQueue({required int trackIndex}) {
+    return postCommand(Command(
+      type: CommandType.cancelPendingQueue,
+      id: trackIndex,
+    ));
+  }
+
+  // ── Phase 1 native transport ─────────────────────────────────────────────
+  //
+  // The audio thread owns the transport change: when the native scheduler
+  // hits the fire frame it calls into SoLoud's lock-free per-voice setter
+  // directly (no Dart round-trip). Dart still sees the resulting
+  // [EventType.voicePaused] / [voiceUnpaused] / [playbackEnded] for UI
+  // bookkeeping, but those events arrive _after_ the audio has already
+  // transitioned — they're informational, not load-bearing for timing.
+  //
+  // [registerTrackHandle] must be called once (per loop player) before any
+  // queue* call referencing the same trackIndex. The audio thread looks up
+  // the SoLoud handle through the trackIndex→handle table; a missing
+  // registration silently no-ops the bridged setter (the queued event still
+  // fires so any legacy Dart listener can react).
+
+  /// Announce the SoLoud voice handle backing `trackIndex` so the audio
+  /// thread can apply transport changes directly. Call once per player on
+  /// `AudioPlayerPlay(paused: true)`; call [unregisterTrackHandle] on
+  /// `AudioPlayerStop`.
+  bool registerTrackHandle({
+    required int trackIndex,
+    required int soloudHandle,
+  }) {
+    return postCommand(Command(
+      type: CommandType.registerTrackHandle,
+      id: trackIndex,
+      soundHash: soloudHandle,
+    ));
+  }
+
+  bool unregisterTrackHandle({required int trackIndex}) {
+    return postCommand(Command(
+      type: CommandType.unregisterTrackHandle,
+      id: trackIndex,
+    ));
+  }
+
+  /// Queue a sample-accurate `setPause(true)` on `trackIndex` at the next
+  /// `quantize` boundary. Fires [EventType.voicePaused] when applied.
+  bool queuePause({
+    required int trackIndex,
+    int quantize = LaunchQuantize.bar,
+  }) {
+    return postCommand(Command(
+      type: CommandType.queuePause,
+      id: trackIndex,
+      flags: quantize,
+    ));
+  }
+
+  /// Queue a sample-accurate `setPause(false)` — the workhorse for
+  /// "play this take in sync on the next downbeat". Fires
+  /// [EventType.voiceUnpaused] when applied.
+  bool queueUnpause({
+    required int trackIndex,
+    int quantize = LaunchQuantize.bar,
+  }) {
+    return postCommand(Command(
+      type: CommandType.queueUnpause,
+      id: trackIndex,
+      flags: quantize,
+    ));
+  }
+
+  /// Queue a sample-accurate `stop(handle)` on `trackIndex`. SoLoud reclaims
+  /// the voice; the audio thread also drops the trackIndex from its handle
+  /// table. Fires [EventType.playbackEnded] when applied.
+  bool queueStop({
+    required int trackIndex,
+    int quantize = LaunchQuantize.free,
+  }) {
+    return postCommand(Command(
+      type: CommandType.queueStop,
+      id: trackIndex,
+      flags: quantize,
+    ));
+  }
+
+  /// Unpack the velocity float that the audio thread packed into
+  /// [Event.soundHash] for [EventType.voiceUnmuted].
+  static double unmuteVelocity(Event e) {
+    if (e.type != EventType.voiceUnmuted) return 0.0;
+    final bd = ByteData(4)..setUint32(0, e.soundHash, Endian.host);
+    return bd.getFloat32(0, Endian.host);
+  }
+
+  /// Unpack the gain float that the audio thread packed into
+  /// [Event.soundHash] for [EventType.gainChanged].
+  static double gainChangedValue(Event e) {
+    if (e.type != EventType.gainChanged) return 0.0;
+    final bd = ByteData(4)..setUint32(0, e.soundHash, Endian.host);
+    return bd.getFloat32(0, Endian.host);
   }
 
   static int _syncSourceKindToNative(SyncSourceKind kind) {

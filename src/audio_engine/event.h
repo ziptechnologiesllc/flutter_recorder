@@ -32,6 +32,33 @@ struct Event {
     TempoInferred,       // worker thread: `id` = clipId,
                          //   bpm bit-cast into `framesProcessed` lower 8 bytes
     KeyInferred,         // worker thread: `id` = clipId, `code` = packed key
+
+    // ── Phase 2c: tap-to-mute / MIDI Performance ──────────────────────────
+    // Fired by the audio thread when a previously queued mute/unmute/gain
+    // change reaches its scheduled fire frame. Dart applies the SoLoud gain
+    // and appends the event to the PerformanceRecorder batch.
+    //
+    //   id              = track index (Dart maps to track_uuid)
+    //   frame           = sample-accurate fire frame
+    //   soundHash       = bit-cast float payload:
+    //                       VoiceUnmuted → velocity ∈ [0,1]
+    //                       GainChanged  → gain ∈ [0, ~4]
+    //                     Unused for VoiceMuted.
+    VoiceMuted,
+    VoiceUnmuted,
+    GainChanged,
+
+    // ── Phase 1 native transport: voice pause/unpause fires sample-
+    //    accurately on the audio thread (alongside the SoLoud setter call).
+    //    Dart consumes these for UI state (transport indicator, beat grid
+    //    pulse) and for PerformanceRecorder bookkeeping. Stop is emitted as
+    //    PlaybackEnded (already defined above) — no new event needed.
+    //
+    //    id    = trackIndex
+    //    frame = fire frame
+    VoicePaused,
+    VoiceUnpaused,
+
     Error,               // diagnostic; semantic in `code`
   };
 

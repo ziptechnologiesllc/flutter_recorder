@@ -111,6 +111,19 @@ class NativeCommandType {
   static const int clearTempo = 9;
   static const int setSyncSource = 10;
   static const int setMetronome = 11;
+  static const int reportKeyInferred = 12;
+  // Phase 2c: tap-to-mute / MIDI Performance.
+  static const int queueMute = 13;
+  static const int queueUnmute = 14;
+  static const int setTrackGain = 15;
+  static const int cancelPendingQueue = 16;
+  // Phase 1 native transport. Must match C++ Command::Type ordinals in
+  // audio_engine/command.h — appended after cancelPendingQueue.
+  static const int queuePause = 17;
+  static const int queueUnpause = 18;
+  static const int queueStop = 19;
+  static const int registerTrackHandle = 20;
+  static const int unregisterTrackHandle = 21;
 }
 
 @internal
@@ -163,7 +176,17 @@ class NativeEventType {
   static const int beatFired = 11;
   static const int tempoInferred = 12;
   static const int keyInferred = 13;
-  static const int error = 14;
+  // Phase 2c: tap-to-mute / MIDI Performance. Inserted before Error so the
+  // C++ enum order is preserved.
+  static const int voiceMuted = 14;
+  static const int voiceUnmuted = 15;
+  static const int gainChanged = 16;
+  // Phase 1 native transport. Must match C++ Event::Type ordinals in
+  // audio_engine/event.h — inserted before Error so the audio thread can
+  // signal sample-accurate pause / unpause to Dart for UI bookkeeping.
+  static const int voicePaused = 17;
+  static const int voiceUnpaused = 18;
+  static const int error = 19;
 }
 
 @internal

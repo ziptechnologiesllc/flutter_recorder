@@ -106,6 +106,17 @@ public:
     uint32_t scheduleEvent(SchedulerAction action, int64_t targetFrame,
                            const char* recordingPath = nullptr);
 
+    /// Begin a recording right now (audio thread), at [recordingStartGlobalFrame]
+    /// — the downbeat the auto-recorder (AutoRecorder) detected — rewinding the
+    /// native ring buffer by [preRollFrames] so linear[0..] starts exactly there
+    /// and the lead-in silence is trimmed. Mirrors the StartRecording branch of
+    /// executeEvent so the recording bookkeeping (active path, ring-buffer start
+    /// total, the Dart RecordingStarted notification + AudioEngine event, the
+    /// idempotency flag) is identical to the scheduled/quantized path.
+    /// Call only when no base loop exists (free / first-loop mode).
+    void beginAutoRecording(int64_t recordingStartGlobalFrame, int64_t preRollFrames,
+                            const char* recordingPath, Capture* capture);
+
     /// Cancel a scheduled event by ID
     /// Returns true if event was found and cancelled
     bool cancelEvent(uint32_t eventId);
@@ -136,8 +147,11 @@ public:
 
     // ===================== STATE ACCESSORS =====================
 
-    /// Get current global frame position
-    int64_t getGlobalFrame() const { return mGlobalFramePosition.load(std::memory_order_acquire); }
+    /// Get current global frame position. Phase 2a: forwards to the
+    /// AudioEngine which is now the canonical source — NativeScheduler's
+    /// own counter has been retired. Defined out-of-line so the include
+    /// graph stays scoped to the .cpp.
+    int64_t getGlobalFrame() const;
 
     /// Get base loop length in frames (0 if no base loop)
     int64_t getBaseLoopFrames() const { return mBaseLoopFrames.load(std::memory_order_acquire); }
@@ -150,9 +164,6 @@ public:
 
     /// Calculate next loop boundary from given frame
     int64_t getNextLoopBoundaryFrom(int64_t fromFrame) const;
-
-    /// Update global frame position (called from processEvents)
-    void setGlobalFrame(int64_t frame) { mGlobalFramePosition.store(frame, std::memory_order_release); }
 
     /// Get recording start frame (set when StartRecording event fires)
     int64_t getRecordingStartFrame() const { return mRecordingStartFrame; }
@@ -177,7 +188,8 @@ private:
     std::atomic<uint32_t> mNextEventId{1};
 
     // ===================== TIMING STATE =====================
-    std::atomic<int64_t> mGlobalFramePosition{0};
+    // Phase 2a: mGlobalFramePosition retired — AudioEngine::getCurrentFrame()
+    // is now the single source of truth. getGlobalFrame() forwards to it.
     std::atomic<int64_t> mBaseLoopFrames{0};
     std::atomic<int64_t> mBaseLoopStartFrame{0};
     std::atomic<int64_t> mLatencyCompensationFrames{0};  // Frames to rewind at recording start

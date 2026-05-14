@@ -46,6 +46,8 @@ class LocalClock final : public SyncSource {
                              std::uint32_t sampleRate) const noexcept override;
   std::int64_t nextDownbeatFrame(
       std::int64_t frame, std::uint32_t sampleRate) const noexcept override;
+  std::int64_t frameForBeat(std::uint32_t beat,
+                             std::uint32_t sampleRate) const noexcept override;
 
   // Convenience: anchor frame as published.
   std::int64_t anchorFrame() const noexcept;

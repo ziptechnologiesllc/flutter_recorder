@@ -1,5 +1,6 @@
 #include "capture.h"
 #include "audio_engine/audio_engine.h"
+#include "auto_record.h"
 #include "circular_buffer.h"
 #include "native_ring_buffer.h"
 #include "soloud_slave_bridge.h"
@@ -278,6 +279,32 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   }
 
   // =========================================================================
+  // BOOKKEEPING (must run BEFORE SoLoud mix so the audio engine schedules
+  // any per-beat metronome clicks for THIS buffer; otherwise the click voice
+  // is at least one buffer late). bufferStartFrame is the global frame of
+  // the first sample in this buffer, computed before mTotalFramesCaptured
+  // is incremented at the end of the callback.
+  // =========================================================================
+  int64_t bufferStartFrame = static_cast<int64_t>(
+      userData->mTotalFramesCaptured.load(std::memory_order_acquire));
+
+  // Hands-free first-loop capture: when armed, the first onset in this buffer
+  // becomes the downbeat and starts recording (rewinding the ring buffer — which
+  // was just written above — back to the onset so the lead-in silence is
+  // trimmed). No-op unless armed/recording. Runs before processEvents so the
+  // start's bookkeeping lines up with this buffer; any stop it schedules is in
+  // the future and fires on a later buffer.
+  AutoRecorder::instance().process(captured, frameCount, captureChannels,
+                                   bufferStartFrame, userData);
+
+  NativeScheduler::instance().processEvents(bufferStartFrame, frameCount,
+                                             userData);
+  flowstate::audio_engine::AudioEngine::instance().process(
+      bufferStartFrame, frameCount,
+      static_cast<uint32_t>(pDevice->sampleRate),
+      static_cast<uint16_t>(captureChannels));
+
+  // =========================================================================
   // SLAVE MODE: SoLoud output driven by this callback (for AEC clock sync)
   // =========================================================================
   // In slave mode, we call SoLoud's mix function directly instead of SoLoud
@@ -298,6 +325,20 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     // Get SoLoud's mixed output into our f32 buffer (not pOutput directly)
     // This allows all processing (AEC, monitoring) to work in f32
     g_soloudSlaveMixCallback(playbackFloat, frameCount, playbackChannels);
+
+    // =======================================================================
+    // METRONOME (Phase 3c v2): mix sample-accurate clicks ON TOP of SoLoud's
+    // output, BEFORE the AEC reference buffer write below. Order matters:
+    //   - Doing this before AEC capture means AEC "sees" the click in the
+    //     reference signal and will cancel it from the microphone input —
+    //     so the recorded clip never contains the metronome.
+    //   - Doing this after SoLoud mix means the click sits in the same float
+    //     buffer as voices, which then goes through the same monitoring +
+    //     format-conversion path.
+    flowstate::audio_engine::AudioEngine::instance().mixMetronomeIntoOutput(
+        playbackFloat, bufferStartFrame, frameCount,
+        static_cast<uint16_t>(playbackChannels),
+        static_cast<uint32_t>(pDevice->sampleRate));
 
 #if DEBUG_CALLBACK_SLAVE
     static int soloudMixDebugCount = 0;
@@ -673,26 +714,10 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     }
   }
 
-  // =========================================================================
-  // NATIVE SCHEDULER: Process scheduled events at buffer boundaries
-  // =========================================================================
-  // Calculate buffer start frame (before incrementing the counter)
-  int64_t bufferStartFrame = static_cast<int64_t>(
-      userData->mTotalFramesCaptured.load(std::memory_order_acquire));
-  NativeScheduler::instance().processEvents(bufferStartFrame, frameCount, userData);
-
-  // =========================================================================
-  // AUDIO ENGINE (Phase 1): publish snapshot of transport state.
-  // Runs AFTER NativeScheduler so we observe the same per-buffer view.
-  // No DSP yet; Phase 2+ will fold scheduling/recording into the engine.
-  // =========================================================================
-  flowstate::audio_engine::AudioEngine::instance().process(
-      bufferStartFrame, frameCount,
-      static_cast<uint32_t>(pDevice->sampleRate),
-      static_cast<uint16_t>(captureChannels));
-
-  // Increment total frame counter for AEC synchronization
-  // This must be done AFTER all processing to mark this block as complete
+  // Increment total frame counter for AEC synchronization. The schedulers
+  // and audio engine already ran at the top of this callback against the
+  // pre-increment value; we update here so the NEXT callback sees this
+  // buffer's contribution to the global frame count.
   userData->mTotalFramesCaptured.fetch_add(frameCount, std::memory_order_release);
 }
 

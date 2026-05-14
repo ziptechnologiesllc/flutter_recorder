@@ -10,7 +10,19 @@ export 'src/audio_engine/engine_binding.dart'
         Command,
         CommandType,
         EngineBinding,
-        SyncSourceKind;
+        LaunchQuantize,
+        SyncSourceKind,
+        keyEventLabel,
+        keyEventConfidence,
+        keyEventPitchClass,
+        keyEventIsMinor;
+export 'src/audio_engine/pitch_class_colors.dart'
+    show
+        kPitchClassColors,
+        kPitchClassNames,
+        colorForPitchClass,
+        namePitchClass,
+        formatKey;
 export 'src/enums.dart'
     show PCMFormat, RecorderChannels, CaptureDevice, CaptureErrors, CalibrationSignalType, RecordingStoppedEvent, RecordingStartedEvent, LooperPlaybackStartedEvent;
 export 'src/filters/autogain.dart';

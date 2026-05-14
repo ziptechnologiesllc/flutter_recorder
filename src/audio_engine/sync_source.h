@@ -51,6 +51,12 @@ class SyncSource {
   // If frame already coincides with a downbeat, returns frame itself.
   virtual std::int64_t nextDownbeatFrame(
       std::int64_t frame, std::uint32_t sampleRate) const noexcept = 0;
+
+  // Global frame where the Nth beat starts. Beat 0 starts at the source's
+  // anchor frame. Used by the metronome to emit BeatFired/DownbeatFired
+  // events at sample-accurate positions.
+  virtual std::int64_t frameForBeat(
+      std::uint32_t beat, std::uint32_t sampleRate) const noexcept = 0;
 };
 
 // Enumerated kinds, useful for SetSyncSource commands and snapshot reporting.

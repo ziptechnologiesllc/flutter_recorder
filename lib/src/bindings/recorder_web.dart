@@ -800,6 +800,55 @@ class RecorderWeb extends RecorderImpl {
     return true; // Default to true on web
   }
 
+  // ==================== AUTO-RECORD ====================
+  // Stubs for web - hands-free first-loop capture not supported
+
+  @override
+  void armAutoRecord(String wavPath, int barCount, int framesPerBar,
+      int sampleRate, bool measureAmbient) {
+    // No-op on web
+  }
+
+  @override
+  void endAutoRecordMeasure() {
+    // No-op on web
+  }
+
+  @override
+  void disarmAutoRecord() {
+    // No-op on web
+  }
+
+  @override
+  int getAutoRecordState() {
+    return 0; // Always idle on web
+  }
+
+  @override
+  bool isAutoRecordMeasuringAmbient() {
+    return false;
+  }
+
+  @override
+  double getAutoRecordTempoBpm() {
+    return 0;
+  }
+
+  @override
+  double getAutoRecordNoiseFloorDb() {
+    return -180;
+  }
+
+  @override
+  double getAutoRecordTriggerLevelDb() {
+    return -180;
+  }
+
+  @override
+  void setAutoRecordOnsetThresholdDb(double db) {
+    // No-op on web
+  }
+
   // ==================== NATIVE RING BUFFER ====================
   // Stubs for web - native ring buffer not supported
 

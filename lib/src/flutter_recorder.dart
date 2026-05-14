@@ -1253,6 +1253,70 @@ interface class Recorder {
     return _impl.schedulerIsAutoStopEnabled();
   }
 
+  // ==================== AUTO-RECORD ====================
+  // Hands-free first-loop capture: long-press to arm, the first detected onset
+  // becomes the loop downbeat (lead-in silence trimmed via the ring buffer).
+  // Only the first loop — once a base loop exists the quantize path owns
+  // recording and these are no-ops natively.
+
+  /// Arm auto-record. The next detected onset becomes the loop downbeat (the
+  /// lead-in silence is trimmed by rewinding the ring buffer to the onset).
+  /// With [barCount] > 0 and [framesPerBar] > 0 the take auto-stops at exactly
+  /// `start + barCount * framesPerBar` (one bar = 4 beats, 4/4 assumed).
+  /// [framesPerBar] == 0 means tempo unknown (preset auto-stop skipped).
+  /// [sampleRate] == 0 keeps the current capture rate. If [measureAmbient] is
+  /// true, the detector keeps measuring the ambient level (and doesn't listen
+  /// for onsets) until [endAutoRecordMeasure] — the "hold the button" model.
+  void armAutoRecord(String wavPath, int barCount, int framesPerBar,
+      int sampleRate, {bool measureAmbient = false}) {
+    _impl.armAutoRecord(
+        wavPath, barCount, framesPerBar, sampleRate, measureAmbient);
+  }
+
+  /// End the ambient-measure window (held button released): lock the trigger to
+  /// the measured ambient level and start listening for onsets.
+  void endAutoRecordMeasure() {
+    _impl.endAutoRecordMeasure();
+  }
+
+  /// Disarm auto-record. An in-progress take is left for the normal stop path.
+  void disarmAutoRecord() {
+    _impl.disarmAutoRecord();
+  }
+
+  /// Auto-record state: 0 = idle, 1 = armed (waiting for onset / measuring), 2 = recording.
+  int getAutoRecordState() {
+    return _impl.getAutoRecordState();
+  }
+
+  /// True while the armed detector is still measuring ambient (button held).
+  bool isAutoRecordMeasuringAmbient() {
+    return _impl.isAutoRecordMeasuringAmbient();
+  }
+
+  /// Best current tempo estimate in BPM (0 until the estimator locks).
+  double getAutoRecordTempoBpm() {
+    return _impl.getAutoRecordTempoBpm();
+  }
+
+  /// Current measured noise floor in dBFS (for the UI threshold line).
+  double getAutoRecordNoiseFloorDb() {
+    return _impl.getAutoRecordNoiseFloorDb();
+  }
+
+  /// Current onset trigger level in dBFS = noiseFloorDb + onsetThresholdDb —
+  /// the level an envelope must exceed to fire. For the UI threshold line.
+  double getAutoRecordTriggerLevelDb() {
+    return _impl.getAutoRecordTriggerLevelDb();
+  }
+
+  /// Onset-detector sensitivity: dB above the (ambient) noise floor that counts
+  /// as an attack. Lower = more sensitive (soft-onset instruments — bowed
+  /// strings, pads). Default ~12 dB suits clear attacks (strum / pluck / piano).
+  void setAutoRecordOnsetThresholdDb(double db) {
+    _impl.setAutoRecordOnsetThresholdDb(db);
+  }
+
   // ==================== NATIVE RING BUFFER ====================
   // Latency compensation via continuous capture with pre-roll
 

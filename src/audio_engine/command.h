@@ -30,6 +30,55 @@ struct Command {
     ClearTempo,        // back to free mode (no quantization)
     SetSyncSource,     // `id` = SyncSourceKind enum value
     SetMetronome,      // flags: bit 0 = enable, bit 1 = downbeat-only
+    ReportKeyInferred, // worker → audio: id = pitchClass (0-11, 255=unknown),
+                       //   flags bit 0 = isMinor, soundHash = float-cast
+                       //   confidence
+
+    // ── Phase 2c: tap-to-mute / MIDI Performance ──────────────────────────
+    // Track-level mute/unmute and gain control, quantized to a launch grid
+    // (bar/beat/sixteenth/free). The audio thread schedules the fire frame
+    // and emits VoiceMuted/VoiceUnmuted/GainChanged events at that frame.
+    // SoLoud playback gain is applied Dart-side on event receipt — the
+    // audio thread is just the scheduler + truth source for "when".
+    //
+    // Field layout for all four:
+    //   id            = track index (Dart-maintained UUID↔index map)
+    //   flags         = quantize in 1/16 units: 0=immediate/free, 1=1/16,
+    //                   2=1/8, 4=1/4 (beat), 8=1/2 (half-bar), 16=bar
+    //   soundHash     = bit-cast float payload:
+    //                     QueueUnmute  → velocity ∈ [0,1]
+    //                     SetTrackGain → gain ∈ [0, ~4]
+    //                   Unused for QueueMute / CancelPendingQueue.
+    //   targetFrame   = optional explicit fire frame; 0 = let engine resolve
+    //                   from `flags` (the common case).
+    QueueMute,
+    QueueUnmute,
+    SetTrackGain,
+    CancelPendingQueue,
+
+    // ── Phase 1 native transport: per-track pause/unpause/stop on the
+    //    audio thread, plus the trackIndex→SoLoud-handle table they read.
+    //    All four share the layout of the Phase 2c mute commands so a
+    //    single fire-frame resolver works across the board.
+    //
+    // QueuePause / QueueUnpause / QueueStop:
+    //   id           = trackIndex
+    //   flags        = LaunchQuantize (1/16 units; 0 = immediate)
+    //   targetFrame  = optional explicit fire frame; 0 = engine resolves
+    //   soundHash    = unused (no payload float)
+    //
+    // RegisterTrackHandle: Dart announces the SoLoud handle that backs a
+    // trackIndex so the audio thread can call the bridged setters at fire
+    // time. UnregisterTrackHandle removes the mapping on stop / cleanup.
+    //   id           = trackIndex
+    //   soundHash    = SoLoud voice handle (uint32_t)
+    //   flags        = unused
+    //   targetFrame  = unused
+    QueuePause,
+    QueueUnpause,
+    QueueStop,
+    RegisterTrackHandle,
+    UnregisterTrackHandle,
   };
 
   Type           type{Type::None};

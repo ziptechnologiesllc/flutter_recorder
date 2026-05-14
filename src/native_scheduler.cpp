@@ -1,4 +1,7 @@
 #include "native_scheduler.h"
+#include "audio_engine/audio_engine.h"
+#include "audio_engine/event.h"
+#include "auto_record.h"
 #include "capture.h"
 #include "common.h"
 #include "native_ring_buffer.h"
@@ -45,11 +48,19 @@ NativeScheduler::NativeScheduler() {
 // ==================== CONFIGURATION ====================
 
 void NativeScheduler::setBaseLoop(int64_t loopFrames, int64_t loopStartFrame) {
-    int64_t currentFrame = mGlobalFramePosition.load(std::memory_order_acquire);
+    int64_t currentFrame =
+        flowstate::audio_engine::AudioEngine::instance().getCurrentFrame();
     mBaseLoopFrames.store(loopFrames, std::memory_order_release);
     mBaseLoopStartFrame.store(loopStartFrame, std::memory_order_release);
     SCHED_LOG("setBaseLoop: loopFrames=%lld loopStartFrame=%lld currentGlobalFrame=%lld",
               (long long)loopFrames, (long long)loopStartFrame, (long long)currentFrame);
+}
+
+// Phase 2a: forward to the AudioEngine — single source of truth for the
+// global frame counter. Defined out-of-line so the header doesn't have to
+// pull in audio_engine.h.
+int64_t NativeScheduler::getGlobalFrame() const {
+    return flowstate::audio_engine::AudioEngine::instance().getCurrentFrame();
 }
 
 void NativeScheduler::clearBaseLoop() {
@@ -64,8 +75,11 @@ void NativeScheduler::reset() {
     // Cancel all events
     cancelAllEvents();
 
-    // Reset timing state
-    mGlobalFramePosition.store(0, std::memory_order_release);
+    // Phase 2a: no mGlobalFramePosition to clear — AudioEngine owns the
+    // global frame counter and it stays monotonic across session resets
+    // (matches the underlying mTotalFramesCaptured timeline). Anything that
+    // wants "frames since this session started" must record the start frame
+    // and subtract.
     mBaseLoopFrames.store(0, std::memory_order_release);
     mBaseLoopStartFrame.store(0, std::memory_order_release);
 
@@ -146,7 +160,8 @@ uint32_t NativeScheduler::scheduleQuantizedStart(const char* recordingPath) {
     // Without this, Dart polling picks up old events and corrupts state
     clearNotifications();
 
-    int64_t currentFrame = mGlobalFramePosition.load(std::memory_order_acquire);
+    int64_t currentFrame =
+        flowstate::audio_engine::AudioEngine::instance().getCurrentFrame();
     int64_t loopFrames = mBaseLoopFrames.load(std::memory_order_acquire);
     int64_t loopStartFrame = mBaseLoopStartFrame.load(std::memory_order_acquire);
     int64_t targetStartFrame = getNextLoopBoundary();
@@ -177,7 +192,8 @@ uint32_t NativeScheduler::scheduleQuantizedStart(const char* recordingPath) {
 
 uint32_t NativeScheduler::scheduleQuantizedStop(int64_t recordingStartFrame) {
     int64_t loopFrames = mBaseLoopFrames.load(std::memory_order_acquire);
-    int64_t currentFrame = mGlobalFramePosition.load(std::memory_order_acquire);
+    int64_t currentFrame =
+        flowstate::audio_engine::AudioEngine::instance().getCurrentFrame();
 
     int64_t targetFrame;
     if (loopFrames <= 0) {
@@ -202,6 +218,79 @@ uint32_t NativeScheduler::scheduleQuantizedStop(int64_t recordingStartFrame) {
     }
 
     return scheduleEvent(SchedulerAction::StopRecording, targetFrame, nullptr);
+}
+
+void NativeScheduler::beginAutoRecording(int64_t recordingStartGlobalFrame,
+                                          int64_t preRollFrames,
+                                          const char* recordingPath,
+                                          Capture* capture) {
+    if (recordingPath == nullptr || recordingPath[0] == '\0' || capture == nullptr) {
+        return;
+    }
+    // Don't auto-record over a base loop — the quantized path owns that.
+    if (mBaseLoopFrames.load(std::memory_order_acquire) > 0) {
+        return;
+    }
+    // Clear stale notifications from any previous recording (mirrors
+    // scheduleQuantizedStart).
+    clearNotifications();
+
+    strncpy(mActiveRecordingPath, recordingPath, sizeof(mActiveRecordingPath) - 1);
+    mActiveRecordingPath[sizeof(mActiveRecordingPath) - 1] = '\0';
+    mRecordingStartFrame = recordingStartGlobalFrame;
+
+    if (preRollFrames < 0) preRollFrames = 0;
+
+    if (g_nativeRingBuffer != nullptr) {
+        g_nativeRingBuffer->startRecording((size_t)preRollFrames);
+        mRecordingStartTotalFrame = g_nativeRingBuffer->getRecordingStartFrame();
+        if (dartRecordingStartedCallback != nullptr) {
+            dartRecordingStartedCallback(recordingStartGlobalFrame, recordingPath);
+        }
+    } else {
+        CaptureErrors err = capture->startRecording(recordingPath);
+        if (err != captureNoError) {
+            mActiveRecordingPath[0] = '\0';
+            mRecordingStartFrame = 0;
+            return;
+        }
+        if (dartRecordingStartedCallback != nullptr) {
+            dartRecordingStartedCallback(recordingStartGlobalFrame, recordingPath);
+        }
+    }
+
+    // Idempotency flag (mirrors flutter_recorder_startRecording).
+    g_recordingScheduledOrActive.store(true, std::memory_order_release);
+
+    // Notify Dart — legacy poll-notification queue ...
+    uint32_t eventId = mNextEventId.fetch_add(1, std::memory_order_relaxed);
+    if (eventId == 0) eventId = mNextEventId.fetch_add(1, std::memory_order_relaxed);
+    EventNotification notif;
+    notif.eventId = eventId;
+    notif.action = SchedulerAction::StartRecording;
+    notif.firedAtFrame = recordingStartGlobalFrame;
+    notif.latencyFrames = 0;
+    pushNotification(notif);
+
+    // ... and the unified AudioEngine event stream (single-producer invariant
+    // preserved: this runs on the same audio thread, sequential with
+    // AudioEngine::process(), like processEvents).
+    {
+        using flowstate::audio_engine::AudioEngine;
+        using flowstate::audio_engine::Event;
+        Event ev{};
+        ev.type            = Event::Type::RecordingStarted;
+        ev.id              = eventId;
+        ev.frame           = recordingStartGlobalFrame;
+        ev.framesProcessed = 0;
+        ev.soundHash       = 0;
+        ev.code            = 0;
+        AudioEngine::instance().emitFromAudioThread(ev);
+    }
+
+    SCHED_DEBUG("beginAutoRecording: start=%lld preRoll=%lld path=%s",
+                (long long)recordingStartGlobalFrame, (long long)preRollFrames,
+                recordingPath);
 }
 
 bool NativeScheduler::cancelEvent(uint32_t eventId) {
@@ -236,9 +325,9 @@ void NativeScheduler::cancelAllEvents() {
 
 void NativeScheduler::processEvents(int64_t bufferStartFrame, uint32_t frameCount,
                                      Capture* capture) {
-    // Update global frame position
+    // Phase 2a: AudioEngine::process() (running later in this same audio
+    // callback) publishes the global frame for us — no local store needed.
     int64_t bufferEndFrame = bufferStartFrame + frameCount;
-    mGlobalFramePosition.store(bufferEndFrame, std::memory_order_release);
 
     // Check each event slot
     for (int i = 0; i < MAX_EVENTS; ++i) {
@@ -280,13 +369,53 @@ void NativeScheduler::processEvents(int64_t bufferStartFrame, uint32_t frameCoun
                 // Execute the event
                 executeEvent(mEvents[i], bufferStartFrame, frameCount, capture);
 
-                // Push notification for Dart
+                // Push notification for Dart (legacy path, still polled by
+                // flutter_recorder_scheduler_pollNotification).
                 EventNotification notif;
                 notif.eventId = mEvents[i].eventId.load(std::memory_order_relaxed);
                 notif.action = mEvents[i].action.load(std::memory_order_relaxed);
                 notif.firedAtFrame = bufferStartFrame;
                 notif.latencyFrames = latencyFrames;
                 pushNotification(notif);
+
+                // Phase 2c.4 — also emit through the AudioEngine event
+                // stream so Dart can consume the unified stream instead of
+                // (or alongside) the legacy poll-notification API. Same
+                // data_callback, sequential with AudioEngine::process(), so
+                // the single-producer invariant on AudioEngine's outbox is
+                // preserved.
+                {
+                  using flowstate::audio_engine::AudioEngine;
+                  using flowstate::audio_engine::Event;
+                  Event::Type evType = Event::Type::None;
+                  switch (notif.action) {
+                    case SchedulerAction::StartRecording:
+                      evType = Event::Type::RecordingStarted; break;
+                    case SchedulerAction::StopRecording:
+                      evType = Event::Type::RecordingStopped; break;
+                    case SchedulerAction::StartPlayback:
+                      evType = Event::Type::PlaybackStarted; break;
+                    case SchedulerAction::StopPlayback:
+                      evType = Event::Type::PlaybackEnded; break;
+                    case SchedulerAction::None:
+                      break;
+                  }
+                  if (evType != Event::Type::None) {
+                    Event ev{};
+                    ev.type            = evType;
+                    ev.id              = notif.eventId;
+                    // targetFrame is the sample-accurate intent; firedAtFrame
+                    // is the start of the buffer that executed the event.
+                    // Prefer the intent so Dart consumers see the same frame
+                    // regardless of buffer-size variation.
+                    ev.frame           = targetFrame;
+                    ev.framesProcessed = 0;
+                    ev.soundHash       = 0;
+                    ev.code            = static_cast<std::uint32_t>(
+                        latencyFrames < 0 ? 0 : latencyFrames);
+                    AudioEngine::instance().emitFromAudioThread(ev);
+                  }
+                }
 
                 // Mark slot as available for reuse
                 mEvents[i].reset();
@@ -439,6 +568,11 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                 mActiveRecordingPath[0] = '\0';
                 mRecordingStartFrame = 0;
                 mRecordingStartTotalFrame = 0;
+
+                // If this take was hands-free (auto-record), put the AutoRecorder
+                // back to Idle so a stale armed/recording state can't schedule a
+                // spurious stop later. No-op when it was already Idle.
+                AutoRecorder::instance().onRecordingStopped();
             }
             break;
 
@@ -514,7 +648,8 @@ void NativeScheduler::clearNotifications() {
 // ==================== STATE ACCESSORS ====================
 
 int64_t NativeScheduler::getNextLoopBoundary() const {
-    return getNextLoopBoundaryFrom(mGlobalFramePosition.load(std::memory_order_acquire));
+    return getNextLoopBoundaryFrom(
+        flowstate::audio_engine::AudioEngine::instance().getCurrentFrame());
 }
 
 int64_t NativeScheduler::getNextLoopBoundaryFrom(int64_t fromFrame) const {

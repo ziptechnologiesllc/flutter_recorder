@@ -1390,6 +1390,61 @@ class RecorderFfi extends RecorderImpl {
     return _bindings.flutter_recorder_scheduler_isAutoStopEnabled();
   }
 
+  // ==================== AUTO-RECORD ====================
+
+  @override
+  void armAutoRecord(String wavPath, int barCount, int framesPerBar,
+      int sampleRate, bool measureAmbient) {
+    final pathPtr = wavPath.toNativeUtf8();
+    try {
+      _bindings.flutter_recorder_armAutoRecord(
+          pathPtr.cast(), barCount, framesPerBar, sampleRate,
+          measureAmbient ? 1 : 0);
+    } finally {
+      malloc.free(pathPtr);
+    }
+  }
+
+  @override
+  void endAutoRecordMeasure() {
+    _bindings.flutter_recorder_endAutoRecordMeasure();
+  }
+
+  @override
+  void disarmAutoRecord() {
+    _bindings.flutter_recorder_disarmAutoRecord();
+  }
+
+  @override
+  int getAutoRecordState() {
+    return _bindings.flutter_recorder_getAutoRecordState();
+  }
+
+  @override
+  bool isAutoRecordMeasuringAmbient() {
+    return _bindings.flutter_recorder_isAutoRecordMeasuringAmbient() != 0;
+  }
+
+  @override
+  double getAutoRecordTempoBpm() {
+    return _bindings.flutter_recorder_getAutoRecordTempoBpm();
+  }
+
+  @override
+  double getAutoRecordNoiseFloorDb() {
+    return _bindings.flutter_recorder_getAutoRecordNoiseFloorDb();
+  }
+
+  @override
+  double getAutoRecordTriggerLevelDb() {
+    return _bindings.flutter_recorder_getAutoRecordTriggerLevelDb();
+  }
+
+  @override
+  void setAutoRecordOnsetThresholdDb(double db) {
+    _bindings.flutter_recorder_setAutoRecordOnsetThresholdDb(db);
+  }
+
   // ==================== NATIVE RING BUFFER ====================
 
   @override

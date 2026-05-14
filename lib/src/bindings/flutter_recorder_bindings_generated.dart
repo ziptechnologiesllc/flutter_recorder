@@ -1878,6 +1878,130 @@ class FlutterRecorderBindings {
       _flutter_recorder_scheduler_isAutoStopEnabledPtr
           .asFunction<bool Function()>();
 
+  /// Arm auto-record (hands-free first-loop capture). The next detected onset
+  /// becomes the loop downbeat; the lead-in silence is trimmed via the ring
+  /// buffer. With barCount > 0 and framesPerBar > 0 the take auto-stops on the
+  /// bar. sampleRate = 0 keeps the current rate. measureAmbient != 0 → keep
+  /// measuring ambient (don't listen for onsets) until endAutoRecordMeasure().
+  void flutter_recorder_armAutoRecord(
+    ffi.Pointer<ffi.Char> wavPath,
+    int barCount,
+    int framesPerBar,
+    int sampleRate,
+    int measureAmbient,
+  ) {
+    return _flutter_recorder_armAutoRecord(
+      wavPath,
+      barCount,
+      framesPerBar,
+      sampleRate,
+      measureAmbient,
+    );
+  }
+
+  late final _flutter_recorder_armAutoRecordPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Void Function(ffi.Pointer<ffi.Char>, ffi.Int, ffi.Int64,
+              ffi.UnsignedInt, ffi.Int)>>('flutter_recorder_armAutoRecord');
+  late final _flutter_recorder_armAutoRecord =
+      _flutter_recorder_armAutoRecordPtr.asFunction<
+          void Function(ffi.Pointer<ffi.Char>, int, int, int, int)>();
+
+  /// End the ambient-measure window (held button released): lock the trigger to
+  /// the measured ambient level and start listening for onsets.
+  void flutter_recorder_endAutoRecordMeasure() {
+    return _flutter_recorder_endAutoRecordMeasure();
+  }
+
+  late final _flutter_recorder_endAutoRecordMeasurePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_endAutoRecordMeasure');
+  late final _flutter_recorder_endAutoRecordMeasure =
+      _flutter_recorder_endAutoRecordMeasurePtr.asFunction<void Function()>();
+
+  /// Disarm auto-record (an in-progress take is left for the normal stop path).
+  void flutter_recorder_disarmAutoRecord() {
+    return _flutter_recorder_disarmAutoRecord();
+  }
+
+  late final _flutter_recorder_disarmAutoRecordPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_disarmAutoRecord');
+  late final _flutter_recorder_disarmAutoRecord =
+      _flutter_recorder_disarmAutoRecordPtr.asFunction<void Function()>();
+
+  /// Auto-record state: 0 = idle, 1 = armed (waiting for onset / measuring), 2 = recording.
+  int flutter_recorder_getAutoRecordState() {
+    return _flutter_recorder_getAutoRecordState();
+  }
+
+  late final _flutter_recorder_getAutoRecordStatePtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_getAutoRecordState');
+  late final _flutter_recorder_getAutoRecordState =
+      _flutter_recorder_getAutoRecordStatePtr.asFunction<int Function()>();
+
+  /// 1 while the armed detector is still measuring ambient (button held), else 0.
+  int flutter_recorder_isAutoRecordMeasuringAmbient() {
+    return _flutter_recorder_isAutoRecordMeasuringAmbient();
+  }
+
+  late final _flutter_recorder_isAutoRecordMeasuringAmbientPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_isAutoRecordMeasuringAmbient');
+  late final _flutter_recorder_isAutoRecordMeasuringAmbient =
+      _flutter_recorder_isAutoRecordMeasuringAmbientPtr
+          .asFunction<int Function()>();
+
+  /// Best current tempo estimate in BPM (0 until the estimator locks).
+  double flutter_recorder_getAutoRecordTempoBpm() {
+    return _flutter_recorder_getAutoRecordTempoBpm();
+  }
+
+  late final _flutter_recorder_getAutoRecordTempoBpmPtr =
+      _lookup<ffi.NativeFunction<ffi.Float Function()>>(
+          'flutter_recorder_getAutoRecordTempoBpm');
+  late final _flutter_recorder_getAutoRecordTempoBpm =
+      _flutter_recorder_getAutoRecordTempoBpmPtr
+          .asFunction<double Function()>();
+
+  /// Current measured noise floor in dBFS (for the UI threshold line).
+  double flutter_recorder_getAutoRecordNoiseFloorDb() {
+    return _flutter_recorder_getAutoRecordNoiseFloorDb();
+  }
+
+  late final _flutter_recorder_getAutoRecordNoiseFloorDbPtr =
+      _lookup<ffi.NativeFunction<ffi.Float Function()>>(
+          'flutter_recorder_getAutoRecordNoiseFloorDb');
+  late final _flutter_recorder_getAutoRecordNoiseFloorDb =
+      _flutter_recorder_getAutoRecordNoiseFloorDbPtr
+          .asFunction<double Function()>();
+
+  /// Current onset trigger level in dBFS = noiseFloorDb + onsetThresholdDb.
+  double flutter_recorder_getAutoRecordTriggerLevelDb() {
+    return _flutter_recorder_getAutoRecordTriggerLevelDb();
+  }
+
+  late final _flutter_recorder_getAutoRecordTriggerLevelDbPtr =
+      _lookup<ffi.NativeFunction<ffi.Float Function()>>(
+          'flutter_recorder_getAutoRecordTriggerLevelDb');
+  late final _flutter_recorder_getAutoRecordTriggerLevelDb =
+      _flutter_recorder_getAutoRecordTriggerLevelDbPtr
+          .asFunction<double Function()>();
+
+  /// Onset-detector sensitivity: dB above the adaptive noise floor that counts
+  /// as an attack. Lower = more sensitive (soft-onset instruments).
+  void flutter_recorder_setAutoRecordOnsetThresholdDb(double db) {
+    return _flutter_recorder_setAutoRecordOnsetThresholdDb(db);
+  }
+
+  late final _flutter_recorder_setAutoRecordOnsetThresholdDbPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Float)>>(
+          'flutter_recorder_setAutoRecordOnsetThresholdDb');
+  late final _flutter_recorder_setAutoRecordOnsetThresholdDb =
+      _flutter_recorder_setAutoRecordOnsetThresholdDbPtr
+          .asFunction<void Function(double)>();
+
   /// Create/configure the native ring buffer
   /// capacitySeconds: How many seconds of audio to keep (typically 5)
   /// sampleRate: Sample rate in Hz

@@ -7,6 +7,8 @@
 
 #include "analyzer.h"
 #include "audio_engine/audio_engine.h"
+#include "audio_engine/inference.h"
+#include "auto_record.h"
 #include "capture.h"
 #include "filters/aec/aec_test.h"
 #include "filters/aec/calibration.h"
@@ -227,6 +229,130 @@ static void looperWorkerThreadFunc() {
               LOOPER_LOG("Notifying Dart of playback start");
               dartLooperPlaybackStartedCallback(soundHash, handle, durationSeconds, savedWavPath);
             }
+
+            // ================================================================
+            // PHASE 3a-v2: Audio-aware tempo + quantum inference.
+            // We have the just-recorded float samples (audioCopy is now owned
+            // by SoLoud; g_lastRecordedAudio still points at the ring buffer's
+            // output region which is valid until the next recording). Run
+            // tempo inference on the audio thread's behalf, post the result
+            // back via the worker inbox so the audio thread updates the
+            // SyncSource on the next process().
+            //
+            // The earlier length-only inference (run when SetBaseLoop fires)
+            // gives an instant approximation; this refines it with audio
+            // evidence. Low-confidence results fall back to length-only and
+            // would just confirm what we already published, so we skip the
+            // post in that case.
+            // ================================================================
+            const flowstate::audio_engine::TempoInference tempo =
+                flowstate::audio_engine::inferTempoFromAudio(
+                    g_lastRecordedAudio,
+                    static_cast<std::int64_t>(g_lastRecordedFrameCount),
+                    g_lastRecordedChannels,
+                    g_lastRecordedSampleRate);
+            if (tempo.bpm > 0.0 && tempo.quantum > 0 &&
+                tempo.confidence >= 0.20f) {
+              LOOPER_LOG("Tempo inferred: bpm=%.2f q=%u conf=%.2f",
+                         tempo.bpm, tempo.quantum, tempo.confidence);
+              flowstate::audio_engine::Command setTempo{};
+              setTempo.type = flowstate::audio_engine::Command::Type::SetTempo;
+              // Bit-pack the bpm (double) into lengthFrames slot.
+              std::memcpy(&setTempo.lengthFrames, &tempo.bpm, sizeof(double));
+              setTempo.flags = tempo.quantum;
+              // Anchor at the current global frame minus the loop length so
+              // the LocalClock's phase aligns with the loop boundary.
+              const std::int64_t loopFrames =
+                  static_cast<std::int64_t>(g_lastRecordedFrameCount);
+              const std::int64_t currentFrame =
+                  flowstate::audio_engine::AudioEngine::instance()
+                      .loadSnapshot()
+                      .currentFrame;
+              setTempo.targetFrame = currentFrame - loopFrames;
+              flowstate::audio_engine::AudioEngine::instance()
+                  .postWorkerCommand(setTempo);
+            }
+
+            // ================================================================
+            // PHASE 3b: Key inference (chromagram + Krumhansl-Schmuckler).
+            // Cheap (~10ms for a typical loop) so we always run it. The audio
+            // thread turns this into a KeyInferred event for Dart to display.
+            // ================================================================
+            const flowstate::audio_engine::KeyInference key =
+                flowstate::audio_engine::inferKey(
+                    g_lastRecordedAudio,
+                    static_cast<std::int64_t>(g_lastRecordedFrameCount),
+                    g_lastRecordedChannels,
+                    g_lastRecordedSampleRate);
+            if (key.pitchClass != 255) {
+              LOOPER_LOG("Key inferred: pc=%u minor=%d conf=%.2f",
+                         key.pitchClass, key.isMinor ? 1 : 0,
+                         key.confidence);
+              flowstate::audio_engine::Command keyCmd{};
+              keyCmd.type = flowstate::audio_engine::Command::Type::
+                                ReportKeyInferred;
+              keyCmd.id    = key.pitchClass;
+              keyCmd.flags = key.isMinor ? 1u : 0u;
+              // Bit-cast the float confidence into the soundHash field.
+              std::memcpy(&keyCmd.soundHash, &key.confidence, sizeof(float));
+              flowstate::audio_engine::AudioEngine::instance()
+                  .postWorkerCommand(keyCmd);
+            }
+
+            // ================================================================
+            // PHASE 3c: Chord / note progression annotation. Writes a JSON
+            // sidecar next to the WAV: <wavPath>.chords.json. Dart reads it
+            // when the clip loads. Uses the bpm + quantum + key we inferred
+            // above; the key (255 = unknown) biases the Viterbi decode toward
+            // diatonic chords.
+            // ================================================================
+            if (tempo.bpm > 0.0 && tempo.quantum > 0 &&
+                savedWavPath[0] != '\0') {
+              // Only let the key bias the chord decode if the key inference
+              // is reasonably confident — a shaky key (and they're often
+              // shaky on a short, sparse loop) can drag the chords toward the
+              // wrong diatonic set. 255 = "no key" → no bias.
+              const std::uint8_t keyPcForBias =
+                  (key.confidence >= 0.60f) ? key.pitchClass : 255;
+              const auto segs = flowstate::audio_engine::recognizeChords(
+                  g_lastRecordedAudio,
+                  static_cast<std::int64_t>(g_lastRecordedFrameCount),
+                  g_lastRecordedChannels,
+                  g_lastRecordedSampleRate,
+                  tempo.bpm, tempo.quantum,
+                  keyPcForBias, key.isMinor);
+              if (!segs.empty()) {
+                // Write sidecar JSON. Manual formatting keeps us free of any
+                // JSON library dependency. `quality`: 0 = major triad,
+                // 1 = minor triad, 2 = single note; pitchClass 255 = N/C.
+                char sidecarPath[640];
+                std::snprintf(sidecarPath, sizeof(sidecarPath),
+                              "%s.chords.json", savedWavPath);
+                FILE* f = std::fopen(sidecarPath, "wb");
+                if (f != nullptr) {
+                  std::fprintf(f,
+                      "{\"version\":2,\"bpm\":%.2f,\"quantum\":%u,"
+                      "\"totalSixteenths\":%u,\"keyPitchClass\":%u,"
+                      "\"keyIsMinor\":%s,\"segments\":[",
+                      tempo.bpm, tempo.quantum, tempo.quantum * 4u,
+                      key.pitchClass, key.isMinor ? "true" : "false");
+                  for (std::size_t i = 0; i < segs.size(); ++i) {
+                    const auto& s = segs[i];
+                    if (i > 0) std::fputc(',', f);
+                    std::fprintf(f,
+                        "{\"startSixteenth\":%d,\"endSixteenth\":%d,"
+                        "\"pitchClass\":%u,\"quality\":%u,"
+                        "\"confidence\":%.3f}",
+                        s.startSixteenth, s.endSixteenth, s.pitchClass,
+                        s.quality, s.confidence);
+                  }
+                  std::fprintf(f, "]}\n");
+                  std::fclose(f);
+                  LOOPER_LOG("Wrote chord sidecar: %s (%zu segments)",
+                             sidecarPath, segs.size());
+                }
+              }
+            }
           } else {
             LOOPER_LOG("Failed to start playback");
             delete[] audioCopy;  // Clean up on failure
@@ -247,11 +373,24 @@ static void looperWorkerThreadFunc() {
   LOOPER_LOG("Thread exiting");
 }
 
+// Stop the looper worker thread (defined below).
+static void stopLooperWorkerThread();
+
 // Start the looper worker thread
 static void startLooperWorkerThread() {
   if (g_looperWorkerRunning.load(std::memory_order_acquire)) {
     return; // Already running
   }
+
+  // Make sure the worker thread is joined before the process exits. Otherwise
+  // the global std::thread's destructor runs while the thread is still
+  // joinable, which calls std::terminate() ("libc++abi: terminating") and
+  // crashes the app on close. The atexit handler is registered after static
+  // init, so it runs before g_looperWorkerThread's destructor (atexit/static
+  // dtors are LIFO).
+  static std::once_flag s_looperAtexitOnce;
+  std::call_once(s_looperAtexitOnce,
+                 [] { std::atexit(stopLooperWorkerThread); });
 
   g_looperWorkerRunning.store(true, std::memory_order_release);
   g_looperWorkerThread = std::thread(looperWorkerThreadFunc);
@@ -571,6 +710,12 @@ flutter_recorder_init(int deviceID, int pcmFormat, unsigned int sampleRate,
 FFI_PLUGIN_EXPORT void flutter_recorder_deinit() {
   if (capture.isRecording)
     capture.stopRecording();
+  // Join the looper worker thread before tearing down the device. If it is
+  // left joinable until the process exits, the destructor of the global
+  // std::thread calls std::terminate() ("libc++abi: terminating") and the app
+  // crashes on close. The thread is restarted on the next recording prep when
+  // setLooperBridge() is called again, so stopping it here is safe.
+  stopLooperWorkerThread();
   capture.dispose();
 }
 
@@ -1584,6 +1729,69 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
 // Reset the native scheduler state
 FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_reset() {
   NativeScheduler::instance().reset();
+  AutoRecorder::instance().reset();
+}
+
+/////////////////////////
+/// AUTO-RECORD (hands-free first-loop capture)
+/////////////////////////
+
+// Arm auto-record: the next detected onset becomes the loop downbeat (lead-in
+// silence is trimmed via the ring buffer). If barCount > 0 AND framesPerBar > 0
+// the take auto-stops at exactly start + barCount*framesPerBar. framesPerBar = 0
+// means tempo unknown (preset auto-stop skipped — Phase 2 estimates it).
+// sampleRate is the capture rate (0 = keep current). If measureAmbient != 0 the
+// detector keeps measuring the ambient level (and doesn't listen for onsets)
+// until flutter_recorder_endAutoRecordMeasure() — the "hold the button" model.
+FFI_PLUGIN_EXPORT void flutter_recorder_armAutoRecord(const char* wavPath,
+                                                      int barCount,
+                                                      int64_t framesPerBar,
+                                                      unsigned int sampleRate,
+                                                      int measureAmbient) {
+  AutoRecorder::instance().arm(wavPath, barCount, framesPerBar, sampleRate,
+                               measureAmbient != 0);
+}
+
+// End the ambient-measure window (the held button was released): lock the
+// trigger to the measured ambient level and start listening for onsets.
+FFI_PLUGIN_EXPORT void flutter_recorder_endAutoRecordMeasure() {
+  AutoRecorder::instance().endAmbientMeasure();
+}
+
+// Disarm auto-record. An in-progress take is left for the normal stop path.
+FFI_PLUGIN_EXPORT void flutter_recorder_disarmAutoRecord() {
+  AutoRecorder::instance().disarm();
+}
+
+// 0 = idle, 1 = armed (waiting for onset, or still measuring ambient), 2 = recording
+FFI_PLUGIN_EXPORT int flutter_recorder_getAutoRecordState() {
+  return (int)AutoRecorder::instance().state();
+}
+
+// 1 while the armed detector is still measuring ambient (button held), else 0.
+FFI_PLUGIN_EXPORT int flutter_recorder_isAutoRecordMeasuringAmbient() {
+  return AutoRecorder::instance().isMeasuringAmbient() ? 1 : 0;
+}
+
+// Best current tempo estimate in BPM (0 until Phase 2's estimator locks).
+FFI_PLUGIN_EXPORT float flutter_recorder_getAutoRecordTempoBpm() {
+  return AutoRecorder::instance().estimatedBpm();
+}
+
+// Current measured noise floor in dBFS (for the UI threshold line).
+FFI_PLUGIN_EXPORT float flutter_recorder_getAutoRecordNoiseFloorDb() {
+  return AutoRecorder::instance().noiseFloorDb();
+}
+
+// Current onset trigger level in dBFS = noiseFloorDb + onsetThresholdDb.
+FFI_PLUGIN_EXPORT float flutter_recorder_getAutoRecordTriggerLevelDb() {
+  return AutoRecorder::instance().triggerLevelDb();
+}
+
+// Onset-detector sensitivity: dB above the (ambient) noise floor that counts as
+// an attack. Lower = more sensitive (soft-onset instruments). Default ~12 dB.
+FFI_PLUGIN_EXPORT void flutter_recorder_setAutoRecordOnsetThresholdDb(float db) {
+  AutoRecorder::instance().setOnsetThresholdDb(db);
 }
 
 // Set base loop parameters for quantization
@@ -1732,6 +1940,50 @@ FFI_PLUGIN_EXPORT size_t flutter_recorder_readPreRoll(
     return 0;
   }
   return g_nativeRingBuffer->readPreRoll(dest, frameCount, rewindFrames);
+}
+
+// Live monophonic pitch ("chromatic tuner") estimate over the most recent
+// slice of capture. See flutter_recorder.h for the out-pointer contract.
+// Reads from the same continuous capture ring used for pre-roll, so it works
+// whether or not a recording is in progress; the read is a plain copy (no
+// consume), so polling it repeatedly is harmless.
+FFI_PLUGIN_EXPORT void flutter_recorder_estimatePitch(
+    unsigned int maxAnalyzeFrames, float* outFrequencyHz, float* outClarity) {
+  if (outFrequencyHz) *outFrequencyHz = 0.0f;
+  if (outClarity) *outClarity = 0.0f;
+
+  NativeRingBuffer* rb = g_nativeRingBuffer;
+  if (rb == nullptr) return;
+  const unsigned int channels = rb->channels();
+  const unsigned int sampleRate = rb->sampleRate();
+  if (channels == 0 || sampleRate == 0) return;
+
+  // Level gate — below ~−45 dB RMS it's room tone / AEC residue / hum, not a
+  // played note. Bail before YIN so the tuner doesn't latch onto noise floor.
+  if (rb->getAudioLevelDb() < -45.0f) return;
+
+  size_t want = (maxAnalyzeFrames > 0)
+                    ? static_cast<size_t>(maxAnalyzeFrames)
+                    : 2048u;
+  // YIN needs ~2 periods of the lowest note (~50 Hz) — clamp up so a too-small
+  // request doesn't starve the detector.
+  const size_t minNeeded = std::max<size_t>(1024u, sampleRate / 24u);
+  if (want < minNeeded) want = minNeeded;
+  const size_t avail = rb->available();
+  if (avail < want) want = avail;
+  if (want < 1024) return;
+
+  static thread_local std::vector<float> scratch;
+  scratch.assign(want * channels, 0.0f);
+  const size_t got =
+      rb->readPreRoll(scratch.data(), want, /*rewindFrames=*/want);
+  if (got < 1024) return;
+
+  const flowstate::audio_engine::PitchEstimate p =
+      flowstate::audio_engine::detectPitch(
+          scratch.data(), static_cast<std::int64_t>(got), channels, sampleRate);
+  if (outFrequencyHz) *outFrequencyHz = p.frequencyHz;
+  if (outClarity) *outClarity = p.clarity;
 }
 
 // Get current audio level in dB (RMS)

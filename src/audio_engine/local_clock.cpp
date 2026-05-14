@@ -119,5 +119,14 @@ std::int64_t LocalClock::nextDownbeatFrame(
   return static_cast<std::int64_t>(std::llround(nextStart));
 }
 
+std::int64_t LocalClock::frameForBeat(
+    std::uint32_t beat, std::uint32_t sampleRate) const noexcept {
+  const double bpm = tempoBPM();
+  if (bpm <= 0.0 || sampleRate == 0) return anchorFrame();
+  const double fpb = framesPerBeat(bpm, sampleRate);
+  return anchorFrame() +
+         static_cast<std::int64_t>(std::llround(beat * fpb));
+}
+
 }  // namespace audio_engine
 }  // namespace flowstate

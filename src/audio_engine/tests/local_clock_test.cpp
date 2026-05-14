@@ -121,6 +121,17 @@ void test_anchor_nonzero_downbeat() {
   std::puts("[PASS] nextDownbeatFrame respects anchor");
 }
 
+void test_frame_for_beat() {
+  ae::LocalClock c;
+  // 120 BPM @ 48 kHz ⇒ 24000 frames per beat. Anchor at 1000.
+  c.setTempo(120.0, 4, /*anchor=*/1000);
+  check(c.frameForBeat(0, kSR48k) == 1000, "beat 0 starts at anchor");
+  check(c.frameForBeat(1, kSR48k) == 25000, "beat 1 starts one beat past");
+  check(c.frameForBeat(4, kSR48k) == 97000, "beat 4 starts at next bar");
+  check(c.frameForBeat(100, kSR48k) == 2401000, "beat 100 math");
+  std::puts("[PASS] frameForBeat math");
+}
+
 void test_realistic_tempo() {
   // Loop length: 285024 frames @ 48 kHz, 4 beats ⇒ should infer ~40.45 BPM.
   // Verify the round trip: setTempo with computed BPM, ask for boundary at
@@ -151,6 +162,7 @@ int main() {
   test_beat_count();
   test_next_downbeat();
   test_anchor_nonzero_downbeat();
+  test_frame_for_beat();
   test_realistic_tempo();
   std::puts("All LocalClock tests passed.");
   return 0;

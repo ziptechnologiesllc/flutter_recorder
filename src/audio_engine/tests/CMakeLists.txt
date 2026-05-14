@@ -43,10 +43,19 @@ add_executable(audio_engine_test
   ../audio_engine.cpp
   ../local_clock.cpp
   ../inference.cpp
+  ../metronome_voice.cpp
+  ../../fft/soloud_fft.cpp
 )
 target_include_directories(audio_engine_test PRIVATE ..)
 target_link_libraries(audio_engine_test PRIVATE Threads::Threads)
 target_compile_options(audio_engine_test PRIVATE -Wall -Wextra -Wpedantic -O2)
+
+add_executable(metronome_voice_test
+  metronome_voice_test.cpp
+  ../metronome_voice.cpp
+)
+target_include_directories(metronome_voice_test PRIVATE ..)
+target_compile_options(metronome_voice_test PRIVATE -Wall -Wextra -Wpedantic -O2)
 
 add_executable(local_clock_test
   local_clock_test.cpp
@@ -59,13 +68,15 @@ target_compile_options(local_clock_test PRIVATE -Wall -Wextra -Wpedantic -O2)
 add_executable(inference_test
   inference_test.cpp
   ../inference.cpp
+  ../../fft/soloud_fft.cpp
 )
 target_include_directories(inference_test PRIVATE ..)
 target_compile_options(inference_test PRIVATE -Wall -Wextra -Wpedantic -O2)
 
 enable_testing()
-add_test(NAME spsc_queue   COMMAND spsc_queue_test)
-add_test(NAME seqlock      COMMAND seqlock_test)
-add_test(NAME audio_engine COMMAND audio_engine_test)
-add_test(NAME local_clock  COMMAND local_clock_test)
-add_test(NAME inference    COMMAND inference_test)
+add_test(NAME spsc_queue      COMMAND spsc_queue_test)
+add_test(NAME seqlock         COMMAND seqlock_test)
+add_test(NAME audio_engine    COMMAND audio_engine_test)
+add_test(NAME local_clock     COMMAND local_clock_test)
+add_test(NAME inference       COMMAND inference_test)
+add_test(NAME metronome_voice COMMAND metronome_voice_test)

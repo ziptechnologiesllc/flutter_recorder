@@ -410,6 +410,55 @@ FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setAutoStop(bool enabled);
 FFI_PLUGIN_EXPORT bool flutter_recorder_scheduler_isAutoStopEnabled();
 
 /////////////////////////
+/// Auto-Record (hands-free first-loop capture)
+/// Long-press to arm; the first detected onset becomes the loop downbeat (the
+/// lead-in silence is trimmed by rewinding the ring buffer). With a preset bar
+/// count + a known tempo (framesPerBar) the take auto-stops on the bar.
+/////////////////////////
+
+// Arm auto-record.
+//   wavPath        : where the take is written on stop
+//   barCount       : preset phrase length in bars; <= 0 = no preset length
+//   framesPerBar   : tempo in frames per bar (one bar = 4 beats, 4/4); > 0
+//                    enables the preset auto-stop; 0 = tempo unknown
+//   sampleRate     : capture sample rate (0 = keep current)
+//   measureAmbient : if != 0, keep measuring the ambient level (don't listen for
+//                    onsets) until flutter_recorder_endAutoRecordMeasure() — the
+//                    "hold the button" model: the longer you hold, the better
+//                    the ambient estimate, hence the trigger threshold.
+FFI_PLUGIN_EXPORT void flutter_recorder_armAutoRecord(const char* wavPath,
+                                                      int barCount,
+                                                      int64_t framesPerBar,
+                                                      unsigned int sampleRate,
+                                                      int measureAmbient);
+
+// End the ambient-measure window (held button released): lock the trigger to the
+// measured ambient level and start listening for onsets.
+FFI_PLUGIN_EXPORT void flutter_recorder_endAutoRecordMeasure();
+
+// Disarm auto-record (an in-progress take is left for the normal stop path).
+FFI_PLUGIN_EXPORT void flutter_recorder_disarmAutoRecord();
+
+// 0 = idle, 1 = armed (waiting for onset, or still measuring ambient), 2 = recording
+FFI_PLUGIN_EXPORT int flutter_recorder_getAutoRecordState();
+
+// 1 while the armed detector is still measuring ambient (button held), else 0.
+FFI_PLUGIN_EXPORT int flutter_recorder_isAutoRecordMeasuringAmbient();
+
+// Best current tempo estimate in BPM (0 until Phase 2's estimator locks).
+FFI_PLUGIN_EXPORT float flutter_recorder_getAutoRecordTempoBpm();
+
+// Current measured noise floor in dBFS (for the UI threshold line).
+FFI_PLUGIN_EXPORT float flutter_recorder_getAutoRecordNoiseFloorDb();
+
+// Current onset trigger level in dBFS = noiseFloorDb + onsetThresholdDb.
+FFI_PLUGIN_EXPORT float flutter_recorder_getAutoRecordTriggerLevelDb();
+
+// Onset-detector sensitivity: dB above the (ambient) noise floor that counts as
+// an attack. Lower = more sensitive (soft-onset instruments). Default ~12 dB.
+FFI_PLUGIN_EXPORT void flutter_recorder_setAutoRecordOnsetThresholdDb(float db);
+
+/////////////////////////
 /// Native Ring Buffer
 /// Latency compensation via continuous capture with pre-roll
 /////////////////////////
@@ -440,6 +489,19 @@ FFI_PLUGIN_EXPORT size_t flutter_recorder_getRingBufferFramesWritten();
 
 // Get available frames in the ring buffer
 FFI_PLUGIN_EXPORT size_t flutter_recorder_getRingBufferAvailable();
+
+// Phase 3c — live monophonic pitch estimate (chromatic instrument tuner) from
+// the most recent slice of the capture ring buffer. Writes:
+//   *outFrequencyHz : detected fundamental in Hz; 0 = no clear pitch
+//   *outClarity     : 0..1; YIN confidence the pitch is real — gate the
+//                     display on this so a strummed chord (no single
+//                     fundamental) reads as "no pitch", not garbage.
+// `maxAnalyzeFrames` bounds the analysis window (0 = ~2048 frames, ≈ 40-50 ms);
+// it's clamped up to a sane minimum so the detector isn't starved. Cheap
+// enough to poll at ~10 Hz; lower the poll rate on weak hardware. Safe to
+// call from the UI thread.
+FFI_PLUGIN_EXPORT void flutter_recorder_estimatePitch(
+    unsigned int maxAnalyzeFrames, float* outFrequencyHz, float* outClarity);
 
 // Reset the ring buffer (clear all data)
 FFI_PLUGIN_EXPORT void flutter_recorder_resetRingBuffer();

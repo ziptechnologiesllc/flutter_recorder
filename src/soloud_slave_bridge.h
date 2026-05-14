@@ -61,6 +61,40 @@ SLAVE_BRIDGE_EXPORT void soloud_resetSlaveAudioReady();
 // Mark slave audio as ready (called from data_callback on first successful mix)
 SLAVE_BRIDGE_EXPORT void soloud_setSlaveAudioReady();
 
+// ---------------------------------------------------------------------------
+// Transport control bridge (Phase 1 of native-audio-engine work)
+// ---------------------------------------------------------------------------
+//
+// Symmetric to the mix-callback bridge but in the opposite direction:
+// flutter_soloud registers thin trampolines that call SoLoud's lock-free
+// per-voice setters, and flutter_recorder's `audio_engine` calls them from
+// its audio thread when a [PendingAction] fires. This eliminates the Dart
+// round-trip on quantized transport changes — the audio thread can apply
+// volume / pause / stop directly at the fire frame.
+//
+// Thread safety: SoLoud's slave mode runs in lock-free mode, so
+// `Soloud::setVolume()` / `setPause()` / `stop()` do not acquire mutexes —
+// they just modify per-voice atomics. Safe to call from the audio thread.
+
+typedef void (*SoloudSetVolumeCallback)(unsigned int voiceHandle, float volume);
+typedef void (*SoloudSetPauseCallback)(unsigned int voiceHandle, bool pause);
+typedef void (*SoloudStopCallback)(unsigned int voiceHandle);
+
+extern SLAVE_BRIDGE_EXPORT SoloudSetVolumeCallback g_soloudSetVolume;
+extern SLAVE_BRIDGE_EXPORT SoloudSetPauseCallback g_soloudSetPause;
+extern SLAVE_BRIDGE_EXPORT SoloudStopCallback g_soloudStop;
+
+// Register transport-control trampolines. Each pointer may be null if the
+// corresponding setter isn't needed yet. Called by flutter_soloud at slave
+// init via dlsym, mirroring how the mix callback is registered.
+SLAVE_BRIDGE_EXPORT void soloud_registerSlaveControlCallbacks(
+    SoloudSetVolumeCallback setVolumeCb,
+    SoloudSetPauseCallback setPauseCb,
+    SoloudStopCallback stopCb);
+
+// Clear all transport-control trampolines (called during slave deinit).
+SLAVE_BRIDGE_EXPORT void soloud_unregisterSlaveControlCallbacks();
+
 #ifdef __cplusplus
 }
 #endif
