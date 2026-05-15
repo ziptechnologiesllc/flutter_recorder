@@ -356,6 +356,26 @@ abstract class RecorderImpl {
   bool wasDuplexDenied();
 
   // ///////////////////////
+  //   Phase 2e: Ableton Link
+  // ///////////////////////
+  //
+  // Direct path to the native AudioEngine's AbletonLinkClock. `setEnabled`
+  // is NOT realtime-safe (Link spins up its network thread on enable);
+  // Dart must call from the main isolate, never from an audio callback.
+
+  /// Enable / disable Link-session participation.
+  @mustBeOverridden
+  void linkSetEnabled(bool enabled);
+
+  /// Whether Link is currently enabled in the native engine.
+  @mustBeOverridden
+  bool linkIsEnabled();
+
+  /// Number of peers in the Link session. 0 when disabled or solo.
+  @mustBeOverridden
+  int linkNumPeers();
+
+  // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////
 

@@ -753,6 +753,22 @@ class RecorderFfi extends RecorderImpl {
     return _bindings.flutter_recorder_wasDuplexDenied() == 1;
   }
 
+  // ── Phase 2e: Ableton Link ────────────────────────────────────────────────
+  @override
+  void linkSetEnabled(bool enabled) {
+    _bindings.flutter_recorder_link_setEnabled(enabled ? 1 : 0);
+  }
+
+  @override
+  bool linkIsEnabled() {
+    return _bindings.flutter_recorder_link_isEnabled() == 1;
+  }
+
+  @override
+  int linkNumPeers() {
+    return _bindings.flutter_recorder_link_numPeers();
+  }
+
   // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////

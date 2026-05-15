@@ -94,3 +94,20 @@ endif()
 if(AVFOUNDATION_FRAMEWORK)
   target_link_libraries(${PLUGIN_NAME} PRIVATE ${AVFOUNDATION_FRAMEWORK})
 endif()
+
+# ── Phase 2e.2: Ableton Link integration ──────────────────────────────────
+#
+# Link is a header-only library (`Ableton::Link` is an IMPORTED INTERFACE
+# target). The f_link plugin already vendors the source tree at
+# plugins/f_link/macos/link/. We reuse its AbletonLinkConfig.cmake which
+# defines the target with the right include directories + platform compile
+# definitions (LINK_PLATFORM_MACOSX). Guarded so a co-configured f_link in
+# the same Flutter build doesn't double-define.
+set(LINK_DIR "${SRC_DIR}/../../f_link/macos/link")
+if(NOT TARGET Ableton::Link AND EXISTS "${LINK_DIR}/AbletonLinkConfig.cmake")
+  include(${LINK_DIR}/AbletonLinkConfig.cmake)
+endif()
+if(TARGET Ableton::Link)
+  target_link_libraries(${PLUGIN_NAME} PRIVATE Ableton::Link)
+  target_compile_definitions(${PLUGIN_NAME} PRIVATE FLOWSTATE_ABLETON_LINK=1)
+endif()

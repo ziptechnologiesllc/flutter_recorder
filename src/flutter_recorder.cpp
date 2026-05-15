@@ -2182,4 +2182,27 @@ FFI_PLUGIN_EXPORT bool flutter_recorder_engine_postCommand(
   return flowstate::audio_engine::AudioEngine::instance().postCommand(*cmd);
 }
 
+// ── Phase 2e: Ableton Link control ─────────────────────────────────────────
+// Direct (non-audio-thread) Dart→native path. `link.enable()` is NOT
+// realtime-safe — routing it through the AudioEngine command queue would
+// either block the audio callback or require deferring to a worker, so
+// instead we expose Link's main-thread API as plain FFI calls.
+
+FFI_PLUGIN_EXPORT void flutter_recorder_link_setEnabled(int enabled) {
+  flowstate::audio_engine::AudioEngine::instance().linkClock().setEnabled(
+      enabled != 0);
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_link_isEnabled() {
+  return flowstate::audio_engine::AudioEngine::instance()
+                 .linkClock()
+                 .isEnabled()
+             ? 1
+             : 0;
+}
+
+FFI_PLUGIN_EXPORT uint32_t flutter_recorder_link_numPeers() {
+  return flowstate::audio_engine::AudioEngine::instance().linkClock().numPeers();
+}
+
 }  // extern "C"

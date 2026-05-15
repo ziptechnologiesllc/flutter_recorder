@@ -519,6 +519,22 @@ FFI_PLUGIN_EXPORT void flutter_recorder_freeRecordedAudio();
 
 FFI_PLUGIN_EXPORT int flutter_recorder_wasDuplexDenied();
 
+/////////////////////////
+// PHASE 2e: Ableton Link control
+/////////////////////////
+//
+// These call into AudioEngine::linkClock() directly. `link_setEnabled` is
+// NOT realtime-safe (Link's enable() spins up its network thread) — Dart
+// must call from the main thread, never from the audio callback. The
+// `numPeers` / `isEnabled` readers are wait-free.
+
+// Enable / disable Ableton Link participation. NOT realtime-safe.
+FFI_PLUGIN_EXPORT void flutter_recorder_link_setEnabled(int enabled);
+
+// Wait-free reads. Safe from any thread.
+FFI_PLUGIN_EXPORT int flutter_recorder_link_isEnabled();
+FFI_PLUGIN_EXPORT uint32_t flutter_recorder_link_numPeers();
+
 #ifdef __cplusplus
 }
 #endif

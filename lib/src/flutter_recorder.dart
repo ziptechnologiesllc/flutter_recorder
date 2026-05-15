@@ -799,6 +799,26 @@ interface class Recorder {
   }
 
   // ///////////////////////
+  //   Phase 2e: Ableton Link
+  // ///////////////////////
+  //
+  // Wrappers around AudioEngine's AbletonLinkClock, exposed to Dart through
+  // a direct FFI (not the audio-thread command queue) since Link's
+  // enable() is not realtime-safe. Call from the main isolate only.
+
+  /// Enable / disable Link-session participation. The native AudioEngine's
+  /// `AbletonLinkClock` calls `ableton::Link::enable()` immediately — Link
+  /// will start its background thread + multicast peer discovery. Disable
+  /// returns to standalone operation. Safe to flip multiple times.
+  void linkSetEnabled(bool enabled) => _impl.linkSetEnabled(enabled);
+
+  /// Current Link participation state. Cheap wait-free read.
+  bool linkIsEnabled() => _impl.linkIsEnabled();
+
+  /// Number of peers currently in the Link session (0 if disabled or solo).
+  int linkNumPeers() => _impl.linkNumPeers();
+
+  // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////
 

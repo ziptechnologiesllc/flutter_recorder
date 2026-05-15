@@ -598,6 +598,38 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_wasDuplexDenied =
       _flutter_recorder_wasDuplexDeniedPtr.asFunction<int Function()>();
 
+  // ── Phase 2e: Ableton Link ──────────────────────────────────────────────
+  // Manually-written FFI bindings (not regenerated from ffigen yet).
+  void flutter_recorder_link_setEnabled(int enabled) {
+    _flutter_recorder_link_setEnabled(enabled);
+  }
+
+  late final _flutter_recorder_link_setEnabledPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int)>>(
+          'flutter_recorder_link_setEnabled');
+  late final _flutter_recorder_link_setEnabled =
+      _flutter_recorder_link_setEnabledPtr.asFunction<void Function(int)>();
+
+  int flutter_recorder_link_isEnabled() {
+    return _flutter_recorder_link_isEnabled();
+  }
+
+  late final _flutter_recorder_link_isEnabledPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_link_isEnabled');
+  late final _flutter_recorder_link_isEnabled =
+      _flutter_recorder_link_isEnabledPtr.asFunction<int Function()>();
+
+  int flutter_recorder_link_numPeers() {
+    return _flutter_recorder_link_numPeers();
+  }
+
+  late final _flutter_recorder_link_numPeersPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint32 Function()>>(
+          'flutter_recorder_link_numPeers');
+  late final _flutter_recorder_link_numPeers =
+      _flutter_recorder_link_numPeersPtr.asFunction<int Function()>();
+
   /// Set native audio sink for direct recorder-to-player streaming
   void flutter_recorder_setNativeAudioSink(
     NativeAudioSinkCallback callback,

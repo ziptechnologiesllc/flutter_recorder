@@ -106,6 +106,14 @@ class AudioEngine {
     return mPublishedFrame.load(std::memory_order_acquire);
   }
 
+  // Phase 2e: direct accessor for the Link clock so the FFI can call
+  // Link's non-realtime-safe methods (enable / disable) without routing
+  // through the audio-thread command queue. Audio-thread queries
+  // (onAudioBuffer, SyncSource methods) still flow through here too —
+  // it's the same object.
+  AbletonLinkClock& linkClock() noexcept { return mLinkClock; }
+  const AbletonLinkClock& linkClock() const noexcept { return mLinkClock; }
+
  private:
   AudioEngine() = default;
   ~AudioEngine() = default;

@@ -448,6 +448,19 @@ class RecorderWeb extends RecorderImpl {
     return false;
   }
 
+  // ── Phase 2e: Ableton Link ────────────────────────────────────────────────
+  // Web stubs — Ableton Link is a native-only feature (no browser API).
+  @override
+  void linkSetEnabled(bool enabled) {
+    // No-op on web.
+  }
+
+  @override
+  bool linkIsEnabled() => false;
+
+  @override
+  int linkNumPeers() => 0;
+
   // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////

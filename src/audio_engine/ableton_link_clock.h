@@ -1,53 +1,67 @@
 // AbletonLinkClock — SyncSource backed by an Ableton Link session.
 //
-// Phase 2e.1 (this file): scaffolding only. The class is a real SyncSource
-// implementation with stubbed bodies that report `isValid() == false` so the
-// AudioEngine falls back to LocalClock until Phase 2e.2 wires the actual
-// `ableton::Link` instance + CMake linkage.
+// Phase 2e.2: the real integration. When FLOWSTATE_ABLETON_LINK is defined
+// at compile time, this class wraps an `ableton::Link` instance and routes
+// musical-time queries through its SessionState. When the macro is NOT
+// defined (e.g. a platform target where Link wasn't wired into CMake yet),
+// every SyncSource method falls back to a "no tempo" stub and the engine
+// runs purely on LocalClock — the public API is identical either way.
 //
-// Phase 2e.2: replace mEnabled with a real `ableton::Link link{120.0};`,
-// query its SessionState in tempoBPM() / beatAtFrame() / phaseInBar() via
-// frame↔microsecond conversion anchored on each AudioEngine::process()
-// callback.
-//
-// Audio-thread readers are wait-free; Dart-side `SetLinkEnabled` commands
-// flow through AudioEngine's command queue so flipping the enable flag and
-// switching the active SyncSource both happen on the audio thread.
+// Threading:
+//   - setEnabled(): NOT realtime-safe (Link's enable() opens sockets,
+//     starts background threads). Call from Dart's main thread via the
+//     dedicated FFI entry point, never from the audio callback.
+//   - onAudioBuffer(): audio-thread only. Calls
+//     `link.captureAudioSessionState()` (RT-safe per Link's contract) and
+//     refreshes a cache of tempo + (anchorFrame ↔ anchorMicros) so the
+//     wait-free SyncSource queries below can convert frame counts into
+//     wall-clock microseconds.
+//   - SyncSource methods: wait-free reads of cached atomics; callable from
+//     any thread.
 
 #ifndef FLOWSTATE_AUDIO_ENGINE_ABLETON_LINK_CLOCK_H_
 #define FLOWSTATE_AUDIO_ENGINE_ABLETON_LINK_CLOCK_H_
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 
 #include "sync_source.h"
 
 namespace flowstate {
 namespace audio_engine {
 
+// Forward-declared pImpl so Link headers don't leak into every translation
+// unit that includes audio_engine.h. The pImpl is allocated unconditionally
+// (a 16-byte stub when Link isn't compiled in); kept simple — this clock
+// only exists once per process anyway.
+struct AbletonLinkClockImpl;
+
 class AbletonLinkClock final : public SyncSource {
  public:
-  AbletonLinkClock() = default;
+  AbletonLinkClock();
+  ~AbletonLinkClock();
   AbletonLinkClock(const AbletonLinkClock&) = delete;
   AbletonLinkClock& operator=(const AbletonLinkClock&) = delete;
 
-  // Toggle Link-session participation. Phase 2e.1 just flips an atomic;
-  // 2e.2 will call `link.enable(b)` on the real Link instance.
+  // ── Main-thread API (NOT realtime-safe) ─────────────────────────────────
+  // Call from Dart via dedicated FFI entry points, never from the audio
+  // callback. enable() spins up Link's background thread on first true.
   void setEnabled(bool enabled) noexcept;
   bool isEnabled() const noexcept;
 
-  // Refreshed once per audio buffer by AudioEngine::process() so the wall-
-  // clock ↔ frame conversion used in SyncSource queries stays current.
-  // 2e.2 will capture `link.captureAudioSessionState()` here too.
+  // ── Audio-thread API ────────────────────────────────────────────────────
+  // Called by AudioEngine::process() once per buffer. Captures Link's
+  // SessionState (RT-safe) and refreshes the frame↔microsecond anchor +
+  // cached tempo / quantum / phase atomics that the wait-free SyncSource
+  // queries below read.
   void onAudioBuffer(std::int64_t bufferStartFrame,
                      std::uint32_t sampleRate) noexcept;
 
-  // Number of peers in the Link session. 0 when disabled or solo.
+  // ── Telemetry (wait-free, any thread) ───────────────────────────────────
   std::uint32_t numPeers() const noexcept;
 
-  // SyncSource interface. 2e.1 returns LocalClock-equivalent defaults
-  // (isValid=false → AudioEngine treats us as "no tempo"); 2e.2 routes
-  // these through Link's SessionState.
+  // ── SyncSource interface (wait-free, any thread) ────────────────────────
   bool isValid() const noexcept override;
   double tempoBPM() const noexcept override;
   std::uint32_t quantum() const noexcept override;
@@ -61,13 +75,21 @@ class AbletonLinkClock final : public SyncSource {
                              std::uint32_t sampleRate) const noexcept override;
 
  private:
+  // Cached per-buffer state, refreshed in onAudioBuffer(). Reads are
+  // wait-free; writes are single-producer (audio thread). The SyncSource
+  // queries combine these with the caller's `frame` argument to derive
+  // beat / phase / next-downbeat without re-entering Link from any thread
+  // but the audio one.
   std::atomic<bool>          mEnabled{false};
   std::atomic<std::uint32_t> mNumPeers{0};
-  // Phase 2e.2 will add:
-  //   ableton::Link              mLink{120.0};
-  //   std::atomic<double>        mCachedTempoBPM{0.0};
-  //   std::atomic<std::int64_t>  mAnchorFrame{0};
-  //   std::atomic<std::int64_t>  mAnchorMicros{0};
+  std::atomic<double>        mCachedTempoBPM{0.0};
+  std::atomic<std::int64_t>  mAnchorFrame{0};
+  std::atomic<std::int64_t>  mAnchorMicros{0};
+
+  // Implementation detail (`ableton::Link` instance) hidden behind pImpl so
+  // <ableton/Link.hpp> doesn't transitively appear in every audio_engine.h
+  // consumer.
+  std::unique_ptr<AbletonLinkClockImpl> mImpl;
 };
 
 }  // namespace audio_engine
