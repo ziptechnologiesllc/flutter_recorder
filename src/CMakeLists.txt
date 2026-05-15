@@ -20,6 +20,7 @@ add_library(flutter_recorder SHARED
   "flutter_recorder.cpp"
   "analyzer.cpp"
   "auto_record.cpp"
+  "audio_engine/ableton_link_clock.cpp"
   "audio_engine/audio_engine.cpp"
   "audio_engine/inference.cpp"
   "audio_engine/local_clock.cpp"

@@ -12,6 +12,7 @@ set(PLUGIN_SOURCES
   "${SRC_DIR}/flutter_recorder.cpp"
   "${SRC_DIR}/analyzer.cpp"
   "${SRC_DIR}/auto_record.cpp"
+  "${SRC_DIR}/audio_engine/ableton_link_clock.cpp"
   "${SRC_DIR}/audio_engine/audio_engine.cpp"
   "${SRC_DIR}/audio_engine/inference.cpp"
   "${SRC_DIR}/audio_engine/local_clock.cpp"

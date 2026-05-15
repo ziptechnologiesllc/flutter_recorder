@@ -79,6 +79,11 @@ void AudioEngine::process(std::int64_t bufferStartFrame,
   // this same buffer (e.g. a future helper that reads its own current frame).
   mPublishedFrame.store(mCurrentFrame, std::memory_order_release);
 
+  // Phase 2e: refresh the Link clock's frame↔microsecond anchor + cached
+  // tempo once per buffer (no-op until Phase 2e.2 hooks the real Link
+  // SessionState capture). Cheap if the active source isn't Link.
+  mLinkClock.onAudioBuffer(bufferStartFrame, sampleRate);
+
   // 2. Drain a bounded number of commands from BOTH inboxes. Each one
   //    mutates audio-thread state and may emit events. Bounded to keep
   //    the audio callback within a predictable budget regardless of
@@ -229,8 +234,6 @@ void AudioEngine::handleCommand(const Command& cmd) noexcept {
       break;
 
     case Command::Type::SetSyncSource:
-      // Phase 2 has only one source. Validate the request and emit an event
-      // so callers know the switch was acknowledged (or ignored).
       switch (static_cast<SyncSourceKind>(cmd.id)) {
         case SyncSourceKind::Local:
           mActiveSource     = &mLocalClock;
@@ -246,12 +249,29 @@ void AudioEngine::handleCommand(const Command& cmd) noexcept {
               /*code=*/0,
           });
           break;
-        case SyncSourceKind::None:
         case SyncSourceKind::AbletonLink:
+          // Phase 2e: route musical time through the Link clock. In 2e.1
+          // the clock returns isValid()=false so AudioEngine effectively
+          // sees "no tempo" until 2e.2 hooks the real Link SessionState.
+          // The switch still happens so SyncSourceChanged surfaces to Dart
+          // (UI badge state, NetworkTimingService toggle plumbing).
+          mActiveSource     = &mLinkClock;
+          mActiveSourceKind = SyncSourceKind::AbletonLink;
+          mLastEmittedBeat  = kBeatCounterUninit;
+          emitEvent(Event{
+              /*type=*/Event::Type::SyncSourceChanged,
+              /*reserved=*/{0, 0, 0},
+              /*id=*/static_cast<std::uint32_t>(SyncSourceKind::AbletonLink),
+              /*frame=*/mCurrentFrame,
+              /*framesProcessed=*/0,
+              /*soundHash=*/0,
+              /*code=*/0,
+          });
+          break;
+        case SyncSourceKind::None:
         case SyncSourceKind::MidiClock:
-          // Not implemented in Phase 2; surface an error so Dart can show
-          // a friendly "Link not connected yet" message instead of silently
-          // doing nothing.
+          // Not implemented; surface an error so Dart can show a friendly
+          // "MIDI clock not supported" message instead of silently no-op.
           emitEvent(Event{
               /*type=*/Event::Type::Error,
               /*reserved=*/{0, 0, 0},
@@ -400,6 +420,15 @@ void AudioEngine::handleCommand(const Command& cmd) noexcept {
     case Command::Type::UnregisterTrackHandle:
       (void)unregisterTrackHandle(cmd.id);
       break;
+
+    case Command::Type::SetLinkEnabled: {
+      const bool enable = (cmd.flags & 0x1u) != 0;
+      mLinkClock.setEnabled(enable);
+      // 2e.2 will publish a SyncSourceChanged-like event so Dart knows
+      // peer-count / connect state changed. For now flipping the flag is
+      // enough — the active source switch is a separate command.
+      break;
+    }
 
     case Command::Type::None:
     case Command::Type::StartRecording:

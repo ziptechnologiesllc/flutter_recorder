@@ -79,6 +79,17 @@ struct Command {
     QueueStop,
     RegisterTrackHandle,
     UnregisterTrackHandle,
+
+    // ── Phase 2e: Ableton Link control ─────────────────────────────────
+    // Toggle Link-session participation. The AudioEngine forwards this to
+    // [AbletonLinkClock::setEnabled] which (in 2e.2) calls
+    // `ableton::Link::enable()`. Switching musical-time *source* between
+    // LocalClock and AbletonLinkClock is a separate `SetSyncSource`
+    // command — enabling Link doesn't automatically make it the active
+    // source, in case Dart wants to keep local timing while peering.
+    //   flags bit 0 = 1 enable, 0 disable
+    //   other fields unused
+    SetLinkEnabled,
   };
 
   Type           type{Type::None};

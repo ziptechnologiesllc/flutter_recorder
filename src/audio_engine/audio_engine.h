@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cstdint>
 
+#include "ableton_link_clock.h"
 #include "command.h"
 #include "event.h"
 #include "local_clock.h"
@@ -140,9 +141,10 @@ class AudioEngine {
   // Sync sources. Each implementation lives as a member here so the active
   // pointer always points at a valid object regardless of switches. Phase 2
   // ships only LocalClock; AbletonLink joins this list in Phase 4.
-  LocalClock    mLocalClock;
-  SyncSource*   mActiveSource{&mLocalClock};
-  SyncSourceKind mActiveSourceKind{SyncSourceKind::Local};
+  LocalClock        mLocalClock;
+  AbletonLinkClock  mLinkClock;
+  SyncSource*       mActiveSource{&mLocalClock};
+  SyncSourceKind    mActiveSourceKind{SyncSourceKind::Local};
 
   // Legacy base-loop fields — kept for parallel-run during 2 → 2c. Removed
   // in Phase 2c.
