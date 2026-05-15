@@ -124,6 +124,8 @@ class NativeCommandType {
   static const int queueStop = 19;
   static const int registerTrackHandle = 20;
   static const int unregisterTrackHandle = 21;
+  // Phase 2e: Ableton Link control.
+  static const int setLinkEnabled = 22;
 }
 
 @internal

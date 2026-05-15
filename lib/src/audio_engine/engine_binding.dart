@@ -267,6 +267,8 @@ enum CommandType {
   queueStop,
   registerTrackHandle,
   unregisterTrackHandle,
+  // Phase 2e
+  setLinkEnabled,
 }
 
 /// Launch quantize value in 1/16 units. Names mirror Ableton's clip-launch
@@ -396,6 +398,11 @@ class EngineBinding {
 
   /// Broadcast stream of engine snapshots, ~120 Hz.
   Stream<Snapshot> get snapshots => _snapshotCtrl.stream;
+
+  /// Synchronous read of the most-recently-polled snapshot. Phase 2c uses
+  /// this for one-shot reads (beat-grid layout, dev overlays) where setting
+  /// up a stream subscription is overkill. Lock-free + safe to call any time.
+  Snapshot get lastSnapshot => _lastSnapshot;
 
   /// Broadcast stream of engine events. Phase 1: native emits none.
   Stream<Event> get events => _eventCtrl.stream;
@@ -611,6 +618,8 @@ class EngineBinding {
         return NativeCommandType.registerTrackHandle;
       case CommandType.unregisterTrackHandle:
         return NativeCommandType.unregisterTrackHandle;
+      case CommandType.setLinkEnabled:
+        return NativeCommandType.setLinkEnabled;
     }
   }
 
@@ -637,7 +646,9 @@ class EngineBinding {
     return postCommand(const Command(type: CommandType.clearTempo));
   }
 
-  /// Switch the active sync source. Phase 2 only implements [SyncSourceKind.local].
+  /// Switch the active sync source. Phase 2e adds [SyncSourceKind.abletonLink];
+  /// the Link-side switch is a no-op musically until 2e.2 hooks the real
+  /// Link SessionState (the clock reports `isValid() == false` until then).
   bool setSyncSource(SyncSourceKind kind) {
     return postCommand(Command(
       type: CommandType.setSyncSource,
@@ -795,6 +806,24 @@ class EngineBinding {
       type: CommandType.queueStop,
       id: trackIndex,
       flags: quantize,
+    ));
+  }
+
+  // ── Phase 2e: Ableton Link control ───────────────────────────────────────
+  //
+  // The native AudioEngine holds an `AbletonLinkClock` alongside its
+  // `LocalClock`. Enabling Link (1) calls `ableton::Link::enable()` and the
+  // engine starts maintaining its session-state cache; (2) does NOT
+  // automatically make Link the active musical-time source — UI calls
+  // `setSyncSource(SyncSourceKind.abletonLink)` separately to switch.
+  //
+  // Until Phase 2e.2 lands the real Link integration, `setLinkEnabled(true)`
+  // is functionally a no-op beyond toggling an atomic.
+
+  bool setLinkEnabled(bool enabled) {
+    return postCommand(Command(
+      type: CommandType.setLinkEnabled,
+      flags: enabled ? 1 : 0,
     ));
   }
 
