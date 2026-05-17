@@ -630,6 +630,28 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_link_numPeers =
       _flutter_recorder_link_numPeersPtr.asFunction<int Function()>();
 
+  // ── Audio-callback profiling (pops/clicks hunt) ─────────────────────────
+  void flutter_recorder_getCallbackStats(ffi.Pointer<ffi.Int64> out) {
+    _flutter_recorder_getCallbackStats(out);
+  }
+
+  late final _flutter_recorder_getCallbackStatsPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Int64>)>>(
+          'flutter_recorder_getCallbackStats');
+  late final _flutter_recorder_getCallbackStats =
+      _flutter_recorder_getCallbackStatsPtr
+          .asFunction<void Function(ffi.Pointer<ffi.Int64>)>();
+
+  void flutter_recorder_resetCallbackStats() {
+    _flutter_recorder_resetCallbackStats();
+  }
+
+  late final _flutter_recorder_resetCallbackStatsPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_resetCallbackStats');
+  late final _flutter_recorder_resetCallbackStats =
+      _flutter_recorder_resetCallbackStatsPtr.asFunction<void Function()>();
+
   /// Set native audio sink for direct recorder-to-player streaming
   void flutter_recorder_setNativeAudioSink(
     NativeAudioSinkCallback callback,

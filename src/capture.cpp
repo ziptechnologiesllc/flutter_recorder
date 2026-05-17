@@ -201,10 +201,85 @@ void detectSilence(Capture *userData) {
 // A "frame" is one sample for each channel. For example, in a stereo stream (2
 // channels),
 // one frame is 2 samples: one for the left, one for the right.
+// ── Audio-callback profiling (pops/clicks hunt) ───────────────────────────
+//
+// Every audio buffer must be filled within the device's buffer period
+// (frameCount / sampleRate — ~5.3 ms at 256@48k). If data_callback's
+// wall-time exceeds that, the device's *next* buffer is already late →
+// underrun → audible pop. These atomics are written only from the audio
+// thread (single producer) and read lock-free from Dart via FFI.
+//
+// steady_clock::now() is a vDSO read on macOS/Linux — no syscall, safe to
+// call on the audio thread.
+std::atomic<int64_t>  g_cbLastMicros{0};    // most recent callback duration
+std::atomic<int64_t>  g_cbMaxMicros{0};     // worst duration since last reset
+std::atomic<int64_t>  g_cbBudgetMicros{0};  // buffer period, for reference
+std::atomic<int64_t>  g_cbTotalCount{0};    // callbacks measured
+std::atomic<int64_t>  g_cbOverrunCount{0};  // callbacks that blew the budget
+std::atomic<int64_t>  g_cbNearMissCount{0}; // callbacks over 80% of budget
+
+void captureGetCallbackStats(int64_t *out) {
+  if (out == nullptr) return;
+  out[0] = g_cbLastMicros.load(std::memory_order_relaxed);
+  out[1] = g_cbMaxMicros.load(std::memory_order_relaxed);
+  out[2] = g_cbBudgetMicros.load(std::memory_order_relaxed);
+  out[3] = g_cbOverrunCount.load(std::memory_order_relaxed);
+  out[4] = g_cbNearMissCount.load(std::memory_order_relaxed);
+  out[5] = g_cbTotalCount.load(std::memory_order_relaxed);
+}
+
+void captureResetCallbackStats() {
+  g_cbMaxMicros.store(0, std::memory_order_relaxed);
+  g_cbOverrunCount.store(0, std::memory_order_relaxed);
+  g_cbNearMissCount.store(0, std::memory_order_relaxed);
+  g_cbTotalCount.store(0, std::memory_order_relaxed);
+}
+
+namespace {
+// RAII timer — measures the whole callback regardless of which `return`
+// path it takes. Constructed at data_callback entry, records on scope exit.
+struct CallbackTimer {
+  const std::chrono::steady_clock::time_point start;
+  const int64_t budgetMicros;
+  CallbackTimer(ma_uint32 frameCount, ma_uint32 sampleRate)
+      : start(std::chrono::steady_clock::now()),
+        budgetMicros(sampleRate > 0
+                         ? static_cast<int64_t>(frameCount) * 1000000 /
+                               static_cast<int64_t>(sampleRate)
+                         : 0) {}
+  ~CallbackTimer() {
+    const int64_t micros =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start)
+            .count();
+    g_cbLastMicros.store(micros, std::memory_order_relaxed);
+    g_cbBudgetMicros.store(budgetMicros, std::memory_order_relaxed);
+    g_cbTotalCount.fetch_add(1, std::memory_order_relaxed);
+    // Monotonic max ratchet.
+    int64_t prevMax = g_cbMaxMicros.load(std::memory_order_relaxed);
+    while (micros > prevMax &&
+           !g_cbMaxMicros.compare_exchange_weak(
+               prevMax, micros, std::memory_order_relaxed)) {
+    }
+    if (budgetMicros > 0) {
+      if (micros > budgetMicros) {
+        g_cbOverrunCount.fetch_add(1, std::memory_order_relaxed);
+      } else if (micros * 5 > budgetMicros * 4) {  // > 80% of budget
+        g_cbNearMissCount.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  }
+};
+}  // namespace
+
 void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
                    ma_uint32 frameCount) {
   Capture *userData = (Capture *)pDevice->pUserData;
   if (!userData) return;
+
+  // Profile the full callback (all return paths) — see notes above.
+  CallbackTimer cbTimer_(frameCount,
+                         static_cast<ma_uint32>(pDevice->sampleRate));
 
   // CRITICAL: Use ACTUAL device channels, not CONFIGURED channels!
   int playbackChannels = pDevice->playback.channels;

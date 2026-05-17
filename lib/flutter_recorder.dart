@@ -28,4 +28,5 @@ export 'src/enums.dart'
 export 'src/filters/autogain.dart';
 export 'src/filters/echo_cancellation.dart';
 export 'src/filters/filters.dart' show RecorderFilterType;
+export 'src/bindings/recorder.dart' show CallbackStats;
 export 'src/flutter_recorder.dart';

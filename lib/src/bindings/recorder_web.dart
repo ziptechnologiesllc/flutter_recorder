@@ -461,6 +461,14 @@ class RecorderWeb extends RecorderImpl {
   @override
   int linkNumPeers() => 0;
 
+  // ── Audio-callback profiling ──────────────────────────────────────────────
+  // Web has no native data_callback to profile.
+  @override
+  CallbackStats getCallbackStats() => CallbackStats.zero;
+
+  @override
+  void resetCallbackStats() {}
+
   // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////

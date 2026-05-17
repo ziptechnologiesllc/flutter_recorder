@@ -19,6 +19,15 @@ struct CaptureDevice
     unsigned int id;
 };
 
+// ── Audio-callback profiling (pops/clicks hunt) ───────────────────────────
+// Lock-free read of the data_callback timing stats. `out` must point at an
+// array of at least 6 int64: [lastMicros, maxMicros, budgetMicros,
+// overrunCount, nearMissCount, totalCount]. captureResetCallbackStats()
+// zeroes the max + counters (keeps last/budget). See capture.cpp for the
+// definition of "overrun".
+void captureGetCallbackStats(int64_t *out);
+void captureResetCallbackStats();
+
 class Capture
 {
 public:

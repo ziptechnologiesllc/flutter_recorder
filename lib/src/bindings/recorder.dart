@@ -13,6 +13,55 @@ import 'package:meta/meta.dart';
 export 'package:flutter_recorder/src/bindings/recorder_io.dart'
     if (dart.library.js_interop) 'package:flutter_recorder/src/bindings/recorder_web.dart';
 
+/// Timing snapshot of the native audio callback. All durations in
+/// microseconds. A callback whose duration exceeds [budgetMicros] makes the
+/// device's next buffer late — that's an underrun, heard as a pop/click.
+class CallbackStats {
+  const CallbackStats({
+    required this.lastMicros,
+    required this.maxMicros,
+    required this.budgetMicros,
+    required this.overrunCount,
+    required this.nearMissCount,
+    required this.totalCount,
+  });
+
+  /// Duration of the most recent callback.
+  final int lastMicros;
+
+  /// Worst callback duration since the last reset.
+  final int maxMicros;
+
+  /// Buffer period — the deadline each callback must beat.
+  final int budgetMicros;
+
+  /// Callbacks that exceeded [budgetMicros] (→ underrun → pop).
+  final int overrunCount;
+
+  /// Callbacks over 80% of budget — not yet a pop, but close.
+  final int nearMissCount;
+
+  /// Total callbacks measured since the last reset.
+  final int totalCount;
+
+  static const CallbackStats zero = CallbackStats(
+    lastMicros: 0,
+    maxMicros: 0,
+    budgetMicros: 0,
+    overrunCount: 0,
+    nearMissCount: 0,
+    totalCount: 0,
+  );
+
+  /// Fraction of the budget the worst callback used (1.0 == budget).
+  double get worstLoad => budgetMicros > 0 ? maxMicros / budgetMicros : 0;
+
+  @override
+  String toString() => 'CallbackStats(last=${lastMicros}us '
+      'max=${maxMicros}us budget=${budgetMicros}us '
+      'overruns=$overrunCount/$totalCount nearMiss=$nearMissCount)';
+}
+
 /// Use this class to _capture_ audio (such as from a microphone).
 abstract class RecorderImpl {
   /// The device ID used to initialize the device.
@@ -374,6 +423,21 @@ abstract class RecorderImpl {
   /// Number of peers in the Link session. 0 when disabled or solo.
   @mustBeOverridden
   int linkNumPeers();
+
+  // ///////////////////////
+  //   Audio-callback profiling (pops/clicks hunt)
+  // ///////////////////////
+
+  /// Snapshot of the native audio callback's recent timing. Polled by the
+  /// dev overlay to spot underruns (callbacks that blew the buffer-period
+  /// budget — the proximate cause of an audible pop).
+  @mustBeOverridden
+  CallbackStats getCallbackStats();
+
+  /// Zero the max + counters (keeps last/budget). Call before a test run so
+  /// the overrun count reflects just that run.
+  @mustBeOverridden
+  void resetCallbackStats();
 
   // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)

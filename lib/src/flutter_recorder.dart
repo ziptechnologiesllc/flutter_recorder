@@ -819,6 +819,18 @@ interface class Recorder {
   int linkNumPeers() => _impl.linkNumPeers();
 
   // ///////////////////////
+  //   Audio-callback profiling (pops/clicks hunt)
+  // ///////////////////////
+
+  /// Snapshot of the native audio callback's recent timing. Poll this from
+  /// a dev overlay to catch underruns ([CallbackStats.overrunCount] rising
+  /// == the audio thread blew its budget == an audible pop).
+  CallbackStats getCallbackStats() => _impl.getCallbackStats();
+
+  /// Zero the max + counters so a test run's overrun count starts fresh.
+  void resetCallbackStats() => _impl.resetCallbackStats();
+
+  // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////
 

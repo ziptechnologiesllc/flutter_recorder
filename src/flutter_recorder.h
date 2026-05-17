@@ -535,6 +535,21 @@ FFI_PLUGIN_EXPORT void flutter_recorder_link_setEnabled(int enabled);
 FFI_PLUGIN_EXPORT int flutter_recorder_link_isEnabled();
 FFI_PLUGIN_EXPORT uint32_t flutter_recorder_link_numPeers();
 
+/////////////////////////
+// Audio-callback profiling (pops/clicks hunt)
+/////////////////////////
+//
+// Fills `out[0..5]` with the data_callback timing stats:
+//   [0] lastMicros    — duration of the most recent callback
+//   [1] maxMicros     — worst duration since the last reset
+//   [2] budgetMicros  — buffer period; a callback over this = underrun
+//   [3] overrunCount  — callbacks that exceeded budget
+//   [4] nearMissCount — callbacks over 80% of budget
+//   [5] totalCount    — callbacks measured since reset
+// `out` must hold at least 6 int64_t. Wait-free; safe from any thread.
+FFI_PLUGIN_EXPORT void flutter_recorder_getCallbackStats(int64_t *out);
+FFI_PLUGIN_EXPORT void flutter_recorder_resetCallbackStats();
+
 #ifdef __cplusplus
 }
 #endif

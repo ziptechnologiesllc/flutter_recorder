@@ -769,6 +769,30 @@ class RecorderFfi extends RecorderImpl {
     return _bindings.flutter_recorder_link_numPeers();
   }
 
+  // ── Audio-callback profiling ──────────────────────────────────────────────
+  @override
+  CallbackStats getCallbackStats() {
+    final out = calloc<ffi.Int64>(6);
+    try {
+      _bindings.flutter_recorder_getCallbackStats(out);
+      return CallbackStats(
+        lastMicros: out[0],
+        maxMicros: out[1],
+        budgetMicros: out[2],
+        overrunCount: out[3],
+        nearMissCount: out[4],
+        totalCount: out[5],
+      );
+    } finally {
+      calloc.free(out);
+    }
+  }
+
+  @override
+  void resetCallbackStats() {
+    _bindings.flutter_recorder_resetCallbackStats();
+  }
+
   // ///////////////////////
   //   AEC (Adaptive Echo Cancellation)
   // ///////////////////////

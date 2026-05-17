@@ -2205,4 +2205,13 @@ FFI_PLUGIN_EXPORT uint32_t flutter_recorder_link_numPeers() {
   return flowstate::audio_engine::AudioEngine::instance().linkClock().numPeers();
 }
 
+// ── Audio-callback profiling ───────────────────────────────────────────────
+FFI_PLUGIN_EXPORT void flutter_recorder_getCallbackStats(int64_t *out) {
+  captureGetCallbackStats(out);
+}
+
+FFI_PLUGIN_EXPORT void flutter_recorder_resetCallbackStats() {
+  captureResetCallbackStats();
+}
+
 }  // extern "C"
