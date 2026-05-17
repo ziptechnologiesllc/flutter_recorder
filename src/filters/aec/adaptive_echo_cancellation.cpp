@@ -57,12 +57,21 @@ AdaptiveEchoCancellation::AdaptiveEchoCancellation(unsigned int sampleRate,
   // Calculate initial delay in samples
   updateDelay();
 
-  // Create FIR filter for each channel
+  // Create one filter set per channel. Shadow filter (Phase A): the
+  // foreground VSS filter is frozen — it produces the cancelled output using
+  // the last promoted weights; the background filter adapts recklessly in raw
+  // mode and is promoted into the foreground only when it measurably wins.
   for (unsigned int ch = 0; ch < channels; ++ch) {
     mFilters.push_back(
         std::make_unique<NLMSFilter>(NLMSFilter::DEFAULT_FILTER_LENGTH));
-    mVssFilters.push_back(
-        std::make_unique<VssNlmsFilter>(VssNlmsFilter::DEFAULT_FILTER_LENGTH));
+    auto fg =
+        std::make_unique<VssNlmsFilter>(VssNlmsFilter::DEFAULT_FILTER_LENGTH);
+    fg->setFrozen(true);
+    mVssFilters.push_back(std::move(fg));
+    auto bg =
+        std::make_unique<VssNlmsFilter>(VssNlmsFilter::DEFAULT_FILTER_LENGTH);
+    bg->setRawAdaptation(true);
+    mBgFilters.push_back(std::move(bg));
   }
 
   // Pre-allocate reference buffer for batch processing
@@ -201,8 +210,18 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   while (mFilters.size() < channels) {
     mFilters.push_back(
         std::make_unique<NLMSFilter>(NLMSFilter::DEFAULT_FILTER_LENGTH));
-    mVssFilters.push_back(
-        std::make_unique<VssNlmsFilter>(VssNlmsFilter::DEFAULT_FILTER_LENGTH));
+    // Shadow filter (Phase A): foreground is frozen — pure FIR, produces the
+    // cancelled output the user hears, never corrupted by adaptation. The
+    // background adapts recklessly in raw mode and is promoted into the
+    // foreground only when it measurably wins (see promotion block below).
+    auto fg =
+        std::make_unique<VssNlmsFilter>(VssNlmsFilter::DEFAULT_FILTER_LENGTH);
+    fg->setFrozen(true);
+    mVssFilters.push_back(std::move(fg));
+    auto bg =
+        std::make_unique<VssNlmsFilter>(VssNlmsFilter::DEFAULT_FILTER_LENGTH);
+    bg->setRawAdaptation(true);
+    mBgFilters.push_back(std::move(bg));
   }
 
   // Read reference signal from shared buffer
@@ -430,15 +449,19 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     }
   }
 
-  // NLMS ADAPTIVE ECHO CANCELLATION
+  // NLMS ADAPTIVE ECHO CANCELLATION — shadow filter (Phase A)
+  // - aecModeAlgo/aecModeHybrid: shadow filter active (bg adapts, fg frozen)
+  // - aecModeFrozen/aecModeFrozenNeural: foreground only, no adaptation
+  // - aecModeNeural/aecModeBypass: skip the linear stage entirely
+  const bool adaptiveMode =
+      (mAecMode == aecModeAlgo || mAecMode == aecModeHybrid);
+  const bool linearStage = adaptiveMode || mAecMode == aecModeFrozen ||
+                           mAecMode == aecModeFrozenNeural;
   for (ma_uint32 frame = 0; frame < frameCount; ++frame) {
     for (unsigned int ch = 0; ch < channels; ++ch) {
       size_t idx = frame * channels + ch;
 
-      // Normalize mic sample to float
       float micSample = normalizeSample(input[idx]);
-
-      // Get reference sample (already float, properly delayed by calibration)
       float refSample = mRefBuffer[idx];
 
       // Accumulate for debug output
@@ -448,16 +471,19 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       totalRefEnergyForCorr += refSample * refSample;
       debugSamples++;
 
-      // VSS-NLMS / Frozen FIR Echo Cancellation:
-      // - aecModeAlgo/aecModeHybrid: Adaptive filter (may cause transient artifacts)
-      // - aecModeFrozen/aecModeFrozenNeural: Pure FIR with calibrated IR (stable)
-      // - aecModeNeural/aecModeBypass: Skip linear stage
-      float error = micSample; // Default to input (Bypass/Neural only)
+      float error = micSample; // Bypass/Neural default — skip linear stage
 
-      if (mAecMode == aecModeAlgo || mAecMode == aecModeHybrid ||
-          mAecMode == aecModeFrozen || mAecMode == aecModeFrozenNeural) {
-        // processSample respects the frozen flag internally
+      if (linearStage) {
+        // Foreground is frozen: produces the cancelled output the user hears
+        // using the last promoted weights — never corrupted by live adaptation.
         error = mVssFilters[ch]->processSample(refSample, micSample);
+        if (adaptiveMode) {
+          // Background adapts recklessly (raw mode). Accumulate both filters'
+          // residual error energy so the block promotion can compare them.
+          float eBg = mBgFilters[ch]->processSample(refSample, micSample);
+          mBlockFgErr += (double)error * (double)error;
+          mBlockBgErr += (double)eBg * (double)eBg;
+        }
       }
 
       mLinearOutputBuffer[idx] = error;
@@ -466,6 +492,46 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       if (ch == 0 && AECTest::isCapturing()) {
         AECTest::captureSample(micSample, error, refSample);
       }
+    }
+  }
+
+  // ---- Shadow-filter promotion -------------------------------------------
+  // Once per block, if the background models the echo measurably better than
+  // the frozen foreground, copy its weights in. A background corrupted by
+  // double-talk (the musician playing) is simply worse and never promoted, so
+  // the foreground holds its last good solution. This is the structural fix
+  // for the freeze-vs-adapt trade-off — there is no threshold to mis-tune.
+  if (adaptiveMode) {
+    const size_t kShadowPromoteBlock = 2048;   // ~43 ms @ 48 kHz
+    const double kShadowPromoteMargin = 0.95;  // background must win by >=5%
+    mBlockSamples += frameCount;
+    if (mBlockSamples >= kShadowPromoteBlock) {
+      // Never promote a diverged background into the foreground — defence in
+      // depth alongside the in-filter divergence guard. A healthy converged
+      // filter sits around coeff energy ~1-5; >50 means it has blown up.
+      const float kShadowMaxCoeff = 50.0f;
+      bool bgSane = true;
+      for (unsigned int ch = 0; ch < channels && ch < mBgFilters.size();
+           ++ch) {
+        if (mBgFilters[ch]->getCoeffEnergy() > kShadowMaxCoeff) {
+          bgSane = false;
+          break;
+        }
+      }
+      if (bgSane && mBlockBgErr < mBlockFgErr * kShadowPromoteMargin) {
+        for (unsigned int ch = 0;
+             ch < channels && ch < mBgFilters.size() &&
+             ch < mVssFilters.size();
+             ++ch) {
+          std::vector<float> w = mBgFilters[ch]->getWeights();
+          mVssFilters[ch]->setWeights(w.data(), w.size());
+        }
+        aecLog("[AEC Shadow] promoted bg->fg  bgErr=%.6f fgErr=%.6f\n",
+               mBlockBgErr, mBlockFgErr);
+      }
+      mBlockFgErr = 0.0;
+      mBlockBgErr = 0.0;
+      mBlockSamples = 0;
     }
   }
 
@@ -538,6 +604,12 @@ void AdaptiveEchoCancellation::reset() {
   for (auto &filter : mVssFilters) {
     filter->reset();
   }
+  for (auto &filter : mBgFilters) {
+    filter->reset();
+  }
+  mBlockFgErr = 0.0;
+  mBlockBgErr = 0.0;
+  mBlockSamples = 0;
 }
 
 float AdaptiveEchoCancellation::getEchoReturnLoss() const {

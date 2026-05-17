@@ -180,8 +180,15 @@ private:
 
   // NLMS filter instances (one per channel)
   std::vector<std::unique_ptr<NLMSFilter>> mFilters;
-  // VSS-NLMS filter instances (Parallel path for new algo)
+  // VSS-NLMS foreground filters (frozen — produce the cancelled output).
   std::vector<std::unique_ptr<VssNlmsFilter>> mVssFilters;
+  // Shadow filter (Phase A): background filters adapt recklessly in raw mode.
+  // Promoted into the foreground only when they measurably beat it — so a
+  // background corrupted by double-talk is simply never promoted.
+  std::vector<std::unique_ptr<VssNlmsFilter>> mBgFilters;
+  double mBlockFgErr = 0.0;  // foreground error energy accumulated this block
+  double mBlockBgErr = 0.0;  // background error energy accumulated this block
+  size_t mBlockSamples = 0;  // samples accumulated toward the next promotion
 
   // Delay in samples for reference signal alignment (fallback if no timestamp)
   unsigned int mDelaySamples;

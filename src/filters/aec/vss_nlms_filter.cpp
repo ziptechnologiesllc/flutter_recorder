@@ -70,6 +70,8 @@ void VssNlmsFilter::reset() {
   p_est = 0.0f;
   var_x = 0.0f;
   var_e = 0.0f;
+  var_mic = 0.0f;
+  mEnergyXAvg = 0.0f;
   mLastE = 0.0f;
   mLastStep = 0.0f;
 }
@@ -194,6 +196,17 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   }
 #endif
 
+  // DIVERGENCE GUARD: raw-mode adaptation with no leakage can blow up during
+  // quiet passages (the step normalisation explodes when reference energy
+  // ~ 0). Real audio is in [-1,1], so a prediction past +-8 or non-finite
+  // means the filter has detonated — zero it and recover cleanly rather than
+  // emit exploded samples (which crash the audio chain downstream).
+  if (!std::isfinite(y_est) || std::fabs(y_est) > 8.0f) {
+    std::fill(weights.begin(), weights.end(), 0.0f);
+    y_est = 0.0f;
+    p_est = var_x = var_e = mEnergyXAvg = 0.0f;
+  }
+
   // 3. Calculate Error (Clean Signal)
   float e = mic_input - y_est;
   mLastE = e;
@@ -208,6 +221,7 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   p_est = alpha * p_est + (1.0f - alpha) * (e * aligned_ref);
   var_x = alpha * var_x + (1.0f - alpha) * (aligned_ref * aligned_ref);
   var_e = alpha * var_e + (1.0f - alpha) * (e * e);
+  var_mic = alpha * var_mic + (1.0f - alpha) * (mic_input * mic_input);
 
   // 5. Calculate Dynamic Step Size (Variable Step Size)
   // Metric: (E[e*x])^2 / (E[e^2] * E[x^2]) -> Normalized Cross Correlation
@@ -226,10 +240,32 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   // - Above 0.3: Error is mostly correlated with reference (echo) -> adapt
   // - Below 0.3: Error is uncorrelated (near-end speech) -> freeze
   float mu_eff = 0.0f;
-  if (correlation_metric > mCorrelationThreshold) {
-    // Scale step size by how much above threshold we are
+  if (mRawAdapt) {
+    // Background/shadow filter: no double-talk freeze, but a genuine
+    // convergence-annealed step size (this is the real VSS — fixed hot mu
+    // made the filter CHASE the signal: low instantaneous error but a
+    // fragile solution the foreground can't snapshot). While the residual
+    // var_e is a large fraction of the mic power, the echo is still present
+    // -> large step, fast convergence. As the filter cancels, var_e falls
+    // relative to var_mic -> the step shrinks so the filter SETTLES onto the
+    // stable echo path instead of chasing. Self-recovering: if the echo path
+    // changes, var_e rises and the step opens back up.
+    const float kMinAnnealRatio = 0.03f; // keep tracking; never fully freeze
+    float convRatio = var_e / (var_mic + epsilon);
+    if (convRatio > 1.0f) convRatio = 1.0f;
+    if (convRatio < kMinAnnealRatio) convRatio = kMinAnnealRatio;
+    mu_eff = mu_max * convRatio;
+  } else if (correlation_metric > mCorrelationThreshold) {
+    // Ramp the step size from 0 at the threshold up to full mu_max once the
+    // error/reference correlation reaches kFullAdaptMetric. The old formula
+    // ramped toward metric == 1.0, so a moderate reverberant echo (metric
+    // peaks ~0.3) only ever received a few percent of mu_max — far too slow
+    // to converge against leakage. A genuine echo should saturate adaptation
+    // well before metric 1.0.
+    const float kFullAdaptMetric = 0.08f;
     float excess = correlation_metric - mCorrelationThreshold;
-    float scale = excess / (1.0f - mCorrelationThreshold + epsilon);
+    float scale = excess / (kFullAdaptMetric - mCorrelationThreshold);
+    if (scale > 1.0f) scale = 1.0f;
     mu_eff = mu_max * scale;
   }
   // If below threshold, mu_eff stays 0 -> complete freeze
@@ -247,15 +283,24 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
     return e;
   }
 
-  // NLMS rule: w[n+1] = w[n] + (mu / (||x||^2 + eps)) * e[n] * x[n]
-  float norm_factor = energy_x_inst + epsilon;
+  // NLMS rule: w[n+1] = w[n] + (mu / (||x||^2 + reg)) * e[n] * x[n]
+  // Regularise the step normalisation with a running average of the input
+  // energy. epsilon alone (1e-6) lets mu/||x||^2 explode when energy_x_inst
+  // collapses during a quiet passage — that is what detonated the raw
+  // background filter. The mEnergyXAvg floor caps the step at low input.
+  mEnergyXAvg = 0.999f * mEnergyXAvg + 0.001f * energy_x_inst;
+  float norm_factor = energy_x_inst + epsilon + 0.05f * mEnergyXAvg;
   float step = mu_eff / norm_factor;
   float final_step = step * e; // Pre-multiply error
 
-  // CRITICAL: Only apply leakage when there's reference signal
-  // This preserves calibrated coefficients during silence
-  // Without this, coefficients decay to zero in ~2 seconds of no audio
-  float effective_leakage = (energy_x_inst > 1e-8f) ? leakage : 1.0f;
+  // Leakage stabilises ADAPTATION. When the double-talk detector freezes the
+  // filter (mu_eff == 0) there is no adaptation to stabilise — the weights
+  // must be HELD. Leaking them here decays the filter during every frozen
+  // interval; since the DTD freezes the majority of the time on a moderate
+  // echo, that quietly destroyed convergence ("build then collapse"). Apply
+  // leakage only while actually adapting (mu_eff > 0, which also implies the
+  // reference carries signal).
+  float effective_leakage = (mu_eff > 0.0f && !mRawAdapt) ? leakage : 1.0f;
 
   static int vssLogCount = 0;
   static float maxAbsError = 0.0f;

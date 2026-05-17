@@ -97,6 +97,17 @@ public:
   bool isFrozen() const { return mFrozen; }
 
   /**
+   * Raw adaptation mode (for the shadow filter's background path).
+   * When true the double-talk gate is bypassed (always adapts at full mu_max)
+   * and leakage is disabled — the reckless "offline NLMS" regime that
+   * converges fastest. The shadow architecture handles double-talk safety by
+   * only promoting the background when it measurably beats the foreground,
+   * so the background itself never needs to be cautious.
+   */
+  void setRawAdaptation(bool raw) { mRawAdapt = raw; }
+  bool isRawAdaptation() const { return mRawAdapt; }
+
+  /**
    * Get the current filter weights.
    * @return Copy of the weights vector.
    */
@@ -137,18 +148,25 @@ private:
   float p_est = 0.0f; // Cross-correlation estimate (smoothed)
   float var_x = 0.0f; // Power of Reference (smoothed)
   float var_e = 0.0f; // Power of Error (smoothed)
+  float var_mic = 0.0f; // Power of Mic input (smoothed) — drives the
+                        // convergence-annealed step size in raw mode
+  float mEnergyXAvg = 0.0f; // smoothed input energy — regularises the NLMS
+                            // step so quiet passages can't make it explode
 
   // Tuning Parameters
   float alpha =
       0.05f; // Smoothing factor (lower = faster tracking for transients)
-  float mu_max = 0.1f;    // Max step size (CONSERVATIVE - prevents oscillation)
+  float mu_max = 0.5f;    // Max step size (offline NLMS converged to ~12dB at this rate)
   float epsilon = 1e-6f;  // Small constant to prevent division by zero
   float leakage = 0.9999f; // Leakage factor (slight decay for stability)
 
-  // Double-talk detection threshold
-  // Below this correlation, adaptation freezes completely to protect
-  // the filter from being corrupted by near-end speech (singing/guitar)
-  float mCorrelationThreshold = 0.3f;
+  // Double-talk freeze threshold on correlation_metric (squared error/ref
+  // correlation). An offline NLMS that adapts every sample converges to
+  // ~12dB on this echo, so the previous DTD gating (which froze on a
+  // moderate echo) was the real blocker — NLMS is inherently robust to
+  // uncorrelated near-end. Keep only a last-resort freeze for essentially
+  // pure near-end / silence (metric ~0).
+  float mCorrelationThreshold = 0.01f;
 
   // Diagnostics
   float mLastE = 0.0f;
@@ -158,6 +176,10 @@ private:
 
   // Freeze flag - when true, no weight updates occur (pure FIR mode)
   bool mFrozen = false;
+
+  // Raw adaptation - when true, double-talk gate + leakage are bypassed
+  // (background/shadow filter mode).
+  bool mRawAdapt = false;
 
   // SIMD helper functions defined in cpp
   void updateHistory(float new_sample);
