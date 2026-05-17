@@ -50,10 +50,14 @@ NativeScheduler::NativeScheduler() {
 void NativeScheduler::setBaseLoop(int64_t loopFrames, int64_t loopStartFrame) {
     int64_t currentFrame =
         flowstate::audio_engine::AudioEngine::instance().getCurrentFrame();
+    int64_t ringTotal = g_nativeRingBuffer
+        ? (int64_t)g_nativeRingBuffer->getTotalFramesWritten() : -1;
     mBaseLoopFrames.store(loopFrames, std::memory_order_release);
     mBaseLoopStartFrame.store(loopStartFrame, std::memory_order_release);
-    SCHED_LOG("setBaseLoop: loopFrames=%lld loopStartFrame=%lld currentGlobalFrame=%lld",
-              (long long)loopFrames, (long long)loopStartFrame, (long long)currentFrame);
+    SCHED_LOG("setBaseLoop: loopFrames=%lld loopStartFrame=%lld currentGlobalFrame=%lld "
+              "ringTotal=%lld divergence(ring-global)=%lld",
+              (long long)loopFrames, (long long)loopStartFrame, (long long)currentFrame,
+              (long long)ringTotal, (long long)(ringTotal - currentFrame));
 }
 
 // Phase 2a: forward to the AudioEngine — single source of truth for the
@@ -164,11 +168,27 @@ uint32_t NativeScheduler::scheduleQuantizedStart(const char* recordingPath) {
         flowstate::audio_engine::AudioEngine::instance().getCurrentFrame();
     int64_t loopFrames = mBaseLoopFrames.load(std::memory_order_acquire);
     int64_t loopStartFrame = mBaseLoopStartFrame.load(std::memory_order_acquire);
-    int64_t targetStartFrame = getNextLoopBoundary();
 
-    SCHED_LOG("scheduleQuantizedStart: currentFrame=%lld loopFrames=%lld loopStart=%lld -> targetFrame=%lld path=%s",
+    // Round-trip latency compensation for overdubs. The musician plays along
+    // with the loop they HEAR (delayed by output latency) and their input is
+    // delayed again (input latency), so their performance lands in the capture
+    // stream ~RTL late. Shifting the recording window forward by RTL makes
+    // capture-frame (boundary + RTL) become WAV sample 0 — the performance the
+    // player intended for the downbeat. The grid (mBaseLoopStartFrame) is NOT
+    // moved; only this take's window is offset. Auto/manual stop derive from
+    // targetStartFrame so the take stays exactly loopFrames long.
+    int64_t latencyComp = mLatencyCompensationFrames.load(std::memory_order_acquire);
+    if (latencyComp < 0) latencyComp = 0;
+    int64_t targetStartFrame = getNextLoopBoundary() + latencyComp;
+
+    int64_t ringTotal = g_nativeRingBuffer
+        ? (int64_t)g_nativeRingBuffer->getTotalFramesWritten() : -1;
+    SCHED_LOG("scheduleQuantizedStart: currentFrame=%lld loopFrames=%lld loopStart=%lld latencyComp=%lld "
+              "-> targetFrame=%lld ringTotal=%lld divergence(ring-global)=%lld path=%s",
               (long long)currentFrame, (long long)loopFrames, (long long)loopStartFrame,
-              (long long)targetStartFrame, recordingPath ? recordingPath : "(null)");
+              (long long)latencyComp, (long long)targetStartFrame, (long long)ringTotal,
+              (long long)(ringTotal - currentFrame),
+              recordingPath ? recordingPath : "(null)");
 
     // Schedule the START event
     uint32_t startEventId = scheduleEvent(SchedulerAction::StartRecording, targetStartFrame, recordingPath);
@@ -176,8 +196,9 @@ uint32_t NativeScheduler::scheduleQuantizedStart(const char* recordingPath) {
     // If we have a base loop AND auto-stop is enabled, also schedule the STOP event upfront
     bool autoStop = mAutoStopEnabled.load(std::memory_order_acquire);
     if (startEventId != 0 && loopFrames > 0 && autoStop) {
-        // In loop mode, no latency compensation is applied (quantized start/stop)
-        // so STOP is simply START + loopFrames
+        // STOP is START + loopFrames. targetStartFrame already carries the
+        // latency-comp offset, so STOP inherits it — the take stays exactly
+        // loopFrames long, just phase-shifted off the grid by latencyComp.
         int64_t targetStopFrame = targetStartFrame + loopFrames;
         uint32_t stopEventId = scheduleEvent(SchedulerAction::StopRecording, targetStopFrame, recordingPath);
         SCHED_LOG("scheduleQuantizedStart: auto-scheduled STOP at frame %lld (startEventId=%u, stopEventId=%u)",
