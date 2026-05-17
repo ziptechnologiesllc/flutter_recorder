@@ -223,9 +223,21 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     // (which includes thread timing differences that don't apply in slave mode).
     size_t totalWritten = g_aecReferenceBuffer->getFramesWritten();
 
-    // During calibration (mAcousticDelaySamples == 0), always read the most recent frames
+    // Slave-mode reference delay. mAcousticDelaySamples is only set by a live
+    // calibration run; on a saved-calibration boot it stays 0. Fall back to the
+    // calibrated DelayMs parameter (restored from prefs) — it is the same
+    // measured echo delay. Without any delay the reference is read with zero
+    // lag, ~one round-trip out of sync with the mic echo, so NLMS sees corr≈0
+    // and never adapts.
+    size_t effectiveDelay = mAcousticDelaySamples;
+    if (effectiveDelay == 0 && mValues[DelayMs] > 0.0f) {
+      effectiveDelay =
+          static_cast<size_t>((mValues[DelayMs] / 1000.0f) * mSampleRate);
+    }
+
+    // During calibration (no delay known yet), always read the most recent frames
     // This ensures we capture ref+mic for delay estimation even before calibration is complete
-    bool isCalibrating = mCalibrationCaptureEnabled || mAcousticDelaySamples == 0;
+    bool isCalibrating = mCalibrationCaptureEnabled || effectiveDelay == 0;
 
     if (totalWritten >= frameCount) {
       size_t readPos;
@@ -234,8 +246,8 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
         readPos = totalWritten - frameCount;
       } else {
         // After calibration: apply acoustic delay compensation
-        if (totalWritten >= frameCount + mAcousticDelaySamples) {
-          readPos = totalWritten - frameCount - mAcousticDelaySamples;
+        if (totalWritten >= frameCount + effectiveDelay) {
+          readPos = totalWritten - frameCount - effectiveDelay;
         } else {
           // Not enough data yet for delay compensation
           readPos = 0;
@@ -249,8 +261,8 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
 
       static int slaveReadDebugCount = 0;
       if (++slaveReadDebugCount % 500 == 0 || (isCalibrating && slaveReadDebugCount <= 10)) {
-        aecLog("[AEC Slave] totalWritten=%zu acousticDelay=%zu readPos=%zu read=%zu calib=%d\n",
-               totalWritten, mAcousticDelaySamples, readPos, framesRead, isCalibrating ? 1 : 0);
+        aecLog("[AEC Slave] totalWritten=%zu effDelay=%zu (acoustic=%zu) readPos=%zu read=%zu calib=%d\n",
+               totalWritten, effectiveDelay, mAcousticDelaySamples, readPos, framesRead, isCalibrating ? 1 : 0);
       }
     }
     skip_slave_read:;
@@ -336,23 +348,39 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     return;
   }
 
-  // DEBUG: Dump ref and mic to files for alignment verification
+  // DEBUG: Dump ref and mic to files for alignment verification.
+  // Arm the dump only once the reference actually carries playback signal —
+  // dumping from boot just captures pre-playback silence and tells us nothing.
   static FILE *refFile = nullptr;
   static FILE *micFile = nullptr;
   static int dumpFrames = 0;
+  static bool dumpArmed = false;
+  static bool dumpDone = false;
   static const int MAX_DUMP_FRAMES = 48000 * 5; // 5 seconds
   static std::string tempDir;
 
 #ifndef __ANDROID__
-  if (dumpFrames == 0 && refFile == nullptr) {
+  if (!dumpArmed && !dumpDone) {
+    float refEnergy = 0.0f;
+    for (ma_uint32 f = 0; f < frameCount; ++f) {
+      float r = mRefBuffer[f * channels];
+      refEnergy += r * r;
+    }
+    // ~-70 dB mean-square gate: real playback clears it, silence does not.
+    if (frameCount > 0 && (refEnergy / frameCount) > 1e-7f) {
+      dumpArmed = true;
+    }
+  }
+
+  if (dumpArmed && !dumpDone && refFile == nullptr) {
     tempDir = getTempDir();
     std::string refPath = tempDir + "aec_ref.raw";
     std::string micPath = tempDir + "aec_mic.raw";
     refFile = fopen(refPath.c_str(), "wb");
     micFile = fopen(micPath.c_str(), "wb");
     if (refFile && micFile) {
-      aecLog("[AEC DEBUG] Dumping to: %s\n", tempDir.c_str());
-      aecLog("[AEC DEBUG] Files: aec_ref.raw, aec_mic.raw\n");
+      aecLog("[AEC DEBUG] Playback detected — dumping ref/mic to: %s\n",
+             tempDir.c_str());
     } else {
       aecLog("[AEC DEBUG] Failed to open files in %s\n", tempDir.c_str());
     }
@@ -375,6 +403,7 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       fclose(micFile);
       refFile = nullptr;
       micFile = nullptr;
+      dumpDone = true;
       aecLog("[AEC DEBUG] Finished dumping %d frames to files\n", dumpFrames);
     }
   }

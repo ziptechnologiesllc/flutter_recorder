@@ -3,6 +3,7 @@
 #include "../../src/flutter_recorder.cpp"
 
 #include "../../src/analyzer.cpp"
+#include "../../src/audio_engine/ableton_link_clock.cpp"
 #include "../../src/audio_engine/audio_engine.cpp"
 #include "../../src/audio_engine/inference.cpp"
 #include "../../src/audio_engine/local_clock.cpp"

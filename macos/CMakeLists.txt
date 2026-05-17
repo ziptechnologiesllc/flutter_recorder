@@ -57,6 +57,9 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE
   MA_NO_RUNTIME_LINKING=1
   NDEBUG=1
   _REENTRANT=1
+  # TEMP DIAGNOSTIC: enables aecLog() so the [AEC] ref/mic/corr/coef telemetry
+  # line streams to stderr. Remove once AEC cancellation is verified working.
+  AEC_DEBUG_LOGGING=1
 )
 
 target_include_directories(${PLUGIN_NAME} PRIVATE
