@@ -268,3 +268,92 @@ int DelayEstimator::estimateDelayTargeted(const std::vector<float> &ref_signal,
 
   return bestLag;
 }
+
+int DelayEstimator::estimateDelayTargeted(const std::vector<float> &ref_signal,
+                                          const std::vector<float> &mic_signal,
+                                          int centerLag, int searchWindow,
+                                          double *outFractionalLag,
+                                          double *outPeakCorr) {
+  if (outFractionalLag)
+    *outFractionalLag = static_cast<double>(centerLag);
+  if (outPeakCorr)
+    *outPeakCorr = 0.0;
+
+  if (ref_signal.empty() || mic_signal.empty())
+    return centerLag;
+  size_t n = std::min(ref_signal.size(), mic_signal.size());
+  if (n < 256)
+    return centerLag;
+
+  int minLag = std::max(0, centerLag - searchWindow);
+  int maxLag = std::min(static_cast<int>(n) - 128, centerLag + searchWindow);
+  if (minLag >= maxLag)
+    return centerLag;
+
+  // Means + standard deviations for normalized cross-correlation.
+  double refMean = 0, micMean = 0;
+  for (size_t i = 0; i < n; ++i) {
+    refMean += ref_signal[i];
+    micMean += mic_signal[i];
+  }
+  refMean /= n;
+  micMean /= n;
+  double refStd = 0, micStd = 0;
+  for (size_t i = 0; i < n; ++i) {
+    double r = ref_signal[i] - refMean, m = mic_signal[i] - micMean;
+    refStd += r * r;
+    micStd += m * m;
+  }
+  refStd = std::sqrt(refStd / n);
+  micStd = std::sqrt(micStd / n);
+  if (refStd < 1e-10 || micStd < 1e-10)
+    return centerLag;
+
+  std::vector<float> refNorm(n), micNorm(n);
+  for (size_t i = 0; i < n; ++i) {
+    refNorm[i] = (ref_signal[i] - refMean) / refStd;
+    micNorm[i] = (mic_signal[i] - micMean) / micStd;
+  }
+
+  std::vector<double> corrs(static_cast<size_t>(maxLag - minLag + 1), 0.0);
+  double maxAbs = 0;
+  int bestLag = centerLag;
+  for (int tau = minLag; tau <= maxLag; ++tau) {
+    size_t len = n - static_cast<size_t>(tau);
+    if (len < 128) {
+      corrs[static_cast<size_t>(tau - minLag)] = 0.0;
+      continue;
+    }
+    double sum = 0;
+    for (size_t i = 0; i < len; ++i)
+      sum += refNorm[i] * micNorm[i + tau];
+    double c = sum / static_cast<double>(len);
+    corrs[static_cast<size_t>(tau - minLag)] = c;
+    if (std::abs(c) > maxAbs) {
+      maxAbs = std::abs(c);
+      bestLag = tau;
+    }
+  }
+
+  // Parabolic interpolation around the |peak| for sub-sample precision.
+  double frac = 0.0;
+  int bi = bestLag - minLag;
+  if (bi > 0 && bi < static_cast<int>(corrs.size()) - 1) {
+    double cm = std::fabs(corrs[static_cast<size_t>(bi - 1)]);
+    double c0 = std::fabs(corrs[static_cast<size_t>(bi)]);
+    double cp = std::fabs(corrs[static_cast<size_t>(bi + 1)]);
+    double denom = (cm - 2.0 * c0 + cp);
+    if (std::fabs(denom) > 1e-12)
+      frac = 0.5 * (cm - cp) / denom;
+    if (frac > 1.0)
+      frac = 1.0;
+    if (frac < -1.0)
+      frac = -1.0;
+  }
+
+  if (outFractionalLag)
+    *outFractionalLag = static_cast<double>(bestLag) + frac;
+  if (outPeakCorr)
+    *outPeakCorr = maxAbs;
+  return bestLag;
+}

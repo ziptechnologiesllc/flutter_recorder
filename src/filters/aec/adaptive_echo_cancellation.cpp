@@ -5,6 +5,7 @@
 #include "../../soloud_slave_bridge.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <stdint.h>
 #include <string>
@@ -72,11 +73,21 @@ AdaptiveEchoCancellation::AdaptiveEchoCancellation(unsigned int sampleRate,
         std::make_unique<VssNlmsFilter>(VssNlmsFilter::DEFAULT_FILTER_LENGTH);
     bg->setRawAdaptation(true);
     mBgFilters.push_back(std::move(bg));
+    // Per-channel shadow state; candidate EMA buffer sized to match the
+    // background filter length exactly.
+    ShadowChannel sc;
+    sc.candWeights.assign(mBgFilters.back()->getFilterLength(), 0.0f);
+    mShadow.push_back(std::move(sc));
   }
 
   // Pre-allocate reference buffer for batch processing
   // Size: max expected frame count * channels (assume 4096 as max)
   mRefBuffer.resize(4096 * channels, 0.0f);
+
+  // Drift-compensated reference aligner (preallocates its histories here, off
+  // the audio thread).
+  mDriftAligner =
+      std::make_unique<DriftAligner>(sampleRate, channels);
 }
 
 int AdaptiveEchoCancellation::getParamCount() const { return ParamCount; }
@@ -222,6 +233,9 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
         std::make_unique<VssNlmsFilter>(VssNlmsFilter::DEFAULT_FILTER_LENGTH);
     bg->setRawAdaptation(true);
     mBgFilters.push_back(std::move(bg));
+    ShadowChannel sc;
+    sc.candWeights.assign(mBgFilters.back()->getFilterLength(), 0.0f);
+    mShadow.push_back(std::move(sc));
   }
 
   // Read reference signal from shared buffer
@@ -235,6 +249,7 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
 
   // Read reference signal
   size_t framesRead = 0;
+  bool dcraActive = false; // true when the DriftAligner is driving the read
 
   if (soloud_isSlaveMode()) {
     // SLAVE MODE: Reference was written in the SAME callback, perfectly time-aligned.
@@ -258,33 +273,36 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     // This ensures we capture ref+mic for delay estimation even before calibration is complete
     bool isCalibrating = mCalibrationCaptureEnabled || effectiveDelay == 0;
 
-    if (totalWritten >= frameCount) {
-      size_t readPos;
-      if (isCalibrating) {
-        // During calibration: read the most recent frames (just written in this callback)
-        readPos = totalWritten - frameCount;
-      } else {
-        // After calibration: apply acoustic delay compensation
-        if (totalWritten >= frameCount + effectiveDelay) {
-          readPos = totalWritten - frameCount - effectiveDelay;
-        } else {
-          // Not enough data yet for delay compensation
-          readPos = 0;
-          // Skip reading - framesRead stays 0
-          goto skip_slave_read;
-        }
+    if (isCalibrating) {
+      // During calibration: read the most recent frames (zero acoustic lag) so
+      // the calibration's own delay estimator gets a raw ref/mic pair. DCRA is
+      // bypassed here — it only drives the normal post-calibration path.
+      if (totalWritten >= frameCount) {
+        framesRead = g_aecReferenceBuffer->readFramesAtPosition(
+            mRefBuffer.data(), frameCount, totalWritten - frameCount);
       }
-
-      framesRead = g_aecReferenceBuffer->readFramesAtPosition(
-          mRefBuffer.data(), frameCount, readPos);
-
-      static int slaveReadDebugCount = 0;
-      if (++slaveReadDebugCount % 500 == 0 || (isCalibrating && slaveReadDebugCount <= 10)) {
-        aecLog("[AEC Slave] totalWritten=%zu effDelay=%zu (acoustic=%zu) readPos=%zu read=%zu calib=%d\n",
-               totalWritten, effectiveDelay, mAcousticDelaySamples, readPos, framesRead, isCalibrating ? 1 : 0);
-      }
+    } else {
+      // NORMAL AEC PATH — DRIFT-COMPENSATED reference read. Capture & playback
+      // run on independent clocks (miniaudio bridges them with a drift-free
+      // ring buffer), so a fixed integer read offset lets the echo path WALK
+      // and the filter cannot stay converged. The DriftAligner advances a
+      // fractional read pointer at the clock-drift-corrected rate so the FIR
+      // sees a stationary echo path. effectiveDelay seeds the bulk delay until
+      // the estimator locks.
+      framesRead = mDriftAligner->produceAligned(
+          g_aecReferenceBuffer, mRefBuffer.data(), frameCount, effectiveDelay);
+      dcraActive = (framesRead > 0);
     }
-    skip_slave_read:;
+
+    static int slaveReadDebugCount = 0;
+    if (++slaveReadDebugCount % 500 == 0 ||
+        (isCalibrating && slaveReadDebugCount <= 10)) {
+      aecLog("[AEC Slave] totalWritten=%zu effDelay=%zu read=%zu calib=%d | "
+             "DCRA drift=%.0fppm resid=%.1f bulk=%.0f\n",
+             totalWritten, effectiveDelay, framesRead, isCalibrating ? 1 : 0,
+             mDriftAligner->driftPpm(), mDriftAligner->residual(),
+             mDriftAligner->bulkDelayFrames());
+    }
   } else if (mUsePositionSync && mCalibratedOffset != 0) {
     // NON-SLAVE MODE: Position-based sync using frame counters
     // This handles separate devices with potential clock drift
@@ -367,9 +385,13 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     return;
   }
 
+#ifdef AEC_DUMP_FILES
   // DEBUG: Dump ref and mic to files for alignment verification.
   // Arm the dump only once the reference actually carries playback signal —
   // dumping from boot just captures pre-playback silence and tells us nothing.
+  // NOTE: compiled out by default — fopen/fwrite on the RT audio thread (and,
+  // on iOS where "/tmp/" isn't writable, per-block retry storms) crack audio.
+  // Use the syslog [AEC DCRA]/[AEC Slave] telemetry for live diagnosis instead.
   static FILE *refFile = nullptr;
   static FILE *micFile = nullptr;
   static int dumpFrames = 0;
@@ -426,6 +448,7 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       aecLog("[AEC DEBUG] Finished dumping %d frames to files\n", dumpFrames);
     }
   }
+#endif // AEC_DUMP_FILES
 
   // Calibration capture: save frame-aligned ref+mic for delay estimation
   // These are perfectly aligned since they come from the same callback
@@ -464,6 +487,12 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       float micSample = normalizeSample(input[idx]);
       float refSample = mRefBuffer[idx];
 
+      // Feed the drift estimator the JUST-PRODUCED aligned reference (ch0) and
+      // mic (ch0). It periodically cross-correlates these to measure residual
+      // misalignment and update the fractional read pointer / drift rate.
+      if (dcraActive && ch == 0)
+        mDriftAligner->appendHistory(refSample, micSample);
+
       // Accumulate for debug output
       totalRefEnergy += refSample * refSample;
       totalMicEnergy += micSample * micSample;
@@ -478,11 +507,30 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
         // using the last promoted weights — never corrupted by live adaptation.
         error = mVssFilters[ch]->processSample(refSample, micSample);
         if (adaptiveMode) {
-          // Background adapts recklessly (raw mode). Accumulate both filters'
-          // residual error energy so the block promotion can compare them.
+          // Background adapts recklessly (raw mode). bg->processSample shifts
+          // the bg's reference history with refSample — identical to the fg's
+          // history (both fed the same refSample this sample).
           float eBg = mBgFilters[ch]->processSample(refSample, micSample);
-          mBlockFgErr += (double)error * (double)error;
-          mBlockBgErr += (double)eBg * (double)eBg;
+          ShadowChannel &sc = mShadow[ch];
+          sc.blockFgErr += (double)error * (double)error;
+          sc.blockBgErr += (double)eBg * (double)eBg; // diagnostics only
+
+          // Score the EMA candidate OUT-OF-SAMPLE against that same (just
+          // shifted) history, so blockCandErr is the true residual of the EXACT
+          // weights we will promote — not the live bg's in-sample error. An
+          // unprimed channel has an all-zero EMA; skip it (its gate also
+          // requires primed, so this can't cause a false win).
+          if (sc.primed) {
+            bool blown = false;
+            float eCand = mBgFilters[ch]->scoreAgainstHistory(
+                sc.candWeights.data(), micSample, &blown);
+            sc.blockCandErr += (double)eCand * (double)eCand;
+            if (blown)
+              sc.blockCandBlown = 1;
+          }
+          // Reference energy floor: silent blocks make all errors tiny and let
+          // noise flip the promotion margin.
+          sc.blockRefEnergy += (double)refSample * (double)refSample;
         }
       }
 
@@ -495,42 +543,105 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     }
   }
 
-  // ---- Shadow-filter promotion -------------------------------------------
-  // Once per block, if the background models the echo measurably better than
-  // the frozen foreground, copy its weights in. A background corrupted by
-  // double-talk (the musician playing) is simply worse and never promoted, so
-  // the foreground holds its last good solution. This is the structural fix
-  // for the freeze-vs-adapt trade-off — there is no threshold to mis-tune.
+  // ---- Shadow-filter promotion (settled-snapshot / Polyak-Ruppert) -------
+  // We promote a per-channel EMA of the background weights (the candidate,
+  // mShadow[ch].candWeights), NOT the background's instantaneous noisy weights —
+  // averaging cancels the LMS misadjustment that evaporates the moment the
+  // filter is frozen (the ~15x in-sample/frozen gap). Strict ordering each
+  // block: (1) sanity, (2) gate on the candidate's OWN held-out error scored
+  // this block, (3) promote on a sustained win streak, (4) ONLY THEN reblend
+  // the EMA from this block's bg so the scored vector == the promoted vector
+  // (no off-by-one), and only from a SETTLED bg (mean annealed step near the
+  // floor), which keeps high-misadjustment iterates out of the average and is
+  // also the double-talk guard (near-end raises the residual -> raises the
+  // ratio -> halts ingest).
   if (adaptiveMode) {
     const size_t kShadowPromoteBlock = 2048;   // ~43 ms @ 48 kHz
-    const double kShadowPromoteMargin = 0.95;  // background must win by >=5%
+    const double kShadowPromoteMargin = 0.95;  // candidate must beat fg by >=5%
+    const float kShadowMaxCoeff = 50.0f;       // divergence sanity ceiling
+    const float kCandEmaBeta = 0.90f;          // tail average ~430ms (N_eff~10)
+    const float kBgConvergedRatio = 0.10f;     // ingest only when bg has settled
+    const int kCandMinBeatBlocks = 3;          // win-streak hysteresis (~129ms)
+    const double kMinBlockRefEnergy =
+        1e-4 * static_cast<double>(kShadowPromoteBlock); // silent-block floor
     mBlockSamples += frameCount;
     if (mBlockSamples >= kShadowPromoteBlock) {
-      // Never promote a diverged background into the foreground — defence in
-      // depth alongside the in-filter divergence guard. A healthy converged
-      // filter sits around coeff energy ~1-5; >50 means it has blown up.
-      const float kShadowMaxCoeff = 50.0f;
-      bool bgSane = true;
-      for (unsigned int ch = 0; ch < channels && ch < mBgFilters.size();
-           ++ch) {
-        if (mBgFilters[ch]->getCoeffEnergy() > kShadowMaxCoeff) {
-          bgSane = false;
-          break;
+      const unsigned int nch =
+          (channels < mShadow.size())
+              ? channels
+              : static_cast<unsigned int>(mShadow.size());
+      static int shadowLogCount = 0;
+      const bool logNow = (++shadowLogCount % 23 == 0);
+
+      // Each channel is acoustically independent: gate, promote, and reblend it
+      // on its OWN error and convergence so a slow channel never starves a
+      // converged one.
+      for (unsigned int ch = 0; ch < nch; ++ch) {
+        ShadowChannel &sc = mShadow[ch];
+
+        // (1) Candidate sanity: coeffEnergy of the EMA we'd install.
+        float candEnergy = 0.0f;
+        for (float w : sc.candWeights)
+          candEnergy += w * w;
+        bool candSane = candEnergy <= kShadowMaxCoeff;
+
+        // (2) Gate on the candidate scored THIS block (held-out == promoted).
+        bool win = sc.primed && candSane && !sc.blockCandBlown &&
+                   (sc.blockRefEnergy > kMinBlockRefEnergy) &&
+                   (sc.blockCandErr < sc.blockFgErr * kShadowPromoteMargin);
+        if (win)
+          sc.winStreak++;
+        else
+          sc.winStreak = 0;
+
+        // (3) Promote only after a sustained streak (rejects fluke blocks).
+        bool promoted = false;
+        if (win && sc.winStreak >= kCandMinBeatBlocks &&
+            ch < mVssFilters.size()) {
+          mVssFilters[ch]->setWeightsQuiet(sc.candWeights.data(),
+                                           sc.candWeights.size());
+          promoted = true;
         }
-      }
-      if (bgSane && mBlockBgErr < mBlockFgErr * kShadowPromoteMargin) {
-        for (unsigned int ch = 0;
-             ch < channels && ch < mBgFilters.size() &&
-             ch < mVssFilters.size();
-             ++ch) {
-          std::vector<float> w = mBgFilters[ch]->getWeights();
-          mVssFilters[ch]->setWeights(w.data(), w.size());
+
+        // (4) Reblend the EMA from THIS block's bg — AFTER the decision, and
+        //     only if the bg has SETTLED (mean annealed step near the floor)
+        //     and is sane. consumeBlockMuRatio() is drained once per channel
+        //     every block regardless (it resets the bg accumulator).
+        float muRatio = 1.0f;
+        if (ch < mBgFilters.size()) {
+          muRatio = mBgFilters[ch]->consumeBlockMuRatio();
+          float bgEnergy = mBgFilters[ch]->getCoeffEnergy();
+          if (bgEnergy <= kShadowMaxCoeff && muRatio <= kBgConvergedRatio) {
+            const float *bgW = mBgFilters[ch]->getWeightsRef().data();
+            std::vector<float> &cw = sc.candWeights;
+            if (!sc.primed) {
+              std::memcpy(cw.data(), bgW, cw.size() * sizeof(float)); // seed
+              sc.primed = 1;
+            } else {
+              for (size_t i = 0; i < cw.size(); ++i)
+                cw[i] = kCandEmaBeta * cw[i] + (1.0f - kCandEmaBeta) * bgW[i];
+            }
+          }
         }
-        aecLog("[AEC Shadow] promoted bg->fg  bgErr=%.6f fgErr=%.6f\n",
-               mBlockBgErr, mBlockFgErr);
+
+        // Rate-limited per-channel telemetry (~once/sec) for the #27 quiet-room
+        // verification: watch cand converge toward bg, fg drop to meet it, and
+        // muR enter the convergence band.
+        if (promoted || logNow) {
+          aecLog("[AEC Shadow] ch%u fg=%.5f cand=%.5f bg=%.5f primed=%d "
+                 "streak=%d muR=%.3f%s\n",
+                 ch, sc.blockFgErr, sc.blockCandErr, sc.blockBgErr,
+                 (int)sc.primed, sc.winStreak, muRatio,
+                 promoted ? " [PROMOTED]" : "");
+        }
+
+        // (5) Reset this channel's block accumulators.
+        sc.blockFgErr = 0.0;
+        sc.blockBgErr = 0.0;
+        sc.blockCandErr = 0.0;
+        sc.blockRefEnergy = 0.0;
+        sc.blockCandBlown = 0;
       }
-      mBlockFgErr = 0.0;
-      mBlockBgErr = 0.0;
       mBlockSamples = 0;
     }
   }
@@ -607,8 +718,18 @@ void AdaptiveEchoCancellation::reset() {
   for (auto &filter : mBgFilters) {
     filter->reset();
   }
-  mBlockFgErr = 0.0;
-  mBlockBgErr = 0.0;
+  for (auto &sc : mShadow) {
+    std::fill(sc.candWeights.begin(), sc.candWeights.end(), 0.0f);
+    sc.primed = 0;
+    sc.winStreak = 0;
+    sc.blockFgErr = 0.0;
+    sc.blockBgErr = 0.0;
+    sc.blockCandErr = 0.0;
+    sc.blockRefEnergy = 0.0;
+    sc.blockCandBlown = 0;
+  }
+  if (mDriftAligner)
+    mDriftAligner->reset();
   mBlockSamples = 0;
 }
 
@@ -649,6 +770,22 @@ void AdaptiveEchoCancellation::setImpulseResponse(const float *coeffs,
   float energy = 0.0f;
   for (int i = 0; i < length; ++i) {
     energy += coeffs[i] * coeffs[i];
+  }
+
+  // Warm-start the background explorers with the calibrated IR too, so they
+  // begin near-converged (their annealed step drops to the floor quickly and
+  // the candidate can re-seed from a settled bg almost immediately) instead of
+  // re-learning the echo path from zero.
+  for (auto &filter : mBgFilters) {
+    filter->setWeights(coeffs, length);
+  }
+  // A freshly-loaded calibration is the new foreground truth; any in-flight EMA
+  // candidate must re-prove itself (beat this new fg) before it can overwrite
+  // the calibration. Invalidate it so it re-seeds from the warm-started bg.
+  for (auto &sc : mShadow) {
+    std::fill(sc.candWeights.begin(), sc.candWeights.end(), 0.0f);
+    sc.primed = 0;
+    sc.winStreak = 0;
   }
 
   bool shouldFreeze = (mAecMode == aecModeFrozen || mAecMode == aecModeFrozenNeural);
@@ -837,9 +974,25 @@ void AdaptiveEchoCancellation::setFilterLength(int length) {
   for (auto &filter : mVssFilters) {
     filter->resize(static_cast<size_t>(length));
   }
+  // Resize the shadow-filter background filters too — previously skipped, which
+  // left promotion copying mismatched-length weights (silently truncated by
+  // setWeights' std::min). Must stay in lockstep with the foreground.
+  for (auto &filter : mBgFilters) {
+    filter->resize(static_cast<size_t>(length));
+  }
   // Also resize regular NLMS filters for consistency
   for (auto &filter : mFilters) {
     filter->resize(static_cast<size_t>(length));
+  }
+  // Re-size + invalidate the candidate EMA buffers to the new (SIMD-rounded)
+  // length, or the per-block blend / coeff scan would index a stale length.
+  for (unsigned int ch = 0; ch < mShadow.size(); ++ch) {
+    size_t fl = (ch < mBgFilters.size())
+                    ? mBgFilters[ch]->getFilterLength()
+                    : static_cast<size_t>(length);
+    mShadow[ch].candWeights.assign(fl, 0.0f);
+    mShadow[ch].primed = 0;
+    mShadow[ch].winStreak = 0;
   }
 
   aecLog("[AEC] Set filter length=%d for %zu filters\n", length,

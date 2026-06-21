@@ -114,6 +114,46 @@ public:
   std::vector<float> getWeights() const;
 
   /**
+   * Zero-alloc read access to the live weights (for the shadow-filter EMA blend
+   * and promotion copy on the audio thread — getWeights() allocates a vector).
+   */
+  const std::vector<float> &getWeightsRef() const { return weights; }
+
+  /**
+   * Like setWeights() but with NO getCoeffEnergy() scan and NO logging — for the
+   * per-block EMA promotion path that runs ~23x/sec on the audio thread, where
+   * the chatty setWeights() (printf + full 4096-tap energy loop) is an RT hazard.
+   */
+  void setWeightsQuiet(const float *coeffs, size_t count);
+
+  /**
+   * Score an EXTERNAL weight vector out-of-sample against THIS filter's current
+   * reference history (no history shift, no adaptation, no stats). Returns the
+   * residual mic - (w · x_history). Used by the shadow filter to measure the
+   * candidate (an EMA of the background weights) on audio it did not adapt to,
+   * so the error we gate promotion on is the error of the exact vector we
+   * promote. *outBlown is set true if the prediction is non-finite or |y|>8
+   * (the candidate bypasses processSample's in-filter divergence guard, so this
+   * restores that guarantee for the promoted vector).
+   * @param w   External weights, must be at least filter_length long.
+   * @param mic_input Microphone sample (d).
+   * @param outBlown Optional out-param flagged on divergence; may be nullptr.
+   */
+  float scoreAgainstHistory(const float *w, float mic_input,
+                            bool *outBlown) const;
+
+  /**
+   * Return the MEAN annealed step ratio (mu_eff / mu_max) accumulated since the
+   * last call, and reset the accumulator. A value near the anneal floor means
+   * the filter has SETTLED (var_e is a small fraction of mic energy). The
+   * shadow filter folds the background into its EMA only once this is low, so
+   * the high-misadjustment early iterates stay out of the average. Summarising
+   * over the whole block (not point-sampling mLastStep once per 2048 samples)
+   * avoids aliasing on the per-sample step.
+   */
+  float consumeBlockMuRatio();
+
+  /**
    * Train the filter on a known reference/mic pair (Offline Learning).
    * Used for "Warm Start" calibration using a chirp signal.
    *
@@ -173,6 +213,11 @@ private:
   float mLastStep = 0.0f;
   float mLastCorrelation = 0.0f;
   float mLastYEst = 0.0f; // Last echo estimate for diagnostics
+
+  // Per-block accumulation of the annealed step ratio (mu_eff/mu_max), drained
+  // by consumeBlockMuRatio(). Only accumulated while adapting (!mFrozen).
+  float mBlockMuSum = 0.0f;
+  int mBlockMuCount = 0;
 
   // Freeze flag - when true, no weight updates occur (pure FIR mode)
   bool mFrozen = false;

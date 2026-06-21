@@ -15,6 +15,10 @@
 #define AEC_LOG_TAG "AECCalibration"
 #endif
 
+#ifdef __APPLE__
+#include <syslog.h>
+#endif
+
 // Log file for calibration debug output (visible to Flutter test)
 static std::ofstream sLogFile;
 static bool sLogFileOpened = false;
@@ -46,6 +50,13 @@ void aecLog(const char *fmt, ...) {
 
 #ifdef __ANDROID__
   __android_log_print(ANDROID_LOG_INFO, AEC_LOG_TAG, "%s", buffer);
+#elif defined(__APPLE__)
+  // iOS does NOT bridge fprintf(stderr) to the device console, and macOS
+  // `flutter run` reads stderr — so emit to BOTH: syslog reaches
+  // idevicesyslog/Console on a physical iPhone (debug-only telemetry).
+  fprintf(stderr, "%s", buffer);
+  fflush(stderr);
+  syslog(LOG_NOTICE, "%s", buffer);
 #else
   fprintf(stderr, "%s", buffer);
   fflush(stderr);

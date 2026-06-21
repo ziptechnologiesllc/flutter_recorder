@@ -415,6 +415,68 @@ public:
   }
 
   /**
+   * Read frames at a FRACTIONAL absolute output position with 2-tap linear
+   * interpolation. Used by the drift-compensating reference aligner (DCRA):
+   * capture and playback run on independent clocks (miniaudio bridges them with
+   * a drift-free ring buffer), so the reference must be read at a continuously
+   * advancing fractional position — frames-per-mic-frame = (1 + ppm/1e6) — to
+   * stay sample-locked to the (separately-clocked) mic stream. Without this the
+   * echo path appears to walk and a fixed-tap filter cannot converge.
+   *
+   * Lock-free, zero-alloc (same acquire-load pattern as readFramesAtPosition).
+   * Reads frames floor(startAbsFrame) .. floor(startAbsFrame+frameCount)+1 (the
+   * +1 neighbour interpolates the last output frame).
+   *
+   * @param dest Destination buffer for INTERLEAVED samples (frameCount*channels)
+   * @param frameCount Number of frames to produce
+   * @param startAbsFrame Fractional absolute output frame to start at
+   * @return frameCount if the whole span was in-buffer, else 0 (dest zeroed)
+   */
+  size_t readFramesFractional(float *dest, size_t frameCount,
+                              double startAbsFrame) const {
+    if (dest == nullptr || frameCount == 0)
+      return 0;
+
+    size_t totalWritten = mFramesWritten.load(std::memory_order_acquire);
+    size_t bufSizeFrames = mSizeInFrames;
+    size_t samplesOut = frameCount * mChannels;
+
+    int64_t firstIdx = static_cast<int64_t>(std::floor(startAbsFrame));
+    int64_t lastIdx =
+        static_cast<int64_t>(std::floor(startAbsFrame +
+                                        static_cast<double>(frameCount))) +
+        1; // +1 neighbour for interpolation
+
+    // Future check: the last neighbour we touch must already be written.
+    if (firstIdx < 0 || lastIdx > static_cast<int64_t>(totalWritten)) {
+      std::memset(dest, 0, samplesOut * sizeof(float));
+      return 0;
+    }
+    // Overwritten check (circular overflow).
+    if (totalWritten > bufSizeFrames &&
+        firstIdx < static_cast<int64_t>(totalWritten - bufSizeFrames)) {
+      std::memset(dest, 0, samplesOut * sizeof(float));
+      return 0;
+    }
+
+    size_t bufSize = mBuffer.size();
+    for (size_t i = 0; i < frameCount; ++i) {
+      double p = startAbsFrame + static_cast<double>(i);
+      int64_t idx = static_cast<int64_t>(std::floor(p));
+      float frac = static_cast<float>(p - static_cast<double>(idx));
+      size_t base0 = (static_cast<size_t>(idx) % bufSizeFrames) * mChannels;
+      size_t base1 =
+          (static_cast<size_t>(idx + 1) % bufSizeFrames) * mChannels;
+      for (unsigned int ch = 0; ch < mChannels; ++ch) {
+        float a = mBuffer[(base0 + ch) % bufSize];
+        float b = mBuffer[(base1 + ch) % bufSize];
+        dest[i * mChannels + ch] = a + (b - a) * frac;
+      }
+    }
+    return frameCount;
+  }
+
+  /**
    * Get the total number of frames written since start.
    * Used for synchronization - capture side can use this to establish
    * the relationship between output and capture frame counters.

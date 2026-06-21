@@ -4,11 +4,13 @@
 #include "../../enums.h"
 #include "../generic_filter.h"
 #include "delay_estimator.h"
+#include "drift_aligner.h"
 #include "neural_post_filter.h"
 #include "nlms_filter.h"
 #include "reference_buffer.h"
 #include "vss_nlms_filter.h"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <vector>
@@ -186,9 +188,41 @@ private:
   // Promoted into the foreground only when they measurably beat it — so a
   // background corrupted by double-talk is simply never promoted.
   std::vector<std::unique_ptr<VssNlmsFilter>> mBgFilters;
-  double mBlockFgErr = 0.0;  // foreground error energy accumulated this block
-  double mBlockBgErr = 0.0;  // background error energy accumulated this block
-  size_t mBlockSamples = 0;  // samples accumulated toward the next promotion
+  // Shadow-filter Phase A refinement (settled snapshot / Polyak-Ruppert tail
+  // averaging). We no longer promote the background's instantaneous (gradient-
+  // noisy) weights. Instead we keep a per-channel EMA of the background weights
+  // (candWeights) — the candidate — and PROMOTE it only when its OWN held-out
+  // error (blockCandErr, scored against the bg history via scoreAgainstHistory)
+  // beats the frozen foreground for several consecutive blocks. The EMA only
+  // ingests the background once that channel has SETTLED (mean annealed step
+  // ratio near the floor), which keeps high-misadjustment early iterates out of
+  // the average and doubles as double-talk protection (near-end raises the
+  // residual, raising the ratio, halting ingest).
+  //
+  // State is PER CHANNEL: capture channels are acoustically independent and
+  // promote independently, so a slow-to-settle channel never starves a
+  // converged one (the previous global gate did). One struct per channel keeps
+  // the EMA buffer and its block accumulators together — no parallel vectors to
+  // desync.
+  struct ShadowChannel {
+    std::vector<float> candWeights; // EMA of bg weights — scored & promoted
+    uint8_t primed = 0;             // EMA seeded from a settled bg at least once
+    int winStreak = 0;              // consecutive blocks the candidate beat fg
+    double blockFgErr = 0.0;        // foreground error energy this block
+    double blockBgErr = 0.0;        // background error energy this block (diagnostic)
+    double blockCandErr = 0.0;      // held-out candidate error this block (the gate)
+    double blockRefEnergy = 0.0;    // reference energy this block (silent-block floor)
+    uint8_t blockCandBlown = 0;     // candidate scoring saw |y|>8 / non-finite
+  };
+  std::vector<ShadowChannel> mShadow;
+  size_t mBlockSamples = 0; // frames accumulated toward the next promotion (shared)
+
+  // Drift-compensated reference aligner (DCRA). Capture & playback are on
+  // independent clocks (miniaudio bridges them drift-free), so the reference
+  // must be read at a continuously drift-corrected fractional position or the
+  // echo path walks and the filter cannot converge. Replaces the fixed integer
+  // reference read in the slave-mode path.
+  std::unique_ptr<DriftAligner> mDriftAligner;
 
   // Delay in samples for reference signal alignment (fallback if no timestamp)
   unsigned int mDelaySamples;

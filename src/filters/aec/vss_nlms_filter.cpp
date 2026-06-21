@@ -74,6 +74,8 @@ void VssNlmsFilter::reset() {
   mEnergyXAvg = 0.0f;
   mLastE = 0.0f;
   mLastStep = 0.0f;
+  mBlockMuSum = 0.0f;
+  mBlockMuCount = 0;
 }
 
 void VssNlmsFilter::resize(size_t newLength) {
@@ -273,8 +275,33 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   // Clamp for stability
   if (mu_eff > mu_max)
     mu_eff = mu_max;
+
+  // DIVERGENCE GUARD (foreground only). If the post-cancellation error is
+  // LOUDER than the mic input (var_e > var_mic), the filter has stopped
+  // cancelling and is ADDING energy: its weights have inflated and the output
+  // grows over time — exactly the "waveform gets bigger and bigger" failure.
+  // Continuing to adapt only pumps the weights higher, so FREEZE adaptation;
+  // below (effective_leakage) we also bleed the inflated weights back down so
+  // the filter recovers to a subtractive state instead of holding a runaway
+  // solution. Foreground only — the background filter keeps its own annealing.
+  const float kDivergeRatio = 1.20f; // error must clearly exceed input
+  bool diverging = (!mRawAdapt) && (var_mic > 1e-7f) &&
+                   (var_e > var_mic * kDivergeRatio);
+  if (diverging) {
+    mu_eff = 0.0f;
+  }
+
   mLastStep = mu_eff;
   mLastCorrelation = correlation_metric;
+
+  // Accumulate the annealed step ratio for the per-block convergence summary
+  // (drained by consumeBlockMuRatio()). Only the adapting background carries
+  // meaningful step values; frozen filters are never queried and must not let
+  // the accumulator grow unbounded over a long session.
+  if (!mFrozen) {
+    mBlockMuSum += mu_eff;
+    mBlockMuCount++;
+  }
 
   // 6. Update Weights (skip if frozen - pure FIR mode)
   if (mFrozen) {
@@ -300,7 +327,17 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   // echo, that quietly destroyed convergence ("build then collapse"). Apply
   // leakage only while actually adapting (mu_eff > 0, which also implies the
   // reference carries signal).
-  float effective_leakage = (mu_eff > 0.0f && !mRawAdapt) ? leakage : 1.0f;
+  // While diverging, actively bleed the inflated weights toward zero (~0.2 s
+  // decay) even though adaptation is frozen, so an oversized solution recovers
+  // instead of being held. Otherwise: leak only while genuinely adapting.
+  float effective_leakage;
+  if (diverging) {
+    effective_leakage = 0.9999f; // ~0.2 s decay back toward a subtractive state
+  } else if (mu_eff > 0.0f && !mRawAdapt) {
+    effective_leakage = leakage;
+  } else {
+    effective_leakage = 1.0f; // frozen hold
+  }
 
   static int vssLogCount = 0;
   static float maxAbsError = 0.0f;
@@ -311,8 +348,10 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   if (std::abs(mic_input) > maxAbsMic) maxAbsMic = std::abs(mic_input);
 
   if (vssLogCount++ % 48000 == 0) {  // Log once per second at 48kHz
-    aecLog("[VSS_RT] mu_eff=%.6f corr=%.6f | maxE=%.3f maxYest=%.3f maxMic=%.3f\n",
-           mu_eff, correlation_metric, maxAbsError, maxAbsYEst, maxAbsMic);
+    aecLog("[VSS_RT] mu_eff=%.6f corr=%.6f dvg=%d veR=%.2f | maxE=%.3f maxYest=%.3f maxMic=%.3f\n",
+           mu_eff, correlation_metric, diverging ? 1 : 0,
+           (var_mic > 1e-9f ? var_e / var_mic : 0.0f), maxAbsError, maxAbsYEst,
+           maxAbsMic);
     maxAbsError = maxAbsYEst = maxAbsMic = 0.0f;  // Reset for next interval
   }
 
@@ -366,6 +405,65 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
 // ============================================
 
 std::vector<float> VssNlmsFilter::getWeights() const { return weights; }
+
+void VssNlmsFilter::setWeightsQuiet(const float *coeffs, size_t count) {
+  if (!coeffs)
+    return;
+  size_t copy_len = std::min(count, filter_length);
+  std::memcpy(weights.data(), coeffs, copy_len * sizeof(float));
+  if (copy_len < filter_length) {
+    std::fill(weights.begin() + copy_len, weights.end(), 0.0f);
+  }
+}
+
+float VssNlmsFilter::scoreAgainstHistory(const float *w, float mic_input,
+                                         bool *outBlown) const {
+  // Pure FIR dot product of an EXTERNAL weight vector against this filter's
+  // current reference history. No history shift, no adaptation, no stats —
+  // this is the held-out evaluation of a candidate snapshot.
+  const float *p_x = x_history.data();
+  float y_est = 0.0f;
+
+#ifdef USE_NEON
+  float32x4_t v_y_est = vdupq_n_f32(0.0f);
+  for (size_t i = 0; i < filter_length; i += 4) {
+    float32x4_t v_x = vld1q_f32(p_x + i);
+    float32x4_t v_w = vld1q_f32(w + i);
+    v_y_est = vmlaq_f32(v_y_est, v_w, v_x);
+  }
+  y_est = hsum_float32x4_nlms(v_y_est);
+#elif defined(USE_AVX)
+  __m256 v_y_est = _mm256_setzero_ps();
+  for (size_t i = 0; i < filter_length; i += 8) {
+    __m256 v_x = _mm256_loadu_ps(p_x + i);
+    __m256 v_w = _mm256_loadu_ps(w + i);
+    v_y_est = _mm256_add_ps(v_y_est, _mm256_mul_ps(v_w, v_x));
+  }
+  y_est = hsum_float256_nlms(v_y_est);
+#else
+  for (size_t i = 0; i < filter_length; i++) {
+    y_est += w[i] * p_x[i];
+  }
+#endif
+
+  // Restore the divergence-guard guarantee for the scored vector: scoring
+  // bypasses processSample's guard, so flag a blown candidate here. coeffEnergy
+  // bounds ||w|| but NOT |w·x|, so this output check is the real safety net.
+  if (outBlown && (!std::isfinite(y_est) || std::fabs(y_est) > 8.0f)) {
+    *outBlown = true;
+  }
+  return mic_input - y_est;
+}
+
+float VssNlmsFilter::consumeBlockMuRatio() {
+  float ratio = (mBlockMuCount > 0)
+                    ? (mBlockMuSum / static_cast<float>(mBlockMuCount)) /
+                          (mu_max + epsilon)
+                    : 1.0f; // no samples this block -> treat as "not settled"
+  mBlockMuSum = 0.0f;
+  mBlockMuCount = 0;
+  return ratio;
+}
 
 void VssNlmsFilter::warmStartWeights(const std::vector<float> &ref_signal,
                                      const std::vector<float> &mic_signal) {

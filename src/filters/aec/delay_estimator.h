@@ -56,6 +56,24 @@ public:
                                    int centerLag,
                                    int searchWindow = 480); // ±10ms at 48kHz
 
+  /**
+   * Targeted delay estimate with SUB-SAMPLE precision and a peak-quality score.
+   * Used by the drift-compensating reference aligner: fractional lag feeds the
+   * fractional read pointer; the peak correlation gates whether the estimate is
+   * trustworthy (low corr => double-talk/silence => hold last-good).
+   *
+   * @param centerLag        Expected delay (samples) to search around.
+   * @param searchWindow     ± search range (samples).
+   * @param outFractionalLag Fractional lag (parabolic-interpolated peak).
+   * @param outPeakCorr      |normalized correlation| at the peak (0..1).
+   * @return Integer best lag (parabola center).
+   */
+  static int estimateDelayTargeted(const std::vector<float> &ref_signal,
+                                   const std::vector<float> &mic_signal,
+                                   int centerLag, int searchWindow,
+                                   double *outFractionalLag,
+                                   double *outPeakCorr);
+
 private:
   // Helper for SIMD dot product
   static float dotProduct(const float *a, const float *b, size_t length);
