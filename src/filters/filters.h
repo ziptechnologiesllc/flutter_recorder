@@ -86,6 +86,7 @@ public:
   // AEC Mode Control
   void setAecMode(AecMode mode);
   AecMode getAecMode() const;
+  void notifyAecEchoPathChanged(); // LSAEC layer add/remove re-heat
 
   // Neural Model Control
   bool loadNeuralModel(NeuralModelType modelType, const std::string &assetBasePath);

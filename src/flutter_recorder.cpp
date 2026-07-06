@@ -35,6 +35,10 @@
 // External logging function defined in calibration.cpp
 extern void aecLog(const char *fmt, ...);
 
+// Defined later in this TU; the looper worker (above the definition) needs it
+// for the LSAEC layer-change re-heat.
+extern std::unique_ptr<Filters> mFilters;
+
 // Debug logging for looper worker thread - disable in production to avoid I/O blocking
 #define DEBUG_LOOPER_WORKER 1
 
@@ -223,6 +227,13 @@ static void looperWorkerThreadFunc() {
             double durationSeconds = (double)(numSamples / g_lastRecordedChannels) / (double)g_lastRecordedSampleRate;
             LOOPER_LOG("Playback started: hash=%u handle=%u duration=%.3fs",
                     soundHash, handle, durationSeconds);
+
+            // LSAEC: the speaker signal just changed (a layer started) —
+            // re-heat the echo template so the new component is learned in a
+            // few passes instead of the slow annealed floor (the long noisy
+            // transition = the "crackle on second recordings" report).
+            if (mFilters)
+              mFilters->notifyAecEchoPathChanged();
 
             // LSAEC: replayed/session-loaded loops never pass through the
             // recording-stop path that registers the base loop, leaving the

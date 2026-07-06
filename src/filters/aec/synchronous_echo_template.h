@@ -2,6 +2,7 @@
 #define AEC_SYNCHRONOUS_ECHO_TEMPLATE_H
 
 #include <cstddef>
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -64,6 +65,13 @@ public:
   /** Mean per-phase confidence over the active period (0..1), for telemetry. */
   float meanConfidence() const;
 
+  /**
+   * Notify that a loop layer was added/removed (echo path changed). Thread-safe
+   * (any thread): the audio thread applies a confidence re-heat on the next
+   * block so the new echo component is learned quickly.
+   */
+  void notifyEchoPathChanged() { mReheatPending.store(true, std::memory_order_release); }
+
   /** E3 diagnostics (monotonic counters since reset). */
   uint32_t freezeCount() const { return mFreezeCount; }
   uint32_t reopenCount() const { return mReopenCount; }
@@ -79,6 +87,8 @@ private:
   // E3 block-level double-talk freeze. A smoothed per-BLOCK residual floor; a
   // block whose residual spikes well above it is near-end -> skip learning that
   // block (per-frame thresholding thrashed — audio energy is too spiky).
+  std::atomic<bool> mReheatPending{false}; // layer added: re-heat alpha
+
   float mResidBaseline = 0.0f; // EMA of per-block residual energy
   uint32_t mLearnedBlocks = 0; // non-frozen learning blocks (arms the detector)
   uint32_t mFreezeCount = 0;   // blocks frozen (near-end) — telemetry
