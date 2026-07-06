@@ -79,6 +79,13 @@ private:
   // E3 block-level double-talk freeze. A smoothed per-BLOCK residual floor; a
   // block whose residual spikes well above it is near-end -> skip learning that
   // block (per-frame thresholding thrashed — audio energy is too spiky).
+  // Smoothed reference power envelope for the far-end learn gate. Gating on
+  // INSTANTANEOUS per-sample power leaves unlearned pinholes at every zero
+  // crossing of the reference waveform (hundreds/sec) — the mic echo (delayed
+  // ~26 ms, nonzero there) pokes through each hole every pass = broadband
+  // crackle that WORSENS as the rest of the template converges.
+  float mRefEnvelope = 0.0f;
+
   float mResidBaseline = 0.0f; // EMA of per-block residual energy
   uint32_t mLearnedBlocks = 0; // non-frozen learning blocks (arms the detector)
   uint32_t mFreezeCount = 0;   // blocks frozen (near-end) — telemetry

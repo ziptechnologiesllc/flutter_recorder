@@ -17,9 +17,11 @@ constexpr float kAlphaMax = 0.5f;  // hot: unsettled phase, learn fast
 constexpr float kAlphaMin = 0.06f;
 constexpr float kConfTau = 8.0f;   // anneal time-constant in loop passes
 
-// Per-sample reference-power gate: only LEARN where the speaker is actually
-// playing at this phase, so silent-speaker phases never absorb near-end energy.
-constexpr float kFarEndFloorPow = 1e-6f; // ~-60 dB instantaneous
+// Far-end learn gate on a SMOOTHED reference-power envelope (~1.5 ms EMA), so
+// genuinely silent-speaker passages never absorb near-end energy but waveform
+// zero-crossings do NOT punch unlearned pinholes into the template.
+constexpr float kFarEndFloorPow = 1e-6f; // ~-60 dB envelope
+constexpr float kRefEnvRate = 0.014f;    // per-sample EMA, tau ~1.5 ms @ 48 kHz
 
 constexpr float kConfMax = 4096.0f; // confidence saturates (~enough passes)
 
@@ -57,6 +59,7 @@ void SynchronousEchoTemplate::reset() {
   std::fill(mTemplate.begin(), mTemplate.end(), 0.0f);
   std::fill(mConfidence.begin(), mConfidence.end(), 0.0f);
   mActiveLoopFrames = 0;
+  mRefEnvelope = 0.0f;
   mResidBaseline = 0.0f;
   mLearnedBlocks = 0;
   mFreezeCount = 0;
@@ -149,8 +152,9 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
         const float r = alignedRef[f * channels + ch];
         rp += r * r;
       }
-      if (rp <= kFarEndFloorPow)
-        continue; // silent-speaker phase: nothing to learn
+      mRefEnvelope += kRefEnvRate * (rp - mRefEnvelope);
+      if (mRefEnvelope <= kFarEndFloorPow)
+        continue; // speaker genuinely silent: nothing to learn
     }
 
     const float c = mConfidence[pphi];
