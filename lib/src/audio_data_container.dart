@@ -79,6 +79,8 @@ class AudioDataContainer {
           result[i] = (f32Buffer[i] * 127.0 + 128.0).clamp(0, 255).toInt();
         }
         return result;
+      case PCMFormat.unknown:
+        throw ArgumentError('Cannot convert from unknown format');
     }
   }
 
@@ -121,6 +123,8 @@ class AudioDataContainer {
           result[i] = (f32Buffer[i] * 127.0).clamp(-128, 127).toInt();
         }
         return result;
+      case PCMFormat.unknown:
+        throw ArgumentError('Cannot convert from unknown format');
     }
   }
 
@@ -163,6 +167,8 @@ class AudioDataContainer {
           result[i] = (f32Buffer[i] * 32767.0).clamp(-32768, 32767).toInt();
         }
         return result;
+      case PCMFormat.unknown:
+        throw ArgumentError('Cannot convert from unknown format');
     }
   }
 
@@ -211,6 +217,8 @@ class AudioDataContainer {
               (f32Buffer[i] * 8388607.0).clamp(-8388608, 8388607).toInt();
         }
         return result;
+      case PCMFormat.unknown:
+        throw ArgumentError('Cannot convert from unknown format');
     }
   }
 
@@ -270,6 +278,8 @@ class AudioDataContainer {
           result[i * 3 + 2] = (sample >> 16) & 0xFF;
         }
         return result;
+      case PCMFormat.unknown:
+        throw ArgumentError('Cannot convert from unknown format');
     }
   }
 
@@ -312,6 +322,8 @@ class AudioDataContainer {
               .toInt();
         }
         return result;
+      case PCMFormat.unknown:
+        throw ArgumentError('Cannot convert from unknown format');
     }
   }
 
@@ -352,6 +364,8 @@ class AudioDataContainer {
         return result;
       case PCMFormat.f32le:
         return Float32List.view(u8Data.buffer);
+      case PCMFormat.unknown:
+        throw ArgumentError('Cannot convert from unknown format');
     }
   }
 }

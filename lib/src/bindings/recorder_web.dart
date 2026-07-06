@@ -1,8 +1,9 @@
 // ignore_for_file: omit_local_variable_types
 // ignore_for_file: avoid_positional_boolean_parameters, public_member_api_docs
 
-import 'dart:typed_data' show Float32List, Uint8List;
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_recorder/src/audio_data_container.dart';
 import 'package:flutter_recorder/src/bindings/js_extension.dart';
 import 'package:flutter_recorder/src/bindings/recorder.dart';
@@ -28,6 +29,30 @@ class RecorderController {
 /// Use this class to _capture_ audio (such as from a microphone).
 @internal
 class RecorderWeb extends RecorderImpl {
+  @override
+  Stream<AecStats> get aecStatsStream => Stream.empty();
+
+  @override
+  Future<void> setAecStatsCallback() async {}
+
+  @override
+  Stream<RecordingStoppedEvent> get recordingStoppedStream => Stream.empty();
+
+  @override
+  Future<void> setRecordingStoppedCallback() async {}
+
+  @override
+  Stream<RecordingStartedEvent> get recordingStartedStream => Stream.empty();
+
+  @override
+  Future<void> setRecordingStartedCallback() async {}
+
+  @override
+  Stream<LooperPlaybackStartedEvent> get looperPlaybackStartedStream => Stream.empty();
+
+  @override
+  Future<void> setLooperPlaybackStartedCallback() async {}
+
   SilenceCallback? _silenceCallback;
 
   /// Create the worker in the WASM Module and listen for events coming
@@ -149,8 +174,11 @@ class RecorderWeb extends RecorderImpl {
     required PCMFormat format,
     required int sampleRate,
     required RecorderChannels channels,
-    required AndroidInputPreset? androidInputPreset,
+    AndroidInputPreset? androidInputPreset,
+    bool captureOnly = false,
   }) {
+    // Note: captureOnly is ignored on web - no native duplex mode.
+    // androidInputPreset is accepted but ignored by wasmInit (upstream parity).
     final error = wasmInit(deviceID, format.value, sampleRate, channels.count);
     if (CaptureErrors.fromValue(error) != CaptureErrors.captureNoError) {
       throw RecorderCppException.fromRecorderError(
@@ -163,6 +191,7 @@ class RecorderWeb extends RecorderImpl {
       sampleRate: sampleRate,
       channels: channels,
       androidInputPreset: androidInputPreset,
+      captureOnly: captureOnly,
     );
   }
 
@@ -236,6 +265,50 @@ class RecorderWeb extends RecorderImpl {
   void setFftSmoothing(double smooth) {
     wasmSetFftSmoothing(smooth);
   }
+
+  @override
+  int getSampleRate() {
+    throw UnimplementedError();
+  }
+
+  @override
+  int getCaptureChannels() {
+    throw UnimplementedError();
+  }
+
+  @override
+  int getPlaybackChannels() {
+    throw UnimplementedError();
+  }
+
+  @override
+  int getCaptureFormat() {
+    throw UnimplementedError();
+  }
+
+  @override
+  int getPlaybackFormat() {
+    throw UnimplementedError();
+  }
+
+  @override
+  void setMonitoring(bool enabled) {
+    // Not implemented on Web for now
+  }
+
+  @override
+  void setMonitoringMode(int mode) {
+    // Not implemented on Web for now
+  }
+
+  @override
+  int getFilterMissCount() => 0;
+
+  @override
+  int getFilterProcessCount() => 0;
+
+  @override
+  void resetFilterStats() {}
 
   @override
   Float32List getFft({bool alwaysReturnData = true}) {
@@ -387,5 +460,496 @@ class RecorderWeb extends RecorderImpl {
   double getFilterParamValue(RecorderFilterType filterType, int attributeId) {
     final value = wasmGetFilterParamValue(filterType.value, attributeId);
     return value;
+  }
+
+  // ///////////////////////
+  //   SLAVE MODE
+  // ///////////////////////
+
+  @override
+  bool isSlaveAudioReady() {
+    // On web, we don't use slave mode - always return true
+    return true;
+  }
+
+  bool wasDuplexDenied() {
+    return false;
+  }
+
+  // ── Phase 2e: Ableton Link ────────────────────────────────────────────────
+  // Web stubs — Ableton Link is a native-only feature (no browser API).
+  @override
+  void linkSetEnabled(bool enabled) {
+    // No-op on web.
+  }
+
+  @override
+  bool linkIsEnabled() => false;
+
+  @override
+  int linkNumPeers() => 0;
+
+  // ── Audio-callback profiling ──────────────────────────────────────────────
+  // Web has no native data_callback to profile.
+  @override
+  CallbackStats getCallbackStats() => CallbackStats.zero;
+
+  @override
+  void resetCallbackStats() {}
+
+  // ///////////////////////
+  //   AEC (Adaptive Echo Cancellation)
+  // ///////////////////////
+
+  @override
+  int aecCreateReferenceBuffer(int sampleRate, int channels) {
+    // AEC is not supported on web platform
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecDestroyReferenceBuffer() {
+    // AEC is not supported on web platform
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  int aecGetOutputCallback() {
+    // AEC is not supported on web platform
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecResetBuffer() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecSetEnabled(bool enabled) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  bool aecIsEnabled() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecSetMode(AecMode mode) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  AecMode aecGetMode() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  bool aecLoadNeuralModel(NeuralModelType type, String assetBasePath) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  NeuralModelType aecGetLoadedNeuralModel() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecSetNeuralEnabled(bool enabled) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  bool aecIsNeuralEnabled() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  // ==================== AEC CALIBRATION ====================
+
+  @override
+  Uint8List aecGenerateCalibrationSignal(
+    int sampleRate,
+    int channels, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  }) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  void aecStartCalibrationCapture(int maxSamples) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  void aecStopCalibrationCapture() {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  void aecCaptureForAnalysis() {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  AecCalibrationResult aecRunCalibrationAnalysis(int sampleRate) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  void aecResetCalibration() {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  AecCalibrationResultWithImpulse aecRunCalibrationWithImpulse(int sampleRate) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  Float32List aecGetImpulseResponse(int maxLength) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  void aecApplyImpulseResponse() {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  Float32List aecGetCalibrationRefSignal(int maxLength) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  Float32List aecGetCalibrationMicSignal(int maxLength) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
+  void iosForceSpeakerOutput(bool enabled) {}
+
+  // ==================== AEC TESTING ====================
+
+  @override
+  void aecStartTestCapture(int maxSamples) {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  @override
+  void aecStopTestCapture() {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  @override
+  AecTestResult aecRunTest(int sampleRate) {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  @override
+  Float32List aecGetTestMicSignal(int maxLength) {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  @override
+  Float32List aecGetTestCancelledSignal(int maxLength) {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  @override
+  void aecResetTest() {
+    throw UnsupportedError('AEC test is not supported on web platform');
+  }
+
+  // ==================== VSS-NLMS CONTROL ====================
+
+  @override
+  void aecSetVssMuMax(double mu) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecSetVssLeakage(double lambda) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  void aecSetVssAlpha(double alpha) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  double aecGetVssMuMax() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  double aecGetVssLeakage() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  double aecGetVssAlpha() {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  @override
+  String aecGetCalibrationLog() => '';
+
+  @override
+  void aecClearCalibrationLog() {}
+
+  @override
+  int aecGetOutputFrameCount() => 0;
+
+  @override
+  int aecGetCaptureFrameCount() => 0;
+
+  @override
+  void aecRecordCalibrationFrameCounters() {}
+
+  @override
+  void aecSetCalibratedOffset(int offset) {}
+
+  @override
+  int aecGetCalibratedOffset() => 0;
+
+  @override
+  void aecSetFilterLength(int length) {}
+
+  @override
+  int aecGetFilterLength() => 0;
+
+  @override
+  void aecStartAlignedCalibrationCapture(int maxSamples) {}
+
+  @override
+  void aecStopAlignedCalibrationCapture() {}
+
+  @override
+  AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(
+    int sampleRate, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  }) {
+    throw UnsupportedError('AEC is not supported on web platform');
+  }
+
+  // ==================== NATIVE AUDIO SINK ====================
+  // Not supported on web - audio goes through Dart
+
+  @override
+  void setNativeAudioSink(int callbackAddress, int userDataAddress) {
+    // No-op on web - native sink not supported
+  }
+
+  @override
+  bool isNativeAudioSinkActive() => false;
+
+  @override
+  void disableNativeAudioSink() {
+    // No-op on web
+  }
+
+  @override
+  void injectPreroll(int frameCount) {
+    // No-op on web - preroll handled differently
+  }
+
+  @override
+  void setLooperBridge(int funcAddress) {
+    // No-op on web - looper bridge not available
+  }
+
+  @override
+  void clearLooperBridge() {
+    // No-op on web
+  }
+
+  // ==================== NATIVE SCHEDULER ====================
+  // Not supported on web - scheduling uses JavaScript timers
+
+  @override
+  void schedulerReset() {
+    // No-op on web - use Dart-based scheduling
+  }
+
+  @override
+  void schedulerSetBaseLoop(int loopFrames, int loopStartFrame) {
+    // No-op on web
+  }
+
+  @override
+  void schedulerClearBaseLoop() {
+    // No-op on web
+  }
+
+  @override
+  int schedulerScheduleStart(String path) {
+    // Not supported on web - return 0 (failed)
+    return 0;
+  }
+
+  @override
+  int schedulerScheduleStop(int startFrame) {
+    // Not supported on web - return 0 (failed)
+    return 0;
+  }
+
+  @override
+  bool schedulerCancelEvent(int eventId) {
+    return false;
+  }
+
+  @override
+  void schedulerCancelAll() {
+    // No-op on web
+  }
+
+  @override
+  SchedulerNotification? schedulerPollNotification() {
+    return null;
+  }
+
+  @override
+  bool schedulerHasNotifications() {
+    return false;
+  }
+
+  @override
+  int schedulerGetGlobalFrame() {
+    return 0;
+  }
+
+  @override
+  int schedulerGetBaseLoopFrames() {
+    return 0;
+  }
+
+  @override
+  int schedulerGetNextLoopBoundary() {
+    return 0;
+  }
+
+  @override
+  void schedulerSetLatencyCompensation(int frames) {
+    // No-op on web
+  }
+
+  @override
+  int schedulerGetLatencyCompensation() {
+    return 0;
+  }
+
+  @override
+  void schedulerSetAutoStop(bool enabled) {
+    // No-op on web
+  }
+
+  @override
+  bool schedulerIsAutoStopEnabled() {
+    return true; // Default to true on web
+  }
+
+  // ==================== AUTO-RECORD ====================
+  // Stubs for web - hands-free first-loop capture not supported
+
+  @override
+  void armAutoRecord(String wavPath, int barCount, int framesPerBar,
+      int sampleRate, bool measureAmbient) {
+    // No-op on web
+  }
+
+  @override
+  void endAutoRecordMeasure() {
+    // No-op on web
+  }
+
+  @override
+  void disarmAutoRecord() {
+    // No-op on web
+  }
+
+  @override
+  int getAutoRecordState() {
+    return 0; // Always idle on web
+  }
+
+  @override
+  bool isAutoRecordMeasuringAmbient() {
+    return false;
+  }
+
+  @override
+  double getAutoRecordTempoBpm() {
+    return 0;
+  }
+
+  @override
+  double getAutoRecordNoiseFloorDb() {
+    return -180;
+  }
+
+  @override
+  double getAutoRecordTriggerLevelDb() {
+    return -180;
+  }
+
+  @override
+  void setAutoRecordOnsetThresholdDb(double db) {
+    // No-op on web
+  }
+
+  // ==================== NATIVE RING BUFFER ====================
+  // Stubs for web - native ring buffer not supported
+
+  @override
+  void createRingBuffer(int capacitySeconds, int sampleRate, int channels) {
+    // No-op on web
+  }
+
+  @override
+  void destroyRingBuffer() {
+    // No-op on web
+  }
+
+  @override
+  Float32List readPreRoll(int frameCount, int rewindFrames) {
+    // Return empty buffer on web
+    return Float32List(0);
+  }
+
+  @override
+  double getAudioLevelDb() {
+    return -100.0; // Silence
+  }
+
+  @override
+  int getRingBufferFramesWritten() {
+    return 0;
+  }
+
+  @override
+  int getRingBufferAvailable() {
+    return 0;
+  }
+
+  @override
+  void resetRingBuffer() {
+    // No-op on web
+  }
+
+  @override
+  Uint8List? getRecordedWav() {
+    // Not supported on web
+    return null;
+  }
+
+  @override
+  int getRecordedWavSize() {
+    return 0;
+  }
+
+  @override
+  void freeRecordedAudio() {
+    // No-op on web
   }
 }

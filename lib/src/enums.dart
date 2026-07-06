@@ -71,6 +71,9 @@ enum CaptureErrors {
 
 /// The channels to be used while initializing the player.
 enum RecorderChannels {
+  /// Let the system choose optimal channel count (recommended for Android low-latency).
+  auto(0),
+
   /// One channel.
   mono(1),
 
@@ -98,7 +101,10 @@ enum PCMFormat {
   s32le(3),
 
   /// 32-bit float, little-endian.
-  f32le(4);
+  f32le(4),
+
+  /// Unknown format - let the system choose optimal (AAudio best practice).
+  unknown(5);
 
   final int value;
 
@@ -110,6 +116,7 @@ enum PCMFormat {
         2 => s24le,
         3 => s32le,
         4 => f32le,
+        5 => unknown,
         _ => throw ArgumentError('Unknown value for PCMFormat: $value'),
       };
 }
@@ -138,4 +145,194 @@ enum AndroidInputPreset {
 
   /// Internal value passed to the native recorder.
   final int value;
+}
+
+/// Statistics from the Acoustic Echo Cancellation filter.
+class AecStats {
+  /// Constructs a new [AecStats].
+  const AecStats({
+    required this.maxAttenuationDb,
+    required this.correlation,
+    required this.echoReturnLossDb,
+    this.filterLength = 8192,
+    this.muMax = 0.5,
+    this.muEffective = 0.0,
+    this.lastErrorDb = -100.0,
+    this.instantCorrelation = 0.0,
+  });
+
+  /// Maximum attenuation achieved in dB.
+  final double maxAttenuationDb;
+
+  /// Correlation between reference and mic signal.
+  final double correlation;
+
+  /// Echo Return Loss in dB.
+  final double echoReturnLossDb;
+
+  /// Current filter length in samples.
+  final int filterLength;
+
+  /// Configured maximum step size.
+  final double muMax;
+
+  /// Last effective step size (runtime).
+  final double muEffective;
+
+  /// Last error in dB.
+  final double lastErrorDb;
+
+  /// Instantaneous correlation metric.
+  final double instantCorrelation;
+
+  @override
+  String toString() {
+    return 'AecStats(ERL: ${echoReturnLossDb.toStringAsFixed(2)} dB, '
+        'corr: ${correlation.toStringAsFixed(3)}, '
+        'filterLen: $filterLength, '
+        'muMax: ${muMax.toStringAsFixed(2)}, '
+        'muEff: ${muEffective.toStringAsFixed(3)})';
+  }
+}
+
+/// Event fired when native recording auto-stops at loop boundary.
+class RecordingStoppedEvent {
+  /// Constructs a new [RecordingStoppedEvent].
+  const RecordingStoppedEvent({
+    required this.recordedFrames,
+    required this.wavPath,
+  });
+
+  /// Total frames recorded.
+  final int recordedFrames;
+
+  /// Path to the WAV file.
+  final String wavPath;
+
+  @override
+  String toString() {
+    return 'RecordingStoppedEvent(frames: $recordedFrames, path: $wavPath)';
+  }
+}
+
+/// Event fired when native recording starts (native scheduler fires StartRecording).
+class RecordingStartedEvent {
+  /// Constructs a new [RecordingStartedEvent].
+  const RecordingStartedEvent({
+    required this.startFrame,
+    required this.wavPath,
+  });
+
+  /// Global frame when recording started.
+  final int startFrame;
+
+  /// Path to the WAV file being recorded.
+  final String wavPath;
+
+  @override
+  String toString() {
+    return 'RecordingStartedEvent(startFrame: $startFrame, path: $wavPath)';
+  }
+}
+
+/// Event fired when native looper playback starts (from worker thread).
+class LooperPlaybackStartedEvent {
+  /// Constructs a new [LooperPlaybackStartedEvent].
+  const LooperPlaybackStartedEvent({
+    required this.soundHash,
+    required this.handle,
+    required this.durationSeconds,
+    required this.wavPath,
+  });
+
+  /// The SoLoud sound hash for the playing loop.
+  final int soundHash;
+
+  /// The SoLoud playback handle.
+  final int handle;
+
+  /// Duration of the loop in seconds.
+  final double durationSeconds;
+
+  /// Path to the WAV file that was loaded for playback.
+  /// Contains the recording UUID for matching back to the correct recording.
+  final String wavPath;
+
+  @override
+  String toString() {
+    return 'LooperPlaybackStartedEvent(hash: $soundHash, handle: $handle, duration: ${durationSeconds}s, path: $wavPath)';
+  }
+}
+
+/// AEC Mode for A/B testing
+enum AecMode {
+  /// Raw microphone input (no AEC)
+  bypass(0),
+
+  /// Adaptive NLMS (may cause artifacts on transients)
+  algo(1),
+
+  /// Neural (DTLN-AEC) only
+  neural(2),
+
+  /// Hybrid: Adaptive NLMS + Neural Post-Filter
+  hybrid(3),
+
+  /// Frozen FIR: Pure calibrated IR, no adaptation (stable for transients)
+  frozen(4),
+
+  /// Frozen FIR + Neural Post-Filter (best for transients with neural cleanup)
+  frozenNeural(5);
+
+  final int value;
+  const AecMode(this.value);
+
+  static AecMode fromValue(int value) => switch (value) {
+        0 => bypass,
+        1 => algo,
+        2 => neural,
+        3 => hybrid,
+        4 => frozen,
+        5 => frozenNeural,
+        _ => throw ArgumentError('Unknown value for AecMode: $value'),
+      };
+}
+
+/// Neural model types for AEC
+enum NeuralModelType {
+  /// No neural model loaded
+  none(0),
+
+  /// AEC mask v2 (full precision) - aec_mask.tflite
+  aecMaskV2(1),
+
+  /// AEC mask v2 FP16 (half precision, faster) - aec_mask_fp16.tflite
+  aecMaskV2Fp16(2),
+
+  /// AEC mask v3 - BROKEN, do not use (kept for backwards compatibility)
+  @Deprecated('v3 model is broken, use aecMaskV2 or aecMaskV2Fp16')
+  aecMaskV3(3);
+
+  final int value;
+  const NeuralModelType(this.value);
+
+  static NeuralModelType fromValue(int value) => switch (value) {
+        0 => none,
+        1 => aecMaskV2,
+        2 => aecMaskV2Fp16,
+        3 => aecMaskV3,
+        _ => throw ArgumentError('Unknown value for NeuralModelType: $value'),
+      };
+}
+
+/// Calibration signal type for AEC
+enum CalibrationSignalType {
+  /// Logarithmic sine sweep (chirp) - good for frequency response
+  chirp(0),
+
+  /// Click train (impulse) - good for transient response, direct IR measurement
+  click(1);
+
+  final int value;
+  const CalibrationSignalType(this.value);
 }

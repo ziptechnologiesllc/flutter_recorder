@@ -148,7 +148,10 @@ enum RecorderFilterType {
   autogain(0),
 
   /// Echo cancellation filter.
-  echoCancellation(1);
+  echoCancellation(1),
+
+  /// Adaptive echo cancellation filter (NLMS-based AEC).
+  adaptiveEchoCancellation(2);
 
   /// The number of parameter this filter owns.
   final int value;
@@ -160,6 +163,7 @@ enum RecorderFilterType {
   static RecorderFilterType fromValue(int value) => switch (value) {
         0 => autogain,
         1 => echoCancellation,
+        2 => adaptiveEchoCancellation,
         _ => throw ArgumentError('Unknown value for FilterType: $value'),
       };
 
@@ -167,12 +171,15 @@ enum RecorderFilterType {
   String toString() => switch (this) {
         RecorderFilterType.autogain => 'Auto Gain',
         RecorderFilterType.echoCancellation => 'Echo Cancellation',
+        RecorderFilterType.adaptiveEchoCancellation =>
+          'Adaptive Echo Cancellation',
       };
 
   /// The number of parameter this filter owns.
   int get numParameters => switch (this) {
         RecorderFilterType.autogain => 6,
         RecorderFilterType.echoCancellation => 2,
+        RecorderFilterType.adaptiveEchoCancellation => 3,
       };
 
   /// Activate this filter.

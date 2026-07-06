@@ -1,6 +1,8 @@
 // ignore_for_file: omit_local_variable_types
 // ignore_for_file: avoid_positional_boolean_parameters
 
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_recorder/src/audio_data_container.dart';
 import 'package:flutter_recorder/src/bindings/recorder.dart';
@@ -10,11 +12,156 @@ import 'package:flutter_recorder/src/filters/filters.dart';
 import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
 
+export 'audio_data_container.dart';
+export 'enums.dart';
+export 'exceptions/exceptions.dart';
+export 'filters/filters.dart';
+
 /// Callback when silence state is changed.
 typedef SilenceCallback = void Function(bool isSilent, double decibel);
 
 /// Silence state.
 typedef SilenceState = ({bool isSilent, double decibel});
+
+/// Result of AEC calibration analysis.
+class AecCalibrationResult {
+  /// Optimal delay in milliseconds between speaker output and microphone input.
+  /// Float precision preserves sub-millisecond accuracy for phase alignment.
+  final double delayMs;
+
+  /// Echo gain factor (ratio of echo to original signal, 0-1).
+  final double echoGain;
+
+  /// Peak correlation coefficient (quality metric, higher = better match).
+  final double correlation;
+
+  /// Whether the calibration was successful.
+  final bool success;
+
+  const AecCalibrationResult({
+    required this.delayMs,
+    required this.echoGain,
+    required this.correlation,
+    required this.success,
+  });
+
+  @override
+  String toString() =>
+      'AecCalibrationResult(delayMs: $delayMs, echoGain: ${echoGain.toStringAsFixed(3)}, '
+      'correlation: ${correlation.toStringAsFixed(3)}, success: $success)';
+}
+
+/// Result of AEC calibration analysis with impulse response info.
+class AecCalibrationResultWithImpulse extends AecCalibrationResult {
+  /// Length of the computed impulse response.
+  final int impulseLength;
+
+  /// Calibrated offset for position-based sync.
+  /// Use this with aecSetCalibratedOffset() to enable sample-accurate sync.
+  /// Formula: captureFrame - calibratedOffset = corresponding outputFrame
+  final int calibratedOffset;
+
+  const AecCalibrationResultWithImpulse({
+    required super.delayMs,
+    required super.echoGain,
+    required super.correlation,
+    required super.success,
+    required this.impulseLength,
+    required this.calibratedOffset,
+  });
+
+  @override
+  String toString() =>
+      'AecCalibrationResultWithImpulse(delayMs: $delayMs, echoGain: ${echoGain.toStringAsFixed(3)}, '
+      'correlation: ${correlation.toStringAsFixed(3)}, success: $success, impulseLength: $impulseLength, '
+      'calibratedOffset: $calibratedOffset)';
+}
+
+/// Scheduler action type (matches native SchedulerAction enum).
+enum SchedulerAction {
+  none(0),
+  startRecording(1),
+  stopRecording(2),
+  startPlayback(3),
+  stopPlayback(4);
+
+  const SchedulerAction(this.value);
+  final int value;
+
+  static SchedulerAction fromValue(int value) {
+    return SchedulerAction.values.firstWhere(
+      (e) => e.value == value,
+      orElse: () => SchedulerAction.none,
+    );
+  }
+}
+
+/// Notification from native scheduler when an event fires.
+class SchedulerNotification {
+  /// Unique event ID (assigned when event was scheduled).
+  final int eventId;
+
+  /// Action that was executed.
+  final SchedulerAction action;
+
+  /// Global frame when event fired.
+  final int firedAtFrame;
+
+  /// How many frames late the event fired (0 = perfect, positive = late).
+  final int latencyFrames;
+
+  const SchedulerNotification({
+    required this.eventId,
+    required this.action,
+    required this.firedAtFrame,
+    required this.latencyFrames,
+  });
+
+  @override
+  String toString() =>
+      'SchedulerNotification(id: $eventId, action: $action, frame: $firedAtFrame, latency: $latencyFrames)';
+}
+
+/// Result of AEC test analysis.
+/// Used to validate echo cancellation quality after calibration.
+class AecTestResult {
+  /// Energy of raw mic signal (before AEC) in dB.
+  final double micEnergyDb;
+
+  /// Energy of cancelled signal (after AEC) in dB.
+  final double cancelledEnergyDb;
+
+  /// How much was cancelled (micEnergyDb - cancelledEnergyDb).
+  /// Positive values = good cancellation.
+  final double cancellationDb;
+
+  /// Correlation of reference with raw mic (before AEC).
+  /// High value (~0.8+) indicates echo is present.
+  final double correlationBefore;
+
+  /// Correlation of reference with cancelled signal (after AEC).
+  /// Should be low (~0) if cancellation is working.
+  final double correlationAfter;
+
+  /// Whether the test passed (cancellationDb > threshold).
+  final bool passed;
+
+  const AecTestResult({
+    required this.micEnergyDb,
+    required this.cancelledEnergyDb,
+    required this.cancellationDb,
+    required this.correlationBefore,
+    required this.correlationAfter,
+    required this.passed,
+  });
+
+  @override
+  String toString() =>
+      'AecTestResult(cancellationDb: ${cancellationDb.toStringAsFixed(1)}, '
+      'correlationBefore: ${correlationBefore.toStringAsFixed(3)}, '
+      'correlationAfter: ${correlationAfter.toStringAsFixed(3)}, '
+      'passed: $passed)';
+}
 
 /// Use this class to _capture_ audio (such as from a microphone).
 interface class Recorder {
@@ -99,7 +246,17 @@ interface class Recorder {
   @experimental
   final filters = const Filters();
 
+  static RecorderImpl? _mockImplementation;
+
+  /// Set a mock implementation for testing.
+  @visibleForTesting
+  static void setMockImplementation(RecorderImpl mock) {
+    _mockImplementation = mock;
+  }
+
   final _recorder = RecorderController();
+
+  RecorderImpl get _impl => _mockImplementation ?? _recorder.impl;
 
   /// Whether the device is initialized.
   bool _isInitialized = false;
@@ -111,8 +268,7 @@ interface class Recorder {
   PCMFormat _recorderFormat = PCMFormat.s16le;
 
   /// Listening to silence state changes.
-  Stream<SilenceState> get silenceChangedEvents =>
-      _recorder.impl.silenceChangedEvents;
+  Stream<SilenceState> get silenceChangedEvents => _impl.silenceChangedEvents;
 
   /// Listen to audio data.
   ///
@@ -125,21 +281,32 @@ interface class Recorder {
   /// **RxDart.bufferTime**, it will fill a **List** of `AudioDataContainer`
   /// objects, but when you attempt to read them, you will find that all
   /// the items contain the same data.
-  Stream<AudioDataContainer> get uint8ListStream =>
-      _recorder.impl.uint8ListStream;
+  Stream<AudioDataContainer> get uint8ListStream => _impl.uint8ListStream;
+
+  /// Stream of AEC statistics (max attenuation, correlation, ERL).
+  Stream<AecStats> get aecStatsStream => _impl.aecStatsStream;
+
+  /// Stream of recording stopped events (fired from native when auto-stop occurs).
+  Stream<RecordingStoppedEvent> get recordingStoppedStream =>
+      _impl.recordingStoppedStream;
+
+  /// Stream of recording started events (fired from native when recording starts).
+  Stream<RecordingStartedEvent> get recordingStartedStream =>
+      _impl.recordingStartedStream;
+
+  /// Stream of looper playback started events (fired from worker thread when loop playback starts).
+  Stream<LooperPlaybackStartedEvent> get looperPlaybackStartedStream =>
+      _impl.looperPlaybackStartedStream;
 
   /// Enable or disable silence detection.
   ///
   /// [enable] wheter to enable or disable silence detection. Default to false.
   /// [onSilenceChanged] callback when silence state is changed.
-  ///
-  /// **NOTE**: this is only available when initializing the recorder
-  /// with [PCMFormat.f32le] format.
   void setSilenceDetection({
     required bool enable,
     SilenceCallback? onSilenceChanged,
   }) {
-    _recorder.impl.setSilenceDetection(
+    _impl.setSilenceDetection(
       enable: enable,
       onSilenceChanged: onSilenceChanged,
     );
@@ -158,11 +325,8 @@ interface class Recorder {
   /// without distortion.
   /// - Negative dB values indicate that the signal's energy is lower compared
   /// to this maximum.
-  ///
-  /// **NOTE**: this is only available when initializing the recorder
-  /// with [PCMFormat.f32le] format.
   void setSilenceThresholdDb(double silenceThresholdDb) {
-    _recorder.impl.setSilenceThresholdDb(silenceThresholdDb);
+    _impl.setSilenceThresholdDb(silenceThresholdDb);
   }
 
   /// Set the value in seconds of silence after which silence is considered
@@ -172,11 +336,8 @@ interface class Recorder {
   /// remains silent for this duration, the [SilenceCallback] callback will be
   /// triggered or the Stream [silenceChangedEvents] will emit silence state.
   /// Default to 2 seconds.
-  ///
-  /// **NOTE**: this is only available when initializing the recorder
-  /// with [PCMFormat.f32le] format.
   void setSilenceDuration(double silenceDuration) {
-    _recorder.impl.setSilenceDuration(silenceDuration);
+    _impl.setSilenceDuration(silenceDuration);
   }
 
   /// Set seconds of audio to write before starting recording again after
@@ -190,13 +351,13 @@ interface class Recorder {
   ///             ^ secondsOfAudioToWriteBefore (write some before silence ends)
   /// ```
   void setSecondsOfAudioToWriteBefore(double secondsOfAudioToWriteBefore) {
-    _recorder.impl.setSecondsOfAudioToWriteBefore(secondsOfAudioToWriteBefore);
+    _impl.setSecondsOfAudioToWriteBefore(secondsOfAudioToWriteBefore);
   }
 
   /// List available input devices. Useful on desktop to choose
   /// which input device to use.
   List<CaptureDevice> listCaptureDevices() {
-    final ret = _recorder.impl.listCaptureDevices();
+    final ret = _impl.listCaptureDevices();
 
     return ret;
   }
@@ -210,6 +371,10 @@ interface class Recorder {
   /// [channels] number of channels. Default to [RecorderChannels.mono].
   /// [androidInputPreset] Android capture input preset. If null, the platform
   /// default is used. Ignored on non-Android platforms.
+  /// [captureOnly] If true, use capture-only mode (no playback output).
+  /// Use this when SoLoud has its own playback device to avoid two competing
+  /// playback streams causing audio quality issues. If false (default), use
+  /// duplex mode for slave mode where the recorder drives SoLoud's output.
   ///
   /// Thows [RecorderInitializeFailedException] if something goes wrong, ie. no
   /// device found with [deviceID] id.
@@ -219,8 +384,13 @@ interface class Recorder {
     int sampleRate = 22050,
     RecorderChannels channels = RecorderChannels.mono,
     AndroidInputPreset? androidInputPreset,
+    bool captureOnly = false,
   }) async {
-    await _recorder.impl.setDartEventCallbacks();
+    await _impl.setDartEventCallbacks();
+    await _impl.setAecStatsCallback();
+    await _impl.setRecordingStoppedCallback();
+    await _impl.setRecordingStartedCallback();
+    await _impl.setLooperPlaybackStartedCallback();
 
     // Sets the [_isInitialized].
     // Usefult when the consumer use the hot restart and that flag
@@ -236,35 +406,54 @@ interface class Recorder {
       deinit();
     }
 
-    _recorder.impl.init(
+    _impl.init(
       deviceID: deviceID,
       format: format,
       sampleRate: sampleRate,
       channels: channels,
       androidInputPreset: androidInputPreset,
+      captureOnly: captureOnly,
     );
-    _recorderFormat = format;
     _isInitialized = true;
+
+    // Update _recorderFormat to actual format chosen by the system
+    // This is important for Android auto mode where format=unknown
+    if (format == PCMFormat.unknown) {
+      final actualFormat = _impl.getCaptureFormat();
+      // Map miniaudio format ID to PCMFormat
+      // miniaudio: unknown=0, u8=1, s16=2, s24=3, s32=4, f32=5
+      _recorderFormat = switch (actualFormat) {
+        1 => PCMFormat.u8,
+        2 => PCMFormat.s16le,
+        3 => PCMFormat.s24le,
+        4 => PCMFormat.s32le,
+        5 => PCMFormat.f32le,
+        _ => PCMFormat.unknown,
+      };
+      _log.info(() => 'Auto-detected format: $actualFormat -> $_recorderFormat');
+    } else {
+      _recorderFormat = format;
+    }
   }
 
   /// Dispose capture device.
   void deinit() {
     stop();
     _isInitialized = false;
-    _recorder.impl.deinit();
+    _impl.deinit();
   }
 
   /// Whether the device is initialized.
   bool isDeviceInitialized() {
     // ignore: join_return_with_assignment
-    _isInitialized = _recorder.impl.isDeviceInitialized();
+    _isInitialized = _impl.isDeviceInitialized();
     return _isInitialized;
   }
 
   /// Whether the device is started.
   bool isDeviceStarted() {
     // ignore: join_return_with_assignment
-    _isStarted = _recorder.impl.isDeviceStarted();
+    _isStarted = _impl.isDeviceStarted();
     return _isStarted;
   }
 
@@ -280,7 +469,7 @@ interface class Recorder {
       _log.warning(() => 'start(): recorder is not initialized.');
       throw const RecorderNotInitializedException();
     }
-    _recorder.impl.start();
+    _impl.start();
     _isStarted = true;
   }
 
@@ -291,7 +480,7 @@ interface class Recorder {
       return;
     }
     _isStarted = false;
-    _recorder.impl.stop();
+    _impl.stop();
   }
 
   /// Start streaming data.
@@ -302,7 +491,7 @@ interface class Recorder {
       _log.warning(() => 'startStreamingData(): recorder is not initialized.');
       throw const RecorderNotInitializedException();
     }
-    _recorder.impl.startStreamingData();
+    _impl.startStreamingData();
   }
 
   /// Stop streaming data.
@@ -311,7 +500,7 @@ interface class Recorder {
       _log.warning(() => 'stopStreamingData(): recorder is not initialized.');
       return;
     }
-    _recorder.impl.stopStreamingData();
+    _impl.stopStreamingData();
   }
 
   /// Start recording.
@@ -343,19 +532,19 @@ interface class Recorder {
       _log.warning(() => 'startRecording(): recorder is not started.');
       throw const RecorderCaptureNotStartededException();
     }
-    _recorder.impl.startRecording(completeFilePath);
+    _impl.startRecording(completeFilePath);
   }
 
   /// Pause recording.
   void setPauseRecording({required bool pause}) {
     if (!_isStarted) return;
-    _recorder.impl.setPauseRecording(pause: pause);
+    _impl.setPauseRecording(pause: pause);
   }
 
   /// Stop recording.
   void stopRecording() {
     if (!_isStarted) return;
-    _recorder.impl.stopRecording();
+    _impl.stopRecording();
   }
 
   /// Smooth FFT data.
@@ -373,7 +562,45 @@ interface class Recorder {
       _log.warning(() => 'setFftSmoothing: recorder is not initialized.');
       return;
     }
-    _recorder.impl.setFftSmoothing(smooth);
+    _impl.setFftSmoothing(smooth);
+  }
+
+  /// Enable or disable low-latency audio monitoring (input passthrough to output).
+  /// When enabled, microphone input is directly routed to speakers at the native level.
+  /// WARNING: Can cause feedback! Use headphones or ensure speakers are not near microphone.
+  void setMonitoring(bool enabled) {
+    _impl.setMonitoring(enabled);
+  }
+
+  /// Set monitoring mode for stereo inputs.
+  /// - 0: Stereo (normal passthrough)
+  /// - 1: Left Mono (left channel to both outputs)
+  /// - 2: Right Mono (right channel to both outputs)
+  /// - 3: Mono (mix both channels to both outputs)
+  void setMonitoringMode(int mode) {
+    _impl.setMonitoringMode(mode);
+  }
+
+  // ==================== FILTER DEBUG STATS ====================
+
+  /// Get the number of times filter processing was skipped due to lock contention.
+  /// High values indicate audio thread is being blocked by UI thread.
+  int getFilterMissCount() => _impl.getFilterMissCount();
+
+  /// Get the number of times filter processing completed successfully.
+  int getFilterProcessCount() => _impl.getFilterProcessCount();
+
+  /// Reset filter stats counters. Call at session start.
+  void resetFilterStats() => _impl.resetFilterStats();
+
+  /// Get the filter miss rate as a percentage (0-100).
+  /// Returns 0 if no processing has occurred.
+  double getFilterMissRate() {
+    final miss = getFilterMissCount();
+    final process = getFilterProcessCount();
+    final total = miss + process;
+    if (total == 0) return 0.0;
+    return (miss / total) * 100.0;
   }
 
   /// Conveninet way to get FFT data. Return a 256 float array containing
@@ -381,8 +608,7 @@ interface class Recorder {
   ///
   /// If also wave data is needed consider using [getTexture] or [getTexture2D].
   ///
-  /// **NOTE**: this is only available when initializing the recorder
-  /// with [PCMFormat.f32le] format.
+  /// **NOTE**: use this only with format [PCMFormat.f32le].
   Float32List getFft({bool alwaysReturnData = true}) {
     if (!_isInitialized) {
       _log.warning(() => 'getFft: recorder is not initialized.');
@@ -398,14 +624,13 @@ interface class Recorder {
       );
       return Float32List(256);
     }
-    return _recorder.impl.getFft(alwaysReturnData: alwaysReturnData);
+    return _impl.getFft(alwaysReturnData: alwaysReturnData);
   }
 
   /// Return a 256 float array containing wave data in the range [-1.0, 1.0]
   /// not clamped.
   ///
-  /// **NOTE**: this is only available when initializing the recorder
-  /// with [PCMFormat.f32le] format.
+  /// **NOTE**: use this only with format [PCMFormat.f32le].
   Float32List getWave({bool alwaysReturnData = true}) {
     if (!_isInitialized) {
       _log.warning(() => 'getWave: recorder is not initialized.');
@@ -421,14 +646,13 @@ interface class Recorder {
       );
       return Float32List(256);
     }
-    return _recorder.impl.getWave(alwaysReturnData: alwaysReturnData);
+    return _impl.getWave(alwaysReturnData: alwaysReturnData);
   }
 
   /// Get the audio data representing an array of 256 floats FFT data and
   /// 256 float of wave data.
   ///
-  /// **NOTE**: this is only available when initializing the recorder
-  /// with [PCMFormat.f32le] format.
+  /// **NOTE**: use this only with format [PCMFormat.f32le].
   Float32List getTexture({bool alwaysReturnData = true}) {
     if (!_isInitialized) {
       _log.warning(() => 'getTexture: recorder is not initialized.');
@@ -444,14 +668,13 @@ interface class Recorder {
       );
       return Float32List(256);
     }
-    return _recorder.impl.getTexture(alwaysReturnData: alwaysReturnData);
+    return _impl.getTexture(alwaysReturnData: alwaysReturnData);
   }
 
   /// Get the audio data representing an array of 256 floats FFT data and
   /// 256 float of wave data.
   ///
-  /// **NOTE**: this is only available when initializing the recorder
-  /// with [PCMFormat.f32le] format.
+  /// **NOTE**: use this only with format [PCMFormat.f32le].
   Float32List getTexture2D({bool alwaysReturnData = true}) {
     if (!_isInitialized) {
       _log.warning(() => 'getTexture2D: recorder is not initialized.');
@@ -467,14 +690,17 @@ interface class Recorder {
       );
       return Float32List(256);
     }
-    return _recorder.impl.getTexture2D(alwaysReturnData: alwaysReturnData);
+    return _impl.getTexture2D(alwaysReturnData: alwaysReturnData);
   }
 
   /// Get the current volume in dB. Returns -100 if the capture is not inited.
   /// 0 is the max volume the capture device can handle.
   ///
-  /// **NOTE**: this is only available when initializing the recorder
-  /// with [PCMFormat.f32le] format.
+  /// **NOTE**: use this only with format [PCMFormat.f32le].
+  /// Get the current volume in dB. Returns -100 if the capture is not inited.
+  /// 0 is the max volume the capture device can handle.
+  ///
+  /// **NOTE**: use this only with format [PCMFormat.f32le].
   double getVolumeDb() {
     if (!_isInitialized) {
       _log.warning(() => 'getVolumeDb: recorder is not initialized.');
@@ -490,7 +716,37 @@ interface class Recorder {
       );
       return -100;
     }
-    return _recorder.impl.getVolumeDb();
+    return _impl.getVolumeDb();
+  }
+
+  /// Get the actual sample rate configured on the device.
+  int getSampleRate() {
+    if (!_isInitialized) return 0;
+    return _impl.getSampleRate();
+  }
+
+  /// Get the actual capture channels configured on the device.
+  int getCaptureChannels() {
+    if (!_isInitialized) return 0;
+    return _impl.getCaptureChannels();
+  }
+
+  /// Get the actual playback channels configured on the device.
+  int getPlaybackChannels() {
+    if (!_isInitialized) return 0;
+    return _impl.getPlaybackChannels();
+  }
+
+  /// Get the actual capture format ID.
+  int getCaptureFormat() {
+    if (!_isInitialized) return 0;
+    return _impl.getCaptureFormat();
+  }
+
+  /// Get the actual playback format ID.
+  int getPlaybackFormat() {
+    if (!_isInitialized) return 0;
+    return _impl.getPlaybackFormat();
   }
 
   // ///////////////////////
@@ -500,7 +756,7 @@ interface class Recorder {
   /// Check if a filter is active.
   /// Return -1 if the filter is not active or its index.
   int isFilterActive(RecorderFilterType filterType) {
-    return _recorder.impl.isFilterActive(filterType);
+    return _impl.isFilterActive(filterType);
   }
 
   /// Add a filter.
@@ -509,7 +765,7 @@ interface class Recorder {
   /// been added.
   /// Throws [RecorderFilterNotFoundException] if the filter could not be found.
   void addFilter(RecorderFilterType filterType) {
-    _recorder.impl.addFilter(filterType);
+    _impl.addFilter(filterType);
   }
 
   /// Remove a filter.
@@ -517,12 +773,12 @@ interface class Recorder {
   /// Throws [RecorderFilterNotFoundException] if trying to remove a non active
   /// filter.
   void removeFilter(RecorderFilterType filterType) {
-    _recorder.impl.removeFilter(filterType);
+    _impl.removeFilter(filterType);
   }
 
   /// Get filter param names.
   List<String> getFilterParamNames(RecorderFilterType filterType) {
-    return _recorder.impl.getFilterParamNames(filterType);
+    return _impl.getFilterParamNames(filterType);
   }
 
   /// Set filter param value.
@@ -531,11 +787,652 @@ interface class Recorder {
     int attributeId,
     double value,
   ) {
-    _recorder.impl.setFilterParamValue(filterType, attributeId, value);
+    _impl.setFilterParamValue(filterType, attributeId, value);
   }
 
   /// Get filter param value.
   double getFilterParamValue(RecorderFilterType filterType, int attributeId) {
-    return _recorder.impl.getFilterParamValue(filterType, attributeId);
+    return _impl.getFilterParamValue(filterType, attributeId);
+  }
+
+  // ///////////////////////
+  //   SLAVE MODE
+  // ///////////////////////
+
+  /// Check if slave audio is ready (first callback has run successfully).
+  /// This is used to wait for the audio pipeline to stabilize before calibration.
+  bool isSlaveAudioReady() {
+    return _impl.isSlaveAudioReady();
+  }
+
+  /// Returns true if duplex mode was requested but capture couldn't get
+  /// exclusive mode (fell to shared). Caller should use standard SoLoud
+  /// (non-slave) instead of slave mode when this is true.
+  bool wasDuplexDenied() {
+    return _impl.wasDuplexDenied();
+  }
+
+  // ///////////////////////
+  //   Phase 2e: Ableton Link
+  // ///////////////////////
+  //
+  // Wrappers around AudioEngine's AbletonLinkClock, exposed to Dart through
+  // a direct FFI (not the audio-thread command queue) since Link's
+  // enable() is not realtime-safe. Call from the main isolate only.
+
+  /// Enable / disable Link-session participation. The native AudioEngine's
+  /// `AbletonLinkClock` calls `ableton::Link::enable()` immediately — Link
+  /// will start its background thread + multicast peer discovery. Disable
+  /// returns to standalone operation. Safe to flip multiple times.
+  void linkSetEnabled(bool enabled) => _impl.linkSetEnabled(enabled);
+
+  /// Current Link participation state. Cheap wait-free read.
+  bool linkIsEnabled() => _impl.linkIsEnabled();
+
+  /// Number of peers currently in the Link session (0 if disabled or solo).
+  int linkNumPeers() => _impl.linkNumPeers();
+
+  // ///////////////////////
+  //   Audio-callback profiling (pops/clicks hunt)
+  // ///////////////////////
+
+  /// Snapshot of the native audio callback's recent timing. Poll this from
+  /// a dev overlay to catch underruns ([CallbackStats.overrunCount] rising
+  /// == the audio thread blew its budget == an audible pop).
+  CallbackStats getCallbackStats() => _impl.getCallbackStats();
+
+  /// Zero the max + counters so a test run's overrun count starts fresh.
+  void resetCallbackStats() => _impl.resetCallbackStats();
+
+  // ///////////////////////
+  //   AEC (Adaptive Echo Cancellation)
+  // ///////////////////////
+
+  /// Set AEC Mode (Bypass, Algo, Neural, Hybrid).
+  /// Allows switching between different AEC implementations for A/B testing.
+  void setAecMode(AecMode mode) {
+    _impl.aecSetMode(mode);
+  }
+
+  /// Get current AEC Mode.
+  AecMode getAecMode() {
+    return _impl.aecGetMode();
+  }
+
+  /// Load neural model by type.
+  /// [type] the model type (aecMaskV3).
+  /// [assetBasePath] path to the assets directory.
+  bool aecLoadNeuralModel(NeuralModelType type, String assetBasePath) {
+    return _impl.aecLoadNeuralModel(type, assetBasePath);
+  }
+
+  /// Get currently loaded neural model type.
+  NeuralModelType aecGetLoadedNeuralModel() {
+    return _impl.aecGetLoadedNeuralModel();
+  }
+
+  /// Enable or disable neural post-filter.
+  void aecSetNeuralEnabled(bool enabled) {
+    _impl.aecSetNeuralEnabled(enabled);
+  }
+
+  /// Check if neural post-filter is enabled.
+  bool aecIsNeuralEnabled() {
+    return _impl.aecIsNeuralEnabled();
+  }
+
+  /// Create the AEC reference buffer.
+  /// Returns a pointer to the buffer that should be passed to SoLoud.
+  /// [sampleRate] and [channels] should match the audio device configuration.
+  int aecCreateReferenceBuffer(int sampleRate, int channels) {
+    return _impl.aecCreateReferenceBuffer(sampleRate, channels);
+  }
+
+  /// Destroy the AEC reference buffer.
+  void aecDestroyReferenceBuffer() {
+    _impl.aecDestroyReferenceBuffer();
+  }
+
+  /// Get the AEC output callback function pointer.
+  /// This should be passed to SoLoud to receive playback audio.
+  int aecGetOutputCallback() {
+    return _impl.aecGetOutputCallback();
+  }
+
+  /// Reset the AEC buffer (e.g., when switching audio configurations).
+  void aecResetBuffer() {
+    _impl.aecResetBuffer();
+  }
+
+  /// Enable or disable AEC reference buffer writes.
+  /// When disabled, saves CPU when AEC is not needed.
+  void aecSetEnabled(bool enabled) {
+    _impl.aecSetEnabled(enabled);
+  }
+
+  /// Check if AEC reference buffer is enabled.
+  bool aecIsEnabled() {
+    return _impl.aecIsEnabled();
+  }
+
+  // ==================== AEC CALIBRATION ====================
+
+  /// Generate calibration audio signal.
+  /// [signalType] determines the signal:
+  ///   - chirp: Logarithmic sine sweep (default)
+  ///   - click: Impulse train (better for transients)
+  /// Returns WAV data as Uint8List that can be loaded into SoLoud.
+  Uint8List aecGenerateCalibrationSignal(
+    int sampleRate,
+    int channels, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  }) {
+    return _impl.aecGenerateCalibrationSignal(
+      sampleRate,
+      channels,
+      signalType: signalType,
+    );
+  }
+
+  /// Start capturing microphone samples for calibration analysis.
+  /// [maxSamples] is the maximum number of mono samples to capture.
+  /// For ~2 seconds at 48kHz, use 96000.
+  void aecStartCalibrationCapture(int maxSamples) {
+    _impl.aecStartCalibrationCapture(maxSamples);
+  }
+
+  /// Stop capturing samples for calibration.
+  void aecStopCalibrationCapture() {
+    _impl.aecStopCalibrationCapture();
+  }
+
+  /// Capture signals from both reference and mic buffers for analysis.
+  /// Call this after the calibration audio has finished playing.
+  void aecCaptureForAnalysis() {
+    _impl.aecCaptureForAnalysis();
+  }
+
+  /// Run cross-correlation analysis on captured signals.
+  /// Returns a [AecCalibrationResult] with delay, gain, and correlation values.
+  AecCalibrationResult aecRunCalibrationAnalysis(int sampleRate) {
+    return _impl.aecRunCalibrationAnalysis(sampleRate);
+  }
+
+  /// Reset calibration state.
+  void aecResetCalibration() {
+    _impl.aecResetCalibration();
+  }
+
+  /// Run calibration with impulse response computation.
+  /// Returns result including impulse length (call aecGetImpulseResponse to get data).
+  AecCalibrationResultWithImpulse aecRunCalibrationWithImpulse(int sampleRate) {
+    return _impl.aecRunCalibrationWithImpulse(sampleRate);
+  }
+
+  /// Get stored impulse response from last calibration.
+  /// Returns Float32List of coefficients.
+  Float32List aecGetImpulseResponse(int maxLength) {
+    return _impl.aecGetImpulseResponse(maxLength);
+  }
+
+  /// Apply stored impulse response to AEC filter.
+  void aecApplyImpulseResponse() {
+    _impl.aecApplyImpulseResponse();
+  }
+
+  /// Get captured reference signal for visualization.
+  Float32List aecGetCalibrationRefSignal(int maxLength) {
+    return _impl.aecGetCalibrationRefSignal(maxLength);
+  }
+
+  /// Get captured mic signal for visualization.
+  Float32List aecGetCalibrationMicSignal(int maxLength) {
+    return _impl.aecGetCalibrationMicSignal(maxLength);
+  }
+
+  /// Force speaker output on iOS (useful for measurement mode).
+  void iosForceSpeakerOutput(bool enabled) {
+    _impl.iosForceSpeakerOutput(enabled);
+  }
+
+  // ==================== AEC TESTING ====================
+
+  /// Start capturing test signals (raw mic + cancelled output).
+  /// Call this BEFORE playing the test audio.
+  /// [maxSamples] is the maximum number of samples to capture per signal.
+  void aecStartTestCapture(int maxSamples) {
+    _impl.aecStartTestCapture(maxSamples);
+  }
+
+  /// Stop capturing test signals.
+  /// Call this AFTER test audio has finished playing.
+  void aecStopTestCapture() {
+    _impl.aecStopTestCapture();
+  }
+
+  /// Run analysis on captured test signals.
+  /// Computes cancellation metrics and determines pass/fail.
+  /// Returns [AecTestResult] with all metrics.
+  AecTestResult aecRunTest(int sampleRate) {
+    return _impl.aecRunTest(sampleRate);
+  }
+
+  /// Get captured raw mic signal (before AEC) for visualization.
+  Float32List aecGetTestMicSignal(int maxLength) {
+    return _impl.aecGetTestMicSignal(maxLength);
+  }
+
+  /// Get captured cancelled signal (after AEC) for visualization.
+  Float32List aecGetTestCancelledSignal(int maxLength) {
+    return _impl.aecGetTestCancelledSignal(maxLength);
+  }
+
+  /// Reset test data.
+  void aecResetTest() {
+    _impl.aecResetTest();
+  }
+
+  // ==================== VSS-NLMS PARAMETER CONTROL ====================
+
+  /// Set VSS-NLMS maximum step size (0.0-1.0). Set to 0 to freeze weights.
+  void aecSetVssMuMax(double mu) {
+    _impl.aecSetVssMuMax(mu);
+  }
+
+  /// Set VSS-NLMS leakage factor (0.99-1.0). Set to 1.0 for no decay.
+  void aecSetVssLeakage(double lambda) {
+    _impl.aecSetVssLeakage(lambda);
+  }
+
+  /// Set VSS-NLMS smoothing factor (0.9-0.999).
+  void aecSetVssAlpha(double alpha) {
+    _impl.aecSetVssAlpha(alpha);
+  }
+
+  /// Get current VSS-NLMS maximum step size.
+  double aecGetVssMuMax() {
+    return _impl.aecGetVssMuMax();
+  }
+
+  /// Get current VSS-NLMS leakage factor.
+  double aecGetVssLeakage() {
+    return _impl.aecGetVssLeakage();
+  }
+
+  /// Get current VSS-NLMS smoothing factor.
+  double aecGetVssAlpha() {
+    return _impl.aecGetVssAlpha();
+  }
+
+  // ==================== AEC FILTER LENGTH CONTROL ====================
+
+  /// Set AEC filter length (2048, 4096, 8192 recommended).
+  /// Longer filters can capture longer reverb tails but use more CPU.
+  void aecSetFilterLength(int length) {
+    _impl.aecSetFilterLength(length);
+  }
+
+  /// Get current AEC filter length.
+  int aecGetFilterLength() {
+    return _impl.aecGetFilterLength();
+  }
+
+  // ==================== AEC CALIBRATION LOGGING ====================
+
+  /// Get the calibration log buffer containing debug messages from native code.
+  /// Useful for debugging calibration issues.
+  String aecGetCalibrationLog() {
+    return _impl.aecGetCalibrationLog();
+  }
+
+  /// Clear the calibration log buffer.
+  void aecClearCalibrationLog() {
+    _impl.aecClearCalibrationLog();
+  }
+
+  // ==================== AEC POSITION-BASED SYNC ====================
+
+  /// Get total frames written to reference buffer (output side counter).
+  /// Used for sample-accurate AEC synchronization.
+  int aecGetOutputFrameCount() {
+    return _impl.aecGetOutputFrameCount();
+  }
+
+  /// Get total frames captured by recorder (input side counter).
+  /// Used for sample-accurate AEC synchronization.
+  int aecGetCaptureFrameCount() {
+    return _impl.aecGetCaptureFrameCount();
+  }
+
+  /// Record frame counters at calibration start.
+  /// Call this when calibration signal starts playing.
+  /// The counters are used to calculate the position-based offset.
+  void aecRecordCalibrationFrameCounters() {
+    _impl.aecRecordCalibrationFrameCounters();
+  }
+
+  /// Set the calibrated offset for position-based sync.
+  /// This should be called after calibration completes:
+  /// offset = (captureFramesAtStart - outputFramesAtStart) + acousticDelaySamples
+  void aecSetCalibratedOffset(int offset) {
+    _impl.aecSetCalibratedOffset(offset);
+  }
+
+  /// Get the current calibrated offset.
+  int aecGetCalibratedOffset() {
+    return _impl.aecGetCalibratedOffset();
+  }
+
+  // ==================== ALIGNED CALIBRATION CAPTURE ====================
+
+  /// Start capturing aligned ref+mic from AEC processAudio callback.
+  /// This captures frame-aligned signals for accurate delay estimation.
+  /// Unlike independent capture (aecStartCalibrationCapture), this uses
+  /// signals that are already synchronized inside the AEC callback.
+  /// [maxSamples] is the maximum number of mono samples to capture.
+  void aecStartAlignedCalibrationCapture(int maxSamples) {
+    _impl.aecStartAlignedCalibrationCapture(maxSamples);
+  }
+
+  /// Stop aligned calibration capture.
+  void aecStopAlignedCalibrationCapture() {
+    _impl.aecStopAlignedCalibrationCapture();
+  }
+
+  /// Run calibration analysis on aligned buffers and apply impulse response.
+  /// [signalType] should match what was used for generation.
+  /// Returns the calibration result with delay and impulse info.
+  /// This is more accurate than aecRunCalibrationWithImpulse because it uses
+  /// frame-aligned signals captured from inside the AEC callback.
+  AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(
+    int sampleRate, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  }) {
+    return _impl.aecRunAlignedCalibrationWithImpulse(
+      sampleRate,
+      signalType: signalType,
+    );
+  }
+
+  // ==================== NATIVE AUDIO SINK ====================
+
+  /// Set native audio sink for direct recorder-to-player streaming.
+  /// This bypasses Dart's main thread for audio data.
+  /// [callbackAddress] and [userDataAddress] should come from SoLoud's
+  /// configureNativeAudioSinkRaw().
+  void setNativeAudioSink(int callbackAddress, int userDataAddress) {
+    _impl.setNativeAudioSink(callbackAddress, userDataAddress);
+  }
+
+  /// Check if native audio sink is currently active.
+  bool isNativeAudioSinkActive() {
+    return _impl.isNativeAudioSinkActive();
+  }
+
+  /// Disable native audio sink. Audio data will flow through Dart again.
+  void disableNativeAudioSink() {
+    _impl.disableNativeAudioSink();
+  }
+
+  /// Inject preroll audio from ring buffer into SoLoud stream via native path.
+  /// This reads [frameCount] frames from the ring buffer and sends them
+  /// directly to the native audio sink callback, keeping everything native.
+  void injectPreroll(int frameCount) {
+    _impl.injectPreroll(frameCount);
+  }
+
+  /// Set the looper bridge function pointer for direct native-to-SoLoud playback.
+  /// When recording stops, native code will immediately load and play the audio
+  /// through SoLoud without going through Dart.
+  /// [funcAddress] is the address of the looper_loadAndPlayLoop function from SoLoud.
+  void setLooperBridge(int funcAddress) {
+    _impl.setLooperBridge(funcAddress);
+  }
+
+  /// Clear the looper bridge.
+  void clearLooperBridge() {
+    _impl.clearLooperBridge();
+  }
+
+  // ==================== NATIVE SCHEDULER ====================
+  // Sample-accurate timing for recording start/stop in audio callback
+
+  /// Reset the native scheduler state.
+  /// Call this when starting a new session or when timing state should be cleared.
+  void schedulerReset() {
+    _impl.schedulerReset();
+  }
+
+  /// Set base loop parameters for quantization.
+  /// [loopFrames] is the loop length in frames.
+  /// [loopStartFrame] is the global frame when the loop started.
+  /// After setting, scheduled events will align to loop boundaries.
+  void schedulerSetBaseLoop(int loopFrames, int loopStartFrame) {
+    _impl.schedulerSetBaseLoop(loopFrames, loopStartFrame);
+  }
+
+  /// Clear base loop (free recording mode).
+  /// Events will fire at next buffer boundary instead of loop boundary.
+  void schedulerClearBaseLoop() {
+    _impl.schedulerClearBaseLoop();
+  }
+
+  /// Schedule quantized recording start.
+  /// Recording will start at the next loop boundary (or immediately if no base loop).
+  /// [path] is the complete file path for the WAV recording.
+  /// Returns event ID (0 if failed to schedule).
+  int schedulerScheduleStart(String path) {
+    return _impl.schedulerScheduleStart(path);
+  }
+
+  /// Schedule quantized recording stop.
+  /// Recording will stop at the next loop boundary that completes a whole loop multiple.
+  /// [startFrame] is when recording started (for multi-loop calculation).
+  /// Returns event ID (0 if failed to schedule).
+  int schedulerScheduleStop(int startFrame) {
+    return _impl.schedulerScheduleStop(startFrame);
+  }
+
+  /// Cancel a scheduled event by ID.
+  /// Returns true if event was found and cancelled.
+  bool schedulerCancelEvent(int eventId) {
+    return _impl.schedulerCancelEvent(eventId);
+  }
+
+  /// Cancel all pending events.
+  void schedulerCancelAll() {
+    _impl.schedulerCancelAll();
+  }
+
+  /// Poll for fired event notification.
+  /// Returns null if no notification available.
+  /// Call this periodically (e.g., every 10-100ms) to get notified when events fire.
+  SchedulerNotification? schedulerPollNotification() {
+    return _impl.schedulerPollNotification();
+  }
+
+  /// Check if there are pending notifications.
+  bool schedulerHasNotifications() {
+    return _impl.schedulerHasNotifications();
+  }
+
+  /// Get current global frame position.
+  /// This is updated by the audio callback and represents the last processed frame.
+  int schedulerGetGlobalFrame() {
+    return _impl.schedulerGetGlobalFrame();
+  }
+
+  /// Get base loop length in frames.
+  /// Returns 0 if no base loop is set.
+  int schedulerGetBaseLoopFrames() {
+    return _impl.schedulerGetBaseLoopFrames();
+  }
+
+  /// Get next loop boundary frame.
+  /// Returns the frame number of the next loop boundary from current position.
+  int schedulerGetNextLoopBoundary() {
+    return _impl.schedulerGetNextLoopBoundary();
+  }
+
+  /// Set latency compensation in frames.
+  /// This is applied at recording start - the ring buffer will include
+  /// audio from [frames] frames before the start event.
+  void schedulerSetLatencyCompensation(int frames) {
+    _impl.schedulerSetLatencyCompensation(frames);
+  }
+
+  /// Get latency compensation in frames.
+  int schedulerGetLatencyCompensation() {
+    return _impl.schedulerGetLatencyCompensation();
+  }
+
+  /// Set auto-stop enabled.
+  /// When true (default), both START and STOP are scheduled upfront for
+  /// exactly one loop length. When false, only START is scheduled, allowing
+  /// manual control over when to stop (useful for pedal users).
+  void schedulerSetAutoStop(bool enabled) {
+    _impl.schedulerSetAutoStop(enabled);
+  }
+
+  /// Get auto-stop enabled state.
+  bool schedulerIsAutoStopEnabled() {
+    return _impl.schedulerIsAutoStopEnabled();
+  }
+
+  // ==================== AUTO-RECORD ====================
+  // Hands-free first-loop capture: long-press to arm, the first detected onset
+  // becomes the loop downbeat (lead-in silence trimmed via the ring buffer).
+  // Only the first loop — once a base loop exists the quantize path owns
+  // recording and these are no-ops natively.
+
+  /// Arm auto-record. The next detected onset becomes the loop downbeat (the
+  /// lead-in silence is trimmed by rewinding the ring buffer to the onset).
+  /// With [barCount] > 0 and [framesPerBar] > 0 the take auto-stops at exactly
+  /// `start + barCount * framesPerBar` (one bar = 4 beats, 4/4 assumed).
+  /// [framesPerBar] == 0 means tempo unknown (preset auto-stop skipped).
+  /// [sampleRate] == 0 keeps the current capture rate. If [measureAmbient] is
+  /// true, the detector keeps measuring the ambient level (and doesn't listen
+  /// for onsets) until [endAutoRecordMeasure] — the "hold the button" model.
+  void armAutoRecord(String wavPath, int barCount, int framesPerBar,
+      int sampleRate, {bool measureAmbient = false}) {
+    _impl.armAutoRecord(
+        wavPath, barCount, framesPerBar, sampleRate, measureAmbient);
+  }
+
+  /// End the ambient-measure window (held button released): lock the trigger to
+  /// the measured ambient level and start listening for onsets.
+  void endAutoRecordMeasure() {
+    _impl.endAutoRecordMeasure();
+  }
+
+  /// Disarm auto-record. An in-progress take is left for the normal stop path.
+  void disarmAutoRecord() {
+    _impl.disarmAutoRecord();
+  }
+
+  /// Auto-record state: 0 = idle, 1 = armed (waiting for onset / measuring), 2 = recording.
+  int getAutoRecordState() {
+    return _impl.getAutoRecordState();
+  }
+
+  /// True while the armed detector is still measuring ambient (button held).
+  bool isAutoRecordMeasuringAmbient() {
+    return _impl.isAutoRecordMeasuringAmbient();
+  }
+
+  /// Best current tempo estimate in BPM (0 until the estimator locks).
+  double getAutoRecordTempoBpm() {
+    return _impl.getAutoRecordTempoBpm();
+  }
+
+  /// Current measured noise floor in dBFS (for the UI threshold line).
+  double getAutoRecordNoiseFloorDb() {
+    return _impl.getAutoRecordNoiseFloorDb();
+  }
+
+  /// Current onset trigger level in dBFS = noiseFloorDb + onsetThresholdDb —
+  /// the level an envelope must exceed to fire. For the UI threshold line.
+  double getAutoRecordTriggerLevelDb() {
+    return _impl.getAutoRecordTriggerLevelDb();
+  }
+
+  /// Onset-detector sensitivity: dB above the (ambient) noise floor that counts
+  /// as an attack. Lower = more sensitive (soft-onset instruments — bowed
+  /// strings, pads). Default ~12 dB suits clear attacks (strum / pluck / piano).
+  void setAutoRecordOnsetThresholdDb(double db) {
+    _impl.setAutoRecordOnsetThresholdDb(db);
+  }
+
+  // ==================== NATIVE RING BUFFER ====================
+  // Latency compensation via continuous capture with pre-roll
+
+  /// Create/configure the native ring buffer for latency compensation.
+  /// The ring buffer continuously captures audio in the native layer,
+  /// allowing "pre-roll" reads to capture audio from before the record
+  /// button was pressed (compensating for input latency).
+  ///
+  /// [capacitySeconds] How many seconds of audio to keep (typically 5).
+  /// [sampleRate] Sample rate in Hz.
+  /// [channels] Number of channels (1=mono, 2=stereo).
+  void createRingBuffer(int capacitySeconds, int sampleRate, int channels) {
+    _impl.createRingBuffer(capacitySeconds, sampleRate, channels);
+  }
+
+  /// Destroy/reset the native ring buffer.
+  void destroyRingBuffer() {
+    _impl.destroyRingBuffer();
+  }
+
+  /// Read pre-roll samples for latency compensation.
+  /// This reads audio from the past to compensate for control latency
+  /// (touchscreen ~50ms, Bluetooth ~35ms, USB MIDI ~15ms).
+  ///
+  /// [frameCount] Number of frames to read.
+  /// [rewindFrames] How many frames back in time to start reading.
+  /// Returns Float32List with interleaved samples.
+  Float32List readPreRoll(int frameCount, int rewindFrames) {
+    return _impl.readPreRoll(frameCount, rewindFrames);
+  }
+
+  /// Get current audio level in dB (RMS).
+  /// This is calculated continuously in the native audio callback,
+  /// enabling efficient level metering without Dart overhead.
+  double getAudioLevelDb() {
+    return _impl.getAudioLevelDb();
+  }
+
+  /// Get total frames written to the ring buffer.
+  /// Useful for synchronization with other components.
+  int getRingBufferFramesWritten() {
+    return _impl.getRingBufferFramesWritten();
+  }
+
+  /// Get available frames in the ring buffer.
+  /// Returns the number of valid frames (up to capacity after wrap).
+  int getRingBufferAvailable() {
+    return _impl.getRingBufferAvailable();
+  }
+
+  /// Reset the ring buffer (clear all data).
+  void resetRingBuffer() {
+    _impl.resetRingBuffer();
+  }
+
+  /// Get recorded audio as WAV data from native memory.
+  /// Returns a VIEW of native memory - no copy! Very fast.
+  /// Pointer valid until next recording or freeRecordedAudio.
+  Uint8List? getRecordedWav() {
+    return _impl.getRecordedWav();
+  }
+
+  /// Get WAV size (for checking if data available).
+  int getRecordedWavSize() {
+    return _impl.getRecordedWavSize();
+  }
+
+  /// Free the recorded audio and WAV buffers in native memory.
+  /// Call this after you're done with the audio data to release memory.
+  void freeRecordedAudio() {
+    _impl.freeRecordedAudio();
   }
 }

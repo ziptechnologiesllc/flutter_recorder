@@ -1,3 +1,13 @@
+/* CLOUDLOOP NOTE (keep across miniaudio upgrades): this file is STOCK upstream
+   miniaudio — do not patch it. The Obj-C class ma_ios_notification_handler
+   collides with flutter_soloud's embedded miniaudio copy (Obj-C classes share
+   one global runtime namespace); the rename to fr_ma_ios_notification_handler
+   is applied via preprocessor defines in ios/flutter_recorder.podspec,
+   macos/flutter_recorder.podspec, and macos/CMakeLists.txt — NOT by editing
+   this file. Duplicate C symbols are handled by the Podfile/CMake linking
+   strategy (dynamic frameworks on iOS, hidden-visibility static lib on macOS),
+   not MA_API overrides. */
+
 /*
 Audio playback and capture library. Choice of public domain or MIT-0. See license statements at the end of this file.
 miniaudio - v0.11.25 - 2026-03-04

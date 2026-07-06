@@ -13,6 +13,55 @@ import 'package:meta/meta.dart';
 export 'package:flutter_recorder/src/bindings/recorder_io.dart'
     if (dart.library.js_interop) 'package:flutter_recorder/src/bindings/recorder_web.dart';
 
+/// Timing snapshot of the native audio callback. All durations in
+/// microseconds. A callback whose duration exceeds [budgetMicros] makes the
+/// device's next buffer late — that's an underrun, heard as a pop/click.
+class CallbackStats {
+  const CallbackStats({
+    required this.lastMicros,
+    required this.maxMicros,
+    required this.budgetMicros,
+    required this.overrunCount,
+    required this.nearMissCount,
+    required this.totalCount,
+  });
+
+  /// Duration of the most recent callback.
+  final int lastMicros;
+
+  /// Worst callback duration since the last reset.
+  final int maxMicros;
+
+  /// Buffer period — the deadline each callback must beat.
+  final int budgetMicros;
+
+  /// Callbacks that exceeded [budgetMicros] (→ underrun → pop).
+  final int overrunCount;
+
+  /// Callbacks over 80% of budget — not yet a pop, but close.
+  final int nearMissCount;
+
+  /// Total callbacks measured since the last reset.
+  final int totalCount;
+
+  static const CallbackStats zero = CallbackStats(
+    lastMicros: 0,
+    maxMicros: 0,
+    budgetMicros: 0,
+    overrunCount: 0,
+    nearMissCount: 0,
+    totalCount: 0,
+  );
+
+  /// Fraction of the budget the worst callback used (1.0 == budget).
+  double get worstLoad => budgetMicros > 0 ? maxMicros / budgetMicros : 0;
+
+  @override
+  String toString() => 'CallbackStats(last=${lastMicros}us '
+      'max=${maxMicros}us budget=${budgetMicros}us '
+      'overruns=$overrunCount/$totalCount nearMiss=$nearMissCount)';
+}
+
 /// Use this class to _capture_ audio (such as from a microphone).
 abstract class RecorderImpl {
   /// The device ID used to initialize the device.
@@ -44,6 +93,30 @@ abstract class RecorderImpl {
 
   /// Streams for audio data types.
   Stream<AudioDataContainer> get uint8ListStream => uint8ListController.stream;
+
+  /// Stream of AEC statistics (max attenuation, correlation, ERL).
+  Stream<AecStats> get aecStatsStream;
+
+  /// Set the AEC statistics callback.
+  Future<void> setAecStatsCallback() async {}
+
+  /// Stream of recording stopped events (fired from native when auto-stop occurs).
+  Stream<RecordingStoppedEvent> get recordingStoppedStream;
+
+  /// Set the recording stopped callback.
+  Future<void> setRecordingStoppedCallback() async {}
+
+  /// Stream of recording started events (fired from native when recording starts).
+  Stream<RecordingStartedEvent> get recordingStartedStream;
+
+  /// Set the recording started callback.
+  Future<void> setRecordingStartedCallback() async {}
+
+  /// Stream of looper playback started events (fired from worker thread when loop playback starts).
+  Stream<LooperPlaybackStartedEvent> get looperPlaybackStartedStream;
+
+  /// Set the looper playback started callback.
+  Future<void> setLooperPlaybackStartedCallback() async {}
 
   /// Set Dart functions to call when an event occurs.
   @mustBeOverridden
@@ -103,6 +176,11 @@ abstract class RecorderImpl {
 
   /// Initialize input device with [deviceID].
   ///
+  /// [captureOnly] - If true, use capture-only mode (no playback output).
+  /// Use this when SoLoud has its own playback device to avoid two competing
+  /// playback streams. If false, use duplex mode for slave mode where the
+  /// recorder drives SoLoud's output through its callback.
+  ///
   /// Thows [RecorderInitializeFailedException] if something goes wrong, ie. no
   /// device found with [deviceID] id.
   @mustBeOverridden
@@ -112,7 +190,8 @@ abstract class RecorderImpl {
     required PCMFormat format,
     required int sampleRate,
     required RecorderChannels channels,
-    required AndroidInputPreset? androidInputPreset,
+    AndroidInputPreset? androidInputPreset,
+    bool captureOnly = false,
   }) {
     this.deviceID = deviceID;
     this.format = format;
@@ -187,6 +266,30 @@ abstract class RecorderImpl {
   @mustBeOverridden
   void setFftSmoothing(double smooth);
 
+  /// Enable or disable low-latency audio monitoring (input passthrough to output).
+  @mustBeOverridden
+  void setMonitoring(bool enabled);
+
+  /// Set monitoring mode: 0=stereo, 1=leftMono, 2=rightMono, 3=mono.
+  @mustBeOverridden
+  void setMonitoringMode(int mode);
+
+  // ///////////////////////
+  // Filter debug stats
+  // ///////////////////////
+
+  /// Get the number of times filter processing was skipped due to lock contention.
+  @mustBeOverridden
+  int getFilterMissCount();
+
+  /// Get the number of times filter processing completed successfully.
+  @mustBeOverridden
+  int getFilterProcessCount();
+
+  /// Reset filter stats counters (call at session start).
+  @mustBeOverridden
+  void resetFilterStats();
+
   /// Conveninet way to get FFT data. Return a 256 float array containing
   /// FFT data in the range [-1.0, 1.0] not clamped.
   ///
@@ -221,6 +324,40 @@ abstract class RecorderImpl {
   /// **NOTE**: use this only with format [PCMFormat.f32le].
   @mustBeOverridden
   double getVolumeDb();
+
+  // ///////////////////////
+  //   GETTERS
+  // ///////////////////////
+
+  /// Get the actual sample rate.
+  @mustBeOverridden
+  int getSampleRate() {
+    throw UnimplementedError();
+  }
+
+  /// Get the actual capture channels.
+  @mustBeOverridden
+  int getCaptureChannels() {
+    throw UnimplementedError();
+  }
+
+  /// Get the actual playback channels.
+  @mustBeOverridden
+  int getPlaybackChannels() {
+    throw UnimplementedError();
+  }
+
+  /// Get the actual capture format.
+  @mustBeOverridden
+  int getCaptureFormat() {
+    throw UnimplementedError();
+  }
+
+  /// Get the actual playback format.
+  @mustBeOverridden
+  int getPlaybackFormat() {
+    throw UnimplementedError();
+  }
 
   // ///////////////////////
   //   FILTERS
@@ -261,4 +398,492 @@ abstract class RecorderImpl {
   /// Get filter param value.
   @mustBeOverridden
   double getFilterParamValue(RecorderFilterType filterType, int attributeId);
+
+  // ///////////////////////
+  //   SLAVE MODE
+  // ///////////////////////
+
+  /// Check if slave audio is ready (first callback has run successfully).
+  /// This is used to wait for the audio pipeline to stabilize before calibration.
+  @mustBeOverridden
+  bool isSlaveAudioReady();
+
+  bool wasDuplexDenied();
+
+  // ///////////////////////
+  //   Phase 2e: Ableton Link
+  // ///////////////////////
+  //
+  // Direct path to the native AudioEngine's AbletonLinkClock. `setEnabled`
+  // is NOT realtime-safe (Link spins up its network thread on enable);
+  // Dart must call from the main isolate, never from an audio callback.
+
+  /// Enable / disable Link-session participation.
+  @mustBeOverridden
+  void linkSetEnabled(bool enabled);
+
+  /// Whether Link is currently enabled in the native engine.
+  @mustBeOverridden
+  bool linkIsEnabled();
+
+  /// Number of peers in the Link session. 0 when disabled or solo.
+  @mustBeOverridden
+  int linkNumPeers();
+
+  // ///////////////////////
+  //   Audio-callback profiling (pops/clicks hunt)
+  // ///////////////////////
+
+  /// Snapshot of the native audio callback's recent timing. Polled by the
+  /// dev overlay to spot underruns (callbacks that blew the buffer-period
+  /// budget — the proximate cause of an audible pop).
+  @mustBeOverridden
+  CallbackStats getCallbackStats();
+
+  /// Zero the max + counters (keeps last/budget). Call before a test run so
+  /// the overrun count reflects just that run.
+  @mustBeOverridden
+  void resetCallbackStats();
+
+  // ///////////////////////
+  //   AEC (Adaptive Echo Cancellation)
+  // ///////////////////////
+
+  /// Create the AEC reference buffer.
+  /// Returns a pointer to the buffer that should be passed to SoLoud.
+  @mustBeOverridden
+  int aecCreateReferenceBuffer(int sampleRate, int channels);
+
+  /// Destroy the AEC reference buffer.
+  @mustBeOverridden
+  void aecDestroyReferenceBuffer();
+
+  /// Get the AEC output callback function pointer.
+  /// This should be passed to SoLoud to receive playback audio.
+  @mustBeOverridden
+  int aecGetOutputCallback();
+
+  /// Reset the AEC buffer (e.g., when switching audio configurations).
+  @mustBeOverridden
+  void aecResetBuffer();
+
+  /// Enable/disable AEC reference buffer writes.
+  /// When disabled, saves CPU when AEC is not needed.
+  @mustBeOverridden
+  void aecSetEnabled(bool enabled);
+
+  /// Check if AEC reference buffer is enabled.
+  @mustBeOverridden
+  bool aecIsEnabled();
+
+  /// Set AEC Mode (0=Bypass, 1=Algo, 2=Neural, 3=Hybrid)
+  @mustBeOverridden
+  void aecSetMode(AecMode mode);
+
+  /// Get current AEC Mode
+  @mustBeOverridden
+  AecMode aecGetMode();
+
+  /// Load neural model by type
+  @mustBeOverridden
+  bool aecLoadNeuralModel(NeuralModelType type, String assetBasePath);
+
+  /// Get currently loaded neural model type
+  @mustBeOverridden
+  NeuralModelType aecGetLoadedNeuralModel();
+
+  /// Enable/disable neural post-filter
+  @mustBeOverridden
+  void aecSetNeuralEnabled(bool enabled);
+
+  /// Check if neural post-filter is enabled
+  @mustBeOverridden
+  bool aecIsNeuralEnabled();
+
+  // ==================== AEC CALIBRATION ====================
+
+  /// Generate calibration audio signal.
+  /// [signalType] determines the signal:
+  ///   - chirp: Logarithmic sine sweep (default)
+  ///   - click: Impulse train (better for transients)
+  /// Returns WAV data as Uint8List that can be loaded into SoLoud.
+  @mustBeOverridden
+  Uint8List aecGenerateCalibrationSignal(
+    int sampleRate,
+    int channels, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  });
+
+  /// Start capturing microphone samples for calibration analysis.
+  @mustBeOverridden
+  void aecStartCalibrationCapture(int maxSamples);
+
+  /// Stop capturing samples for calibration.
+  @mustBeOverridden
+  void aecStopCalibrationCapture();
+
+  /// Capture signals from both reference and mic buffers for analysis.
+  @mustBeOverridden
+  void aecCaptureForAnalysis();
+
+  /// Run cross-correlation analysis on captured signals.
+  @mustBeOverridden
+  AecCalibrationResult aecRunCalibrationAnalysis(int sampleRate);
+
+  /// Reset calibration state.
+  @mustBeOverridden
+  void aecResetCalibration();
+
+  /// Run calibration analysis with impulse response computation.
+  /// Returns result including impulse length (call aecGetImpulseResponse to get data).
+  @mustBeOverridden
+  AecCalibrationResultWithImpulse aecRunCalibrationWithImpulse(int sampleRate);
+
+  /// Get stored impulse response from last calibration.
+  /// Returns Float32List of coefficients.
+  @mustBeOverridden
+  Float32List aecGetImpulseResponse(int maxLength);
+
+  /// Apply stored impulse response to AEC filter.
+  @mustBeOverridden
+  void aecApplyImpulseResponse();
+
+  /// Get captured reference signal for visualization.
+  @mustBeOverridden
+  Float32List aecGetCalibrationRefSignal(int maxLength);
+
+  /// Get captured mic signal for visualization.
+  @mustBeOverridden
+  Float32List aecGetCalibrationMicSignal(int maxLength);
+
+  /// Force speaker output on iOS (useful for measurement mode).
+  @mustBeOverridden
+  void iosForceSpeakerOutput(bool enabled);
+
+  // ==================== AEC TESTING ====================
+
+  /// Start capturing test signals (raw mic + cancelled output).
+  /// Call this BEFORE playing the test audio.
+  @mustBeOverridden
+  void aecStartTestCapture(int maxSamples);
+
+  /// Stop capturing test signals.
+  /// Call this AFTER test audio has finished playing.
+  @mustBeOverridden
+  void aecStopTestCapture();
+
+  /// Run analysis on captured test signals.
+  /// Returns test results with cancellation metrics.
+  @mustBeOverridden
+  AecTestResult aecRunTest(int sampleRate);
+
+  /// Get captured raw mic signal (before AEC) for visualization.
+  @mustBeOverridden
+  Float32List aecGetTestMicSignal(int maxLength);
+
+  /// Get captured cancelled signal (after AEC) for visualization.
+  @mustBeOverridden
+  Float32List aecGetTestCancelledSignal(int maxLength);
+
+  /// Reset test data.
+  @mustBeOverridden
+  void aecResetTest();
+
+  // ==================== VSS-NLMS PARAMETER CONTROL ====================
+
+  /// Set VSS-NLMS maximum step size (0.0-1.0). Set to 0 to freeze weights.
+  @mustBeOverridden
+  void aecSetVssMuMax(double mu);
+
+  /// Set VSS-NLMS leakage factor (0.99-1.0). Set to 1.0 for no decay.
+  @mustBeOverridden
+  void aecSetVssLeakage(double lambda);
+
+  /// Set VSS-NLMS smoothing factor (0.9-0.999).
+  @mustBeOverridden
+  void aecSetVssAlpha(double alpha);
+
+  /// Get current VSS-NLMS maximum step size.
+  @mustBeOverridden
+  double aecGetVssMuMax();
+
+  /// Get current VSS-NLMS leakage factor.
+  @mustBeOverridden
+  double aecGetVssLeakage();
+
+  /// Get current VSS-NLMS smoothing factor.
+  @mustBeOverridden
+  double aecGetVssAlpha();
+
+  // ==================== AEC FILTER LENGTH CONTROL ====================
+
+  /// Set AEC filter length (2048, 4096, 8192 recommended).
+  @mustBeOverridden
+  void aecSetFilterLength(int length);
+
+  /// Get current AEC filter length.
+  @mustBeOverridden
+  int aecGetFilterLength();
+
+  // ==================== AEC CALIBRATION LOGGING ====================
+
+  /// Get the calibration log buffer containing debug messages.
+  @mustBeOverridden
+  String aecGetCalibrationLog();
+
+  /// Clear the calibration log buffer.
+  @mustBeOverridden
+  void aecClearCalibrationLog();
+
+  // ==================== AEC POSITION-BASED SYNC ====================
+
+  /// Get total frames written to reference buffer (output side counter).
+  @mustBeOverridden
+  int aecGetOutputFrameCount();
+
+  /// Get total frames captured by recorder (input side counter).
+  @mustBeOverridden
+  int aecGetCaptureFrameCount();
+
+  /// Record frame counters at calibration start.
+  /// Call this when calibration signal starts playing.
+  @mustBeOverridden
+  void aecRecordCalibrationFrameCounters();
+
+  /// Set the calibrated offset for position-based sync.
+  /// offset = (captureAtStart - outputAtStart) + acousticDelaySamples
+  @mustBeOverridden
+  void aecSetCalibratedOffset(int offset);
+
+  /// Get the current calibrated offset.
+  @mustBeOverridden
+  int aecGetCalibratedOffset();
+
+  // ==================== ALIGNED CALIBRATION CAPTURE ====================
+
+  /// Start capturing aligned ref+mic from AEC processAudio.
+  /// This captures frame-aligned signals for accurate delay estimation.
+  @mustBeOverridden
+  void aecStartAlignedCalibrationCapture(int maxSamples);
+
+  /// Stop aligned calibration capture.
+  @mustBeOverridden
+  void aecStopAlignedCalibrationCapture();
+
+  /// Run calibration analysis on aligned buffers and apply impulse response.
+  /// [signalType] should match what was used for generation.
+  /// Returns the calibration result with delay and impulse info.
+  @mustBeOverridden
+  AecCalibrationResultWithImpulse aecRunAlignedCalibrationWithImpulse(
+    int sampleRate, {
+    CalibrationSignalType signalType = CalibrationSignalType.chirp,
+  });
+
+  // ==================== NATIVE AUDIO SINK ====================
+  // Direct native-to-native streaming (bypasses Dart main thread)
+
+  /// Set native audio sink for direct recorder-to-player streaming.
+  /// [callbackAddress] and [userDataAddress] come from SoLoud's
+  /// configureNativeAudioSinkRaw().
+  @mustBeOverridden
+  void setNativeAudioSink(int callbackAddress, int userDataAddress);
+
+  /// Check if native audio sink is active.
+  @mustBeOverridden
+  bool isNativeAudioSinkActive();
+
+  /// Disable native audio sink (data flows through Dart again).
+  @mustBeOverridden
+  void disableNativeAudioSink();
+
+  /// Inject preroll audio from ring buffer into SoLoud stream via native path.
+  /// This reads [frameCount] frames from the ring buffer and sends them
+  /// directly to the native audio sink callback.
+  @mustBeOverridden
+  void injectPreroll(int frameCount);
+
+  /// Set the looper bridge function pointer for direct native-to-SoLoud playback.
+  /// [funcAddress] is the address of the looper_loadAndPlayLoop function.
+  @mustBeOverridden
+  void setLooperBridge(int funcAddress);
+
+  /// Clear the looper bridge.
+  @mustBeOverridden
+  void clearLooperBridge();
+
+  // ==================== NATIVE SCHEDULER ====================
+  // Sample-accurate timing for recording start/stop in audio callback
+
+  /// Reset the native scheduler state.
+  @mustBeOverridden
+  void schedulerReset();
+
+  /// Set base loop parameters for quantization.
+  /// [loopFrames] is the loop length in frames.
+  /// [loopStartFrame] is the global frame when the loop started.
+  @mustBeOverridden
+  void schedulerSetBaseLoop(int loopFrames, int loopStartFrame);
+
+  /// Clear base loop (free recording mode).
+  @mustBeOverridden
+  void schedulerClearBaseLoop();
+
+  /// Schedule quantized recording start.
+  /// Returns event ID (0 if failed to schedule).
+  @mustBeOverridden
+  int schedulerScheduleStart(String path);
+
+  /// Schedule quantized recording stop.
+  /// [startFrame] is when recording started (for multi-loop calculation).
+  /// Returns event ID (0 if failed to schedule).
+  @mustBeOverridden
+  int schedulerScheduleStop(int startFrame);
+
+  /// Cancel a scheduled event by ID.
+  /// Returns true if event was cancelled.
+  @mustBeOverridden
+  bool schedulerCancelEvent(int eventId);
+
+  /// Cancel all pending events.
+  @mustBeOverridden
+  void schedulerCancelAll();
+
+  /// Poll for fired event notification.
+  /// Returns null if no notification available.
+  @mustBeOverridden
+  SchedulerNotification? schedulerPollNotification();
+
+  /// Check if there are pending notifications.
+  @mustBeOverridden
+  bool schedulerHasNotifications();
+
+  /// Get current global frame position.
+  @mustBeOverridden
+  int schedulerGetGlobalFrame();
+
+  /// Get base loop length in frames.
+  @mustBeOverridden
+  int schedulerGetBaseLoopFrames();
+
+  /// Get next loop boundary frame.
+  @mustBeOverridden
+  int schedulerGetNextLoopBoundary();
+
+  /// Set latency compensation in frames (applied at recording start).
+  @mustBeOverridden
+  void schedulerSetLatencyCompensation(int frames);
+
+  /// Get latency compensation in frames.
+  @mustBeOverridden
+  int schedulerGetLatencyCompensation();
+
+  /// Set auto-stop enabled (when true, STOP is scheduled upfront with START).
+  @mustBeOverridden
+  void schedulerSetAutoStop(bool enabled);
+
+  /// Get auto-stop enabled state.
+  @mustBeOverridden
+  bool schedulerIsAutoStopEnabled();
+
+  // ==================== AUTO-RECORD ====================
+  // Hands-free first-loop capture: long-press to arm, the first detected onset
+  // becomes the loop downbeat (lead-in silence trimmed via the ring buffer).
+
+  /// Arm auto-record. The next detected onset becomes the loop downbeat.
+  /// With [barCount] > 0 and [framesPerBar] > 0 the take auto-stops at exactly
+  /// `start + barCount * framesPerBar`. [framesPerBar] == 0 means tempo
+  /// unknown (preset auto-stop skipped). [sampleRate] == 0 keeps the current.
+  /// If [measureAmbient] is true, keep measuring the ambient level (don't
+  /// listen for onsets) until [endAutoRecordMeasure] — the "hold the button"
+  /// model: the longer you hold, the better the ambient/threshold estimate.
+  @mustBeOverridden
+  void armAutoRecord(String wavPath, int barCount, int framesPerBar,
+      int sampleRate, bool measureAmbient);
+
+  /// End the ambient-measure window (held button released): lock the trigger to
+  /// the measured ambient level and start listening for onsets.
+  @mustBeOverridden
+  void endAutoRecordMeasure();
+
+  /// Disarm auto-record (an in-progress take is left for the normal stop path).
+  @mustBeOverridden
+  void disarmAutoRecord();
+
+  /// Auto-record state: 0 = idle, 1 = armed (waiting for onset / measuring), 2 = recording.
+  @mustBeOverridden
+  int getAutoRecordState();
+
+  /// True while the armed detector is still measuring ambient (button held).
+  @mustBeOverridden
+  bool isAutoRecordMeasuringAmbient();
+
+  /// Best current tempo estimate in BPM (0 until the estimator locks).
+  @mustBeOverridden
+  double getAutoRecordTempoBpm();
+
+  /// Current measured noise floor in dBFS (for the UI threshold line).
+  @mustBeOverridden
+  double getAutoRecordNoiseFloorDb();
+
+  /// Current onset trigger level in dBFS = noiseFloorDb + onsetThresholdDb.
+  @mustBeOverridden
+  double getAutoRecordTriggerLevelDb();
+
+  /// Onset-detector sensitivity: dB above the (ambient) noise floor that counts
+  /// as an attack. Lower = more sensitive (soft-onset instruments).
+  @mustBeOverridden
+  void setAutoRecordOnsetThresholdDb(double db);
+
+  // ==================== NATIVE RING BUFFER ====================
+  // Latency compensation via continuous capture with pre-roll
+
+  /// Create/configure the native ring buffer for latency compensation.
+  /// [capacitySeconds] How many seconds of audio to keep (typically 5).
+  /// [sampleRate] Sample rate in Hz.
+  /// [channels] Number of channels (1=mono, 2=stereo).
+  @mustBeOverridden
+  void createRingBuffer(int capacitySeconds, int sampleRate, int channels);
+
+  /// Destroy/reset the native ring buffer.
+  @mustBeOverridden
+  void destroyRingBuffer();
+
+  /// Read pre-roll samples for latency compensation.
+  /// [frameCount] Number of frames to read.
+  /// [rewindFrames] How many frames back in time to start reading.
+  /// Returns Float32List with interleaved samples.
+  @mustBeOverridden
+  Float32List readPreRoll(int frameCount, int rewindFrames);
+
+  /// Get current audio level in dB (RMS).
+  /// Calculated continuously in the native audio callback.
+  @mustBeOverridden
+  double getAudioLevelDb();
+
+  /// Get total frames written to the ring buffer.
+  @mustBeOverridden
+  int getRingBufferFramesWritten();
+
+  /// Get available frames in the ring buffer.
+  @mustBeOverridden
+  int getRingBufferAvailable();
+
+  /// Reset the ring buffer (clear all data).
+  @mustBeOverridden
+  void resetRingBuffer();
+
+  /// Get recorded audio as WAV data from native memory.
+  /// Returns a VIEW of native memory - no copy! Very fast.
+  /// Pointer valid until next recording or freeRecordedAudio.
+  @mustBeOverridden
+  Uint8List? getRecordedWav();
+
+  /// Get WAV size (for checking if data available).
+  @mustBeOverridden
+  int getRecordedWavSize();
+
+  /// Free the recorded audio and WAV buffers in native memory.
+  /// Call this after you're done with the audio data to release memory.
+  @mustBeOverridden
+  void freeRecordedAudio();
 }

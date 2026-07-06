@@ -25,6 +25,7 @@
 #else
 #import <CoreAudio/CoreAudio.h>
 #endif
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -212,6 +213,180 @@ bool startIOS(unsigned int sampleRate, unsigned int channels) {
                        kAudioUnitScope_Output, kOutputBus, &one, sizeof(one));
   return finishStart((double)g_actualSampleRate, channels);
 }
+
+// ---------------------------------------------------------------------------
+// AVAudioSession lifecycle (interruptions + route changes).
+//
+// configureSession() above is the app's ONE AVAudioSession owner, which means
+// it must also own recovery: without these observers nothing re-activates the
+// session or restarts the unit after a phone call / Siri / route change, and
+// the duplex stays permanently silent. All handling runs on the MAIN queue via
+// NSNotificationCenter block observers — the render callback is never touched.
+// ---------------------------------------------------------------------------
+#if !__has_feature(objc_arc)
+#error "coreaudio_duplex.mm relies on ARC for the observer tokens on iOS"
+#endif
+
+id g_interruptionObserver = nil; // NSNotificationCenter block-observer tokens
+id g_routeChangeObserver = nil;
+std::atomic<bool> g_suspended{false};   // interruption began → unit stopped
+std::atomic<bool> g_configuring{false}; // inside our own (re)configure window
+unsigned int g_requestedSampleRate = 0; // caDuplexStart arg, kept for rebuilds
+
+// Route changes triggered by our OWN setCategory/setActive are posted
+// asynchronously and land on the main queue AFTER the code that caused them
+// returns, so the guard must outlive the configure call itself.
+void endConfiguringSoon() {
+  dispatch_after(
+      dispatch_time(DISPATCH_TIME_NOW, (int64_t)(500 * NSEC_PER_MSEC)),
+      dispatch_get_main_queue(), ^{ g_configuring = false; });
+}
+
+// Full teardown + rebuild through the exact same public stop/start paths used
+// everywhere else, so the RemoteIO ASBD is re-derived from the freshly
+// negotiated session sample rate. Main queue only.
+bool rebuildDuplex(const char *why) {
+  const unsigned int rate = g_requestedSampleRate;
+  const unsigned int channels = g_channels;
+  void *userData = g_userData;
+  CADuplexRenderFn renderFn = g_renderFn;
+  aecLog("[CADuplex] %s: full unit rebuild (requested %u Hz)\n", why, rate);
+  caDuplexStop();
+  const bool ok = caDuplexStart(rate, channels, userData, renderFn);
+  aecLog("[CADuplex] %s: rebuild %s (actual %u Hz)\n", why,
+         ok ? "OK" : "FAILED — duplex stopped, engine restart required",
+         g_actualSampleRate);
+  return ok;
+}
+
+// Shared recovery for interruption-ended and actionable route changes:
+// re-own the session (configureSession → setActive:YES), re-read the
+// negotiated hardware rate, then either just restart the unit (rate unchanged)
+// or rebuild it so the ASBD matches the new rate.
+void reactivateAndRestart(const char *why) {
+  if (!g_unit) {
+    aecLog("[CADuplex] %s: no unit, nothing to restart\n", why);
+    return;
+  }
+  g_configuring = true; // configureSession below fires its own route change
+  if (!configureSession(g_requestedSampleRate)) {
+    g_configuring = false;
+    aecLog("[CADuplex] %s: session reactivation FAILED, staying suspended\n",
+           why);
+    return; // stay down; the next interruption/route event retries
+  }
+  const unsigned int sessionRate =
+      (unsigned int)([AVAudioSession sharedInstance].sampleRate + 0.5);
+  if (sessionRate == g_actualSampleRate) {
+    const OSStatus st = AudioOutputUnitStart(g_unit);
+    aecLog("[CADuplex] %s: rate unchanged (%u Hz), unit restart %s (%d)\n",
+           why, sessionRate, st == noErr ? "OK" : "FAILED", (int)st);
+    if (st == noErr) {
+      g_suspended = false;
+      endConfiguringSoon();
+    } else {
+      // A unit that refuses to start is dead anyway — rebuilding through the
+      // full stop/start path is the only remaining recovery.
+      if (rebuildDuplex(why)) // stop/start manage g_configuring themselves
+        g_suspended = false;
+    }
+  } else {
+    aecLog("[CADuplex] %s: session rate %u != running %u\n", why, sessionRate,
+           g_actualSampleRate);
+    if (rebuildDuplex(why)) // stop/start manage g_configuring themselves
+      g_suspended = false;
+  }
+}
+
+void handleInterruption(NSNotification *note) {
+  NSNumber *typeNum = note.userInfo[AVAudioSessionInterruptionTypeKey];
+  if (!typeNum)
+    return;
+  const NSUInteger type = typeNum.unsignedIntegerValue;
+  if (type == AVAudioSessionInterruptionTypeBegan) {
+    aecLog("[CADuplex] interruption BEGAN -> stopping unit\n");
+    if (g_unit)
+      AudioOutputUnitStop(g_unit);
+    g_suspended = true;
+  } else if (type == AVAudioSessionInterruptionTypeEnded) {
+    NSNumber *optNum = note.userInfo[AVAudioSessionInterruptionOptionKey];
+    const bool shouldResume =
+        optNum && (optNum.unsignedIntegerValue &
+                   AVAudioSessionInterruptionOptionShouldResume) != 0;
+    // Attempt resume even without ShouldResume: this is the app's only audio
+    // engine, and if iOS still objects setActive:YES fails and we stay
+    // suspended until the next event.
+    aecLog("[CADuplex] interruption ENDED (shouldResume=%d) -> reactivating\n",
+           shouldResume ? 1 : 0);
+    reactivateAndRestart("interruption-ended");
+  }
+}
+
+void handleRouteChange(NSNotification *note) {
+  NSNumber *reasonNum = note.userInfo[AVAudioSessionRouteChangeReasonKey];
+  const NSUInteger reason =
+      reasonNum ? reasonNum.unsignedIntegerValue
+                : AVAudioSessionRouteChangeReasonUnknown;
+  if (g_configuring) {
+    aecLog("[CADuplex] route change (reason=%lu) ignored: self-inflicted "
+           "during configure\n",
+           (unsigned long)reason);
+    return;
+  }
+  if (g_suspended) {
+    aecLog("[CADuplex] route change (reason=%lu) deferred: interrupted, "
+           "waiting for interruption end\n",
+           (unsigned long)reason);
+    return;
+  }
+  switch (reason) {
+  case AVAudioSessionRouteChangeReasonOldDeviceUnavailable:
+  case AVAudioSessionRouteChangeReasonNewDeviceAvailable:
+  case AVAudioSessionRouteChangeReasonCategoryChange:
+    aecLog("[CADuplex] route change (reason=%lu) -> rate check\n",
+           (unsigned long)reason);
+    reactivateAndRestart("route-change");
+    break;
+  default:
+    aecLog("[CADuplex] route change (reason=%lu) ignored\n",
+           (unsigned long)reason);
+    break;
+  }
+}
+
+void registerSessionObservers() {
+  if (g_interruptionObserver || g_routeChangeObserver)
+    return;
+  NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+  AVAudioSession *session = [AVAudioSession sharedInstance];
+  g_interruptionObserver =
+      [nc addObserverForName:AVAudioSessionInterruptionNotification
+                      object:session
+                       queue:[NSOperationQueue mainQueue]
+                  usingBlock:^(NSNotification *note) {
+                    handleInterruption(note);
+                  }];
+  g_routeChangeObserver =
+      [nc addObserverForName:AVAudioSessionRouteChangeNotification
+                      object:session
+                       queue:[NSOperationQueue mainQueue]
+                  usingBlock:^(NSNotification *note) {
+                    handleRouteChange(note);
+                  }];
+  aecLog("[CADuplex] session lifecycle observers registered\n");
+}
+
+void unregisterSessionObservers() {
+  NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+  if (g_interruptionObserver) {
+    [nc removeObserver:g_interruptionObserver];
+    g_interruptionObserver = nil;
+  }
+  if (g_routeChangeObserver) {
+    [nc removeObserver:g_routeChangeObserver];
+    g_routeChangeObserver = nil;
+  }
+}
 #endif // TARGET_OS_IPHONE
 
 #if TARGET_OS_OSX
@@ -349,21 +524,37 @@ bool caDuplexStart(unsigned int sampleRate, unsigned int channels,
 
   bool ok = false;
 #if TARGET_OS_IPHONE
+  g_requestedSampleRate = sampleRate;
+  g_configuring = true; // ignore route changes our own startup provokes
   ok = startIOS(sampleRate, channels);
 #elif TARGET_OS_OSX
   ok = startMacOS(sampleRate, channels);
 #endif
   if (!ok) {
     caDuplexStop();
+#if TARGET_OS_IPHONE
+    g_configuring = false;
+#endif
     return false;
   }
   g_running = true;
+#if TARGET_OS_IPHONE
+  // AudioOutputUnitStart succeeded (finishStart) — arm the main-queue session
+  // lifecycle observers, and keep the self-route-change guard up briefly since
+  // our own configureSession's route change lands asynchronously.
+  registerSessionObservers();
+  endConfiguringSoon();
+#endif
   aecLog("[CADuplex] STARTED single-clock duplex @ %u Hz, %u ch\n",
          g_actualSampleRate, channels);
   return true;
 }
 
 void caDuplexStop(void) {
+#if TARGET_OS_IPHONE
+  unregisterSessionObservers();
+  g_suspended = false;
+#endif
   if (g_unit) {
     AudioOutputUnitStop(g_unit);
     AudioUnitUninitialize(g_unit);

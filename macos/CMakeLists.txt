@@ -46,11 +46,16 @@ set_target_properties(${PLUGIN_NAME} PROPERTIES
 
 target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 
-# Rename shared symbols to avoid conflicts with flutter_soloud's copies
+# Rename shared symbols to avoid conflicts with flutter_soloud's copies.
+# ma_ios_notification_handler: miniaudio's Obj-C notification handler class —
+# renamed via the preprocessor (src/miniaudio.h stays stock) so it can never
+# collide with flutter_soloud's embedded miniaudio copy. Mirrors the define in
+# ios/flutter_recorder.podspec and macos/flutter_recorder.podspec.
 target_compile_definitions(${PLUGIN_NAME} PRIVATE
   "fftimpl=flutter_recorder_fftimpl"
   "waveData=flutter_recorder_waveData"
   "Analyzer=FlutterRecorderAnalyzer"
+  "ma_ios_notification_handler=fr_ma_ios_notification_handler"
 )
 
 # LiteRT disabled on macOS (no prebuilt Intel/ARM binary yet)
