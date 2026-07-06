@@ -1,9 +1,10 @@
-// Hide miniaudio symbols so they don't conflict with flutter_soloud's copy
-// when both plugins are force-loaded into the same binary.
-#define MA_API static
+// NOTE: do NOT define MA_API static here. Android/Linux/Windows compile each
+// TU separately, so capture.cpp needs extern ma_* symbols from this TU.
+// Coexistence with flutter_soloud's miniaudio copy is handled by the linking
+// strategy instead (iOS dynamic frameworks, macOS hidden-visibility static
+// lib) plus the ObjC class rename define — see the note atop miniaudio.h.
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
-#undef MA_API
 
 #include "analyzer.h"
 #include "audio_engine/audio_engine.h"
