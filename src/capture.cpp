@@ -474,9 +474,63 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   }
 #endif
 
+  // ==========================================================================
+  // FILTERS FIRST (AEC included): cancel at the front of the chain so EVERY
+  // downstream consumer — the ring buffer (recordings!), auto-record onset
+  // detection, visualization, energy metering, streaming — sees the cleaned
+  // signal. Historically the ring was written pre-AEC, so overdub recordings
+  // carried the full speaker bleed while the on-screen waveform (post-AEC)
+  // shrank: "the display converges but the recording still has the track."
+  // The AEC reads its reference from PREVIOUS callbacks' writes, so running
+  // before this block's slave mix only shifts the constant reference offset
+  // by one buffer — absorbed by the loop-synchronous template as a fixed
+  // rotation.
+  // (SKIP during calibration to capture raw impulse response and save CPU)
+  // Note: mFilters may be null if callback runs before init() completes
+  // Use lock-free hasFilters() check to avoid mutex contention in hot path
+  if (captured != nullptr && userData->mFilters != nullptr &&
+      userData->mFilters->hasFilters() && !userData->mCalibrationActive) {
+#if DEBUG_CALLBACK_FILTERS
+    static int filterDebugCounter = 0;
+    if (++filterDebugCounter <= 5 || filterDebugCounter % 500 == 0) {
+#ifdef _IS_ANDROID_
+      __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
+                          "[Capture CB #%d] hasFilters=true calibActive=%d",
+                          filterDebugCounter, userData->mCalibrationActive);
+#endif
+      aecLog("[Capture CB #%d] hasFilters=true calibActive=%d\n",
+             filterDebugCounter, userData->mCalibrationActive);
+    }
+#endif
+    // Set the capture frame count for AEC position-based sync BEFORE
+    // processing. This is the frame count at the START of this block (before
+    // we increment).
+    size_t captureFrameCount =
+        userData->mTotalFramesCaptured.load(std::memory_order_acquire);
+    userData->mFilters->setAecCaptureFrameCount(captureFrameCount);
+
+    // Thread-safe filter processing (protects against concurrent
+    // addFilter/removeFilter)
+    userData->mFilters->processAllFilters(
+        captured, frameCount, captureChannels,
+        userData->deviceConfig.capture.format);
+  }
+#if DEBUG_CALLBACK_FILTERS
+  else {
+#ifdef _IS_ANDROID_
+    static int nullFilterDebugCounter = 0;
+    if (++nullFilterDebugCounter <= 5) {
+      __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
+                          "[Capture CB] mFilters is NULL!");
+    }
+#endif
+  }
+#endif
+
   // =========================================================================
   // NATIVE RING BUFFER: Continuous capture for latency compensation (pre-roll)
-  // Write immediately after format conversion, before any processing
+  // Written AFTER the filter chain: recordings are cut from this buffer and
+  // must contain the AEC-cleaned signal, not the raw speaker bleed.
   // IMPORTANT: Pass actual capture channels to auto-reconfigure if mismatched
   // =========================================================================
   if (g_nativeRingBuffer != nullptr && captured != nullptr) {
@@ -787,48 +841,10 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     }
   }
 
-  // Apply filters (SKIP during calibration to capture raw impulse response and
-  // save CPU)
-  // Note: mFilters may be null if callback runs before init() completes
-  // Use lock-free hasFilters() check to avoid mutex contention in hot path
-  if (userData->mFilters != nullptr && userData->mFilters->hasFilters() &&
-      !userData->mCalibrationActive) {
-#if DEBUG_CALLBACK_FILTERS
-    static int filterDebugCounter = 0;
-    if (++filterDebugCounter <= 5 || filterDebugCounter % 500 == 0) {
-#ifdef _IS_ANDROID_
-      __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
-                          "[Capture CB #%d] hasFilters=true calibActive=%d",
-                          filterDebugCounter, userData->mCalibrationActive);
-#endif
-      aecLog("[Capture CB #%d] hasFilters=true calibActive=%d\n",
-             filterDebugCounter, userData->mCalibrationActive);
-    }
-#endif
-    // Set the capture frame count for AEC position-based sync BEFORE
-    // processing. This is the frame count at the START of this block (before
-    // we increment).
-    size_t captureFrameCount =
-        userData->mTotalFramesCaptured.load(std::memory_order_acquire);
-    userData->mFilters->setAecCaptureFrameCount(captureFrameCount);
-
-    // Thread-safe filter processing (protects against concurrent
-    // addFilter/removeFilter)
-    userData->mFilters->processAllFilters(
-        captured, frameCount, captureChannels,
-        userData->deviceConfig.capture.format);
-  }
-#if DEBUG_CALLBACK_FILTERS
-  else {
-#ifdef _IS_ANDROID_
-    static int nullFilterDebugCounter = 0;
-    if (++nullFilterDebugCounter <= 5) {
-      __android_log_print(ANDROID_LOG_WARN, LOG_TAG,
-                          "[Capture CB] mFilters is NULL!");
-    }
-#endif
-  }
-#endif
+  // NOTE: the filter chain (AEC included) now runs at the TOP of the callback,
+  // right after format conversion — see "FILTERS FIRST" above. Recordings cut
+  // from the ring buffer, auto-record onset detection, visualization, energy
+  // and streaming all see the same cleaned signal.
 
   // Do something with the captured audio data...
   // LOCK-FREE: Write to the current write buffer, then swap atomically
