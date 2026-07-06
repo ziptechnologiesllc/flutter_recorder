@@ -38,14 +38,6 @@ constexpr float kSpikeRatio = 25.0f;   // block residual > 25x floor = near-end
 // self-heals by averaging — the core LSAEC premise.
 constexpr float kFreezeMinConf = 6.0f; // passes before the detector may freeze
 constexpr float kBaseRate = 0.08f;     // residual-floor EMA rate per block
-// Robust update clamp: bound each sample's learning contribution to a few x
-// the block's residual RMS so one plosive/drum hit can't stamp a spike into a
-// single phase of E (those spikes replay every pass = the "crackle" artifact).
-constexpr float kUpdateClipK = 4.0f;
-// Layer-add re-heat: when a new loop layer starts playing the echo path grows;
-// scale confidence down so alpha re-heats and the new component is learned in
-// a few passes instead of ~1/kAlphaMin (the long noisy transition window).
-constexpr float kLayerReheatScale = 0.2f;
 constexpr float kEps = 1e-12f;
 
 // Maximum supported loop period: 16 s. Sized once at construction so process()
@@ -112,19 +104,6 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
 
   const int64_t P = loopFrames;
 
-  // Layer added/removed: re-heat alpha by scaling confidence down so the new
-  // echo component is learned in a few passes. Applied here on the audio
-  // thread (single writer of mConfidence); ~P floats, well under the callback
-  // budget, and only on layer-change events.
-  if (mReheatPending.exchange(false, std::memory_order_acq_rel)) {
-    const size_t pspan = static_cast<size_t>(P);
-    for (size_t i = 0; i < pspan; ++i)
-      mConfidence[i] *= kLayerReheatScale;
-    mResidBaseline = 0.0f; // the residual scale is about to change too
-    mLearnedBlocks = 0;
-    ++mReopenCount;
-  }
-
   // ---- Pass 1: cancel in place (out = mic - E[phi]); accumulate block residual.
   double blockResid = 0.0;
   for (unsigned int f = 0; f < frameCount; ++f) {
@@ -156,13 +135,6 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     }
   }
 
-  // Per-sample learning clamp derived from this block's residual RMS.
-  const float blockRms = std::sqrt(
-      static_cast<float>(blockResid) /
-          (static_cast<float>(frameCount) * static_cast<float>(channels)) +
-      static_cast<float>(kEps));
-  const float updCap = kUpdateClipK * blockRms;
-
   // ---- Pass 2: learn (annealed alpha, per-sample far-end gated) ----
   for (unsigned int f = 0; f < frameCount; ++f) {
     int64_t phi = (blockStartFrame + static_cast<int64_t>(f) - loopStartFrame) % P;
@@ -184,12 +156,8 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     const float c = mConfidence[pphi];
     const float alpha =
         kAlphaMin + (kAlphaMax - kAlphaMin) * std::exp(-c / kConfTau);
-    for (unsigned int ch = 0; ch < channels; ++ch) {
-      float u = micInOut[f * channels + ch];
-      // Robust clamp: a single loud event can't etch a spike into this phase.
-      u = std::min(std::max(u, -updCap), updCap);
-      mTemplate[base + ch] += alpha * u;
-    }
+    for (unsigned int ch = 0; ch < channels; ++ch)
+      mTemplate[base + ch] += alpha * micInOut[f * channels + ch];
     if (c < kConfMax)
       mConfidence[pphi] = c + 1.0f;
   }

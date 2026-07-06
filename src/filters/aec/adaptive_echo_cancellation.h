@@ -83,12 +83,6 @@ public:
    */
   AecTelemetrySnapshot getTelemetry() const { return mTelemetry.load(); }
 
-  /** LSAEC: a loop layer started/stopped — re-heat template learning. */
-  void notifyEchoPathChanged() {
-    if (mEchoTemplate)
-      mEchoTemplate->notifyEchoPathChanged();
-  }
-
   /**
    * Set the impulse response from calibration.
    * Pre-initializes NLMS filter coefficients for immediate cancellation.
