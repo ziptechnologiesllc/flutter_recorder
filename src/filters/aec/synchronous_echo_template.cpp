@@ -29,6 +29,14 @@ constexpr float kConfMax = 4096.0f; // confidence saturates (~enough passes)
 // block (per-frame thresholding thrashed — audio energy is too spiky).
 constexpr uint32_t kSettleBlocks = 64; // blocks to establish the baseline first
 constexpr float kSpikeRatio = 25.0f;   // block residual > 25x floor = near-end
+// Freeze only where the template has CONVERGED (enough passes at these
+// phases). Before that, a residual spike is just the loop's own transients
+// not yet learned — freezing there starves exactly the loudest phases forever
+// (they never converge, so they always spike, so they always freeze: the
+// "display converges but I still hear the hits" failure). While confidence is
+// low we learn unconditionally; performer bleed is period-incoherent and
+// self-heals by averaging — the core LSAEC premise.
+constexpr float kFreezeMinConf = 6.0f; // passes before the detector may freeze
 constexpr float kBaseRate = 0.08f;     // residual-floor EMA rate per block
 constexpr float kEps = 1e-12f;
 
@@ -114,11 +122,17 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
   if (!learn)
     return; // cancel only
 
-  // ---- Block-level double-talk freeze ----
-  if (mLearnedBlocks >= kSettleBlocks &&
-      blockResid > kSpikeRatio * (static_cast<double>(mResidBaseline) + kEps)) {
-    ++mFreezeCount;
-    return; // near-end -> do not update E this block
+  // ---- Block-level double-talk freeze (confidence-gated) ----
+  {
+    const int64_t phi0 =
+        ((blockStartFrame - loopStartFrame) % P + P) % P;
+    const float blockConf = mConfidence[static_cast<size_t>(phi0)];
+    if (mLearnedBlocks >= kSettleBlocks && blockConf >= kFreezeMinConf &&
+        blockResid >
+            kSpikeRatio * (static_cast<double>(mResidBaseline) + kEps)) {
+      ++mFreezeCount;
+      return; // near-end over a converged template -> do not update E
+    }
   }
 
   // ---- Pass 2: learn (annealed alpha, per-sample far-end gated) ----
