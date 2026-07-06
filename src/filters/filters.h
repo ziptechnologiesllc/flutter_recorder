@@ -96,6 +96,11 @@ public:
   unsigned int mSamplerate;
   unsigned int mChannels;
 
+  // AEC mode requested before/after the filter exists. setAecMode always
+  // stores here; addFilter applies it to a freshly created AEC instance so a
+  // mode set at boot (before saved-calibration adds the filter) is not lost.
+  AecMode mRequestedAecMode = aecModeAlgo;
+
   std::vector<std::unique_ptr<FilterObject>> filters;
   mutable std::mutex mFiltersMutex;  // Protects 'filters' vector for thread-safety
 

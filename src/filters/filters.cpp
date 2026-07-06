@@ -71,6 +71,8 @@ CaptureErrors Filters::addFilter(RecorderFilterType filterType) {
   case adaptiveEchoCancellation:
     newFilter =
         std::make_unique<AdaptiveEchoCancellation>(mSamplerate, mChannels);
+    static_cast<AdaptiveEchoCancellation *>(newFilter.get())
+        ->setAecMode(mRequestedAecMode);
     break;
   default:
     return CaptureErrors::filterNotFound;
@@ -365,6 +367,7 @@ const std::vector<float> &Filters::getAecAlignedMic() const {
 }
 
 void Filters::setAecMode(AecMode mode) {
+  mRequestedAecMode = mode; // survives filter add/remove; applied in addFilter
   int idx = isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
     return;

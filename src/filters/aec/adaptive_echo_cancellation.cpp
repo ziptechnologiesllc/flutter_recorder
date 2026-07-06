@@ -4,6 +4,7 @@
 #include "neural_post_filter.h"
 #include "../../soloud_slave_bridge.h"
 #include "../../native_scheduler.h" // LSAEC: known loop period P + start frame
+#include "../../audio_engine/audio_engine.h" // LSAEC: engine frame for div diag
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -598,8 +599,15 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     // glitch / period mismatch). Disambiguates the degradation cause.
     static int lsLogCount = 0;
     if (++lsLogCount % 300 == 0) {
-      aecLog("[LSAEC] P=%lld conf=%.3f freeze=%u\n", (long long)lsLoopFrames,
-             mEchoTemplate->meanConfidence(), mEchoTemplate->freezeCount());
+      // div = capture-counter vs engine-frame offset. It MUST be constant:
+      // any movement means the template's phase source is slipping against
+      // the loop origin (template smears, ERLE oscillates without converging).
+      aecLog("[LSAEC] P=%lld conf=%.3f freeze=%u div=%lld\n",
+             (long long)lsLoopFrames, mEchoTemplate->meanConfidence(),
+             mEchoTemplate->freezeCount(),
+             (long long)(static_cast<int64_t>(mCaptureFrameCount) -
+                         flowstate::audio_engine::AudioEngine::instance()
+                             .getCurrentFrame()));
     }
   }
 

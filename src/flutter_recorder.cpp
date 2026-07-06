@@ -224,6 +224,23 @@ static void looperWorkerThreadFunc() {
             LOOPER_LOG("Playback started: hash=%u handle=%u duration=%.3fs",
                     soundHash, handle, durationSeconds);
 
+            // LSAEC: replayed/session-loaded loops never pass through the
+            // recording-stop path that registers the base loop, leaving the
+            // scheduler at loopFrames=0 and the template disengaged. Register
+            // it here as a fallback. The phase ORIGIN only needs to be
+            // constant (modular offset), so the current engine frame is fine;
+            // the PERIOD is exact (sample count from the loaded audio).
+            if (NativeScheduler::instance().getBaseLoopFrames() == 0 &&
+                g_lastRecordedChannels > 0) {
+              int64_t loopFrames =
+                  (int64_t)(numSamples / g_lastRecordedChannels);
+              int64_t nowFrame = flowstate::audio_engine::AudioEngine::
+                  instance().getCurrentFrame();
+              NativeScheduler::instance().setBaseLoop(loopFrames, nowFrame);
+              LOOPER_LOG("Base loop registered from replay: P=%lld start=%lld",
+                         (long long)loopFrames, (long long)nowFrame);
+            }
+
             // Notify Dart via callback (if set)
             // Pass wavPath so Dart can match this playback to the correct recording
             if (dartLooperPlaybackStartedCallback != nullptr) {
