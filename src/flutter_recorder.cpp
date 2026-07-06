@@ -1559,6 +1559,21 @@ FFI_PLUGIN_EXPORT float flutter_recorder_aec_getVssMuMax() {
   return 0.5f; // Default
 }
 
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_getTelemetry(double *out) {
+  if (!out)
+    return;
+  AecTelemetrySnapshot t =
+      mFilters ? mFilters->getAecTelemetry() : AecTelemetrySnapshot{};
+  out[0] = t.micEnergyFar;
+  out[1] = t.outEnergyFar;
+  out[2] = t.micEnergyAll;
+  out[3] = t.outEnergyAll;
+  out[4] = t.refEnergyAll;
+  out[5] = static_cast<double>(t.farSamples);
+  out[6] = static_cast<double>(t.totalSamples);
+  out[7] = static_cast<double>(t.generation);
+}
+
 FFI_PLUGIN_EXPORT float flutter_recorder_aec_getVssLeakage() {
   if (mFilters) {
     return mFilters->getAecVssLeakage();

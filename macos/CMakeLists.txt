@@ -25,6 +25,7 @@ set(PLUGIN_SOURCES
   "${SRC_DIR}/filters/aec/calibration.cpp"
   "${SRC_DIR}/filters/aec/delay_estimator.cpp"
   "${SRC_DIR}/filters/aec/drift_aligner.cpp"
+  "${SRC_DIR}/filters/aec/synchronous_echo_template.cpp"
   "${SRC_DIR}/filters/aec/neural_post_filter.cpp"
   "${SRC_DIR}/filters/aec/reference_buffer.cpp"
   "${SRC_DIR}/filters/aec/vss_nlms_filter.cpp"

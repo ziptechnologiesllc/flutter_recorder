@@ -1,6 +1,7 @@
 // ignore_for_file: avoid_positional_boolean_parameters
 
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter_recorder/src/audio_data_container.dart';
@@ -60,6 +61,80 @@ class CallbackStats {
   String toString() => 'CallbackStats(last=${lastMicros}us '
       'max=${maxMicros}us budget=${budgetMicros}us '
       'overruns=$overrunCount/$totalCount nearMiss=$nearMissCount)';
+}
+
+/// LSAEC E5 gated-ERLE telemetry snapshot. Energies are windowed SUMS published
+/// by the audio thread once per ~0.25 s; all dB math is done HERE, off the
+/// real-time thread. "Far" = far-end (speaker) active — ERLE is gated to those
+/// samples so a filter that eats the performer reads as LOW ERLE, not high.
+class AecTelemetry {
+  const AecTelemetry({
+    required this.micEnergyFar,
+    required this.outEnergyFar,
+    required this.micEnergyAll,
+    required this.outEnergyAll,
+    required this.refEnergyAll,
+    required this.farSamples,
+    required this.totalSamples,
+    required this.generation,
+  });
+
+  /// Σ mic² over far-end-active samples (gated ERLE numerator).
+  final double micEnergyFar;
+
+  /// Σ output² (final, post-cancellation) over far-end-active samples.
+  final double outEnergyFar;
+
+  /// Σ mic² over all samples in the window.
+  final double micEnergyAll;
+
+  /// Σ output² over all samples in the window.
+  final double outEnergyAll;
+
+  /// Σ reference² over all samples in the window.
+  final double refEnergyAll;
+
+  /// Far-end-active samples in the window.
+  final int farSamples;
+
+  /// Total samples in the window.
+  final int totalSamples;
+
+  /// Increments each published window (detects a stalled audio thread).
+  final int generation;
+
+  static const AecTelemetry zero = AecTelemetry(
+    micEnergyFar: 0,
+    outEnergyFar: 0,
+    micEnergyAll: 0,
+    outEnergyAll: 0,
+    refEnergyAll: 0,
+    farSamples: 0,
+    totalSamples: 0,
+    generation: 0,
+  );
+
+  /// Fraction of the window where the speaker (far end) was actually playing.
+  double get farActiveFraction =>
+      totalSamples > 0 ? farSamples / totalSamples : 0;
+
+  /// Gated echo-return-loss in dB: how much quieter the recorded output is than
+  /// the mic input, measured ONLY over far-end-active samples. Higher = better
+  /// cancellation; negative means the filter is ADDING energy (divergence).
+  /// Null when there isn't enough far-end signal to judge.
+  double? get gatedErleDb {
+    if (farSamples == 0 || micEnergyFar <= 0 || outEnergyFar <= 0) return null;
+    return 10.0 * (math.log(micEnergyFar / outEnergyFar) / math.ln10);
+  }
+
+  @override
+  String toString() {
+    final erle = gatedErleDb;
+    final erleStr = erle == null ? 'n/a' : '${erle.toStringAsFixed(1)}dB';
+    return 'AecTelemetry(gatedERLE=$erleStr '
+        'farActive=${(farActiveFraction * 100).toStringAsFixed(0)}% '
+        'gen=$generation)';
+  }
 }
 
 /// Use this class to _capture_ audio (such as from a microphone).
@@ -606,6 +681,11 @@ abstract class RecorderImpl {
   /// Get current VSS-NLMS maximum step size.
   @mustBeOverridden
   double aecGetVssMuMax();
+
+  /// LSAEC E5: read the lock-free gated-ERLE telemetry snapshot. Cheap; safe to
+  /// poll at ~10 Hz. Returns [AecTelemetry.zero] when the AEC filter is absent.
+  @mustBeOverridden
+  AecTelemetry aecGetTelemetry();
 
   /// Get current VSS-NLMS leakage factor.
   @mustBeOverridden

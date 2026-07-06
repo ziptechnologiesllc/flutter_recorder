@@ -1172,6 +1172,26 @@ class RecorderFfi extends RecorderImpl {
   }
 
   @override
+  AecTelemetry aecGetTelemetry() {
+    final out = calloc<ffi.Double>(8);
+    try {
+      _bindings.flutter_recorder_aec_getTelemetry(out);
+      return AecTelemetry(
+        micEnergyFar: out[0],
+        outEnergyFar: out[1],
+        micEnergyAll: out[2],
+        outEnergyAll: out[3],
+        refEnergyAll: out[4],
+        farSamples: out[5].toInt(),
+        totalSamples: out[6].toInt(),
+        generation: out[7].toInt(),
+      );
+    } finally {
+      calloc.free(out);
+    }
+  }
+
+  @override
   double aecGetVssLeakage() {
     return _bindings.flutter_recorder_aec_getVssLeakage();
   }

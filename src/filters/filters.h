@@ -65,6 +65,9 @@ public:
   void setAecFilterLength(int length);
   int getAecFilterLength() const;
 
+  // LSAEC E5: lock-free gated-ERLE telemetry snapshot (zeroed if no AEC filter).
+  AecTelemetrySnapshot getAecTelemetry() const;
+
   // Sample-accurate AEC synchronization
   // Call before processing filters with current capture frame count
   void setAecCaptureFrameCount(size_t captureFrameCount);

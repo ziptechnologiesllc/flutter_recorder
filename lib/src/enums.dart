@@ -282,7 +282,12 @@ enum AecMode {
   frozen(4),
 
   /// Frozen FIR + Neural Post-Filter (best for transients with neural cleanup)
-  frozenNeural(5);
+  frozenNeural(5),
+
+  /// Loop-synchronous echo template (LSAEC): per-loop-phase echo estimate,
+  /// no adaptive weights (cannot diverge). Requires slave mode + a recorded
+  /// loop; until a loop exists it behaves like [algo].
+  lsaec(6);
 
   final int value;
   const AecMode(this.value);
@@ -294,6 +299,7 @@ enum AecMode {
         3 => hybrid,
         4 => frozen,
         5 => frozenNeural,
+        6 => lsaec,
         _ => throw ArgumentError('Unknown value for AecMode: $value'),
       };
 }

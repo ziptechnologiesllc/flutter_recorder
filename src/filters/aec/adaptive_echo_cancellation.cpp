@@ -3,6 +3,7 @@
 
 #include "neural_post_filter.h"
 #include "../../soloud_slave_bridge.h"
+#include "../../native_scheduler.h" // LSAEC: known loop period P + start frame
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -12,9 +13,7 @@
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
-#if TARGET_OS_MAC && !TARGET_OS_IPHONE
 #include <Foundation/Foundation.h>
-#endif
 #endif
 
 // Get sandbox-accessible temp directory
@@ -27,6 +26,14 @@ static std::string getTempDir() {
   NSString *tempDir = NSTemporaryDirectory();
   if (tempDir) {
     return std::string([tempDir UTF8String]);
+  }
+#else
+  // iOS: /tmp is NOT writable. Use the app's Documents dir (pullable over USB
+  // via afcclient --documents now that UIFileSharingEnabled is set).
+  NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                       NSUserDomainMask, YES);
+  if ([paths count] > 0) {
+    return std::string([[paths objectAtIndex:0] UTF8String]) + "/";
   }
 #endif
 #endif
@@ -88,6 +95,11 @@ AdaptiveEchoCancellation::AdaptiveEchoCancellation(unsigned int sampleRate,
   // the audio thread).
   mDriftAligner =
       std::make_unique<DriftAligner>(sampleRate, channels);
+
+  // LSAEC loop-synchronous echo template (preallocates its per-phase tables
+  // here, off the audio thread).
+  mEchoTemplate =
+      std::make_unique<SynchronousEchoTemplate>(sampleRate, channels);
 }
 
 int AdaptiveEchoCancellation::getParamCount() const { return ParamCount; }
@@ -251,6 +263,20 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   size_t framesRead = 0;
   bool dcraActive = false; // true when the DriftAligner is driving the read
 
+  // LSAEC: in slave mode with a KNOWN loop period, the loop-synchronous echo
+  // template replaces the NLMS/shadow/promotion stack. The loop period P and
+  // start frame are exact (the engine scheduled them); mCaptureFrameCount is
+  // the engine frame of this block — same coordinate as loopStartFrame — so the
+  // loop phase is pure arithmetic, no estimation.
+  int64_t lsLoopFrames = 0;
+  int64_t lsLoopStart = 0;
+  bool useTemplate = false;
+  if (mAecMode == aecModeLsaec && soloud_isSlaveMode() && mEchoTemplate) {
+    lsLoopFrames = NativeScheduler::instance().getBaseLoopFrames();
+    lsLoopStart = NativeScheduler::instance().getBaseLoopStartFrame();
+    useTemplate = (lsLoopFrames > 0);
+  }
+
   if (soloud_isSlaveMode()) {
     // SLAVE MODE: Reference was written in the SAME callback, perfectly time-aligned.
     // We only need to apply the ACOUSTIC delay, not the full calibratedOffset
@@ -281,14 +307,26 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
         framesRead = g_aecReferenceBuffer->readFramesAtPosition(
             mRefBuffer.data(), frameCount, totalWritten - frameCount);
       }
+    } else if (useTemplate) {
+      // LSAEC E1 — DETERMINISTIC reference read. In slave mode the reference
+      // was written in THIS callback (same clock), so the echo-aligned
+      // reference is just a fixed integer offset back by the acoustic delay —
+      // NO drift estimation, no cross-correlation. This reference is used only
+      // for far-end gating of the template (it learns the echo from the mic).
+      if (totalWritten >= frameCount + effectiveDelay) {
+        framesRead = g_aecReferenceBuffer->readFramesAtPosition(
+            mRefBuffer.data(), frameCount,
+            totalWritten - frameCount - effectiveDelay);
+      } else {
+        // Not enough history yet: present silence to the gate (no learning)
+        // but still let the template run (passthrough output while E is empty).
+        std::fill(mRefBuffer.begin(), mRefBuffer.begin() + totalSamples, 0.0f);
+        framesRead = frameCount;
+      }
     } else {
-      // NORMAL AEC PATH — DRIFT-COMPENSATED reference read. Capture & playback
-      // run on independent clocks (miniaudio bridges them with a drift-free
-      // ring buffer), so a fixed integer read offset lets the echo path WALK
-      // and the filter cannot stay converged. The DriftAligner advances a
-      // fractional read pointer at the clock-drift-corrected rate so the FIR
-      // sees a stationary echo path. effectiveDelay seeds the bulk delay until
-      // the estimator locks.
+      // LEGACY NORMAL AEC PATH — DRIFT-COMPENSATED reference read for the NLMS
+      // stack (used when there is no known loop period). The DriftAligner
+      // advances a fractional read pointer at the clock-drift-corrected rate.
       framesRead = mDriftAligner->produceAligned(
           g_aecReferenceBuffer, mRefBuffer.data(), frameCount, effectiveDelay);
       dcraActive = (framesRead > 0);
@@ -397,7 +435,8 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   static int dumpFrames = 0;
   static bool dumpArmed = false;
   static bool dumpDone = false;
-  static const int MAX_DUMP_FRAMES = 48000 * 5; // 5 seconds
+  static const int MAX_DUMP_FRAMES = 48000 * 30; // 30 s — span several loops to
+                                                 // measure period/drift offline
   static std::string tempDir;
 
 #ifndef __ANDROID__
@@ -500,9 +539,9 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       totalRefEnergyForCorr += refSample * refSample;
       debugSamples++;
 
-      float error = micSample; // Bypass/Neural default — skip linear stage
+      float error = micSample; // Bypass/Neural/LSAEC default — skip linear stage
 
-      if (linearStage) {
+      if (linearStage && !useTemplate) {
         // Foreground is frozen: produces the cancelled output the user hears
         // using the last promoted weights — never corrupted by live adaptation.
         error = mVssFilters[ch]->processSample(refSample, micSample);
@@ -543,6 +582,27 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     }
   }
 
+  // ---- LSAEC: loop-synchronous echo template ----------------------------
+  // When a loop period is known (slave mode), the linear stage above left the
+  // RAW mic in mLinearOutputBuffer; the template cancels it in place by
+  // subtracting the per-phase echo estimate E[phi] and learning it via a
+  // far-end-gated synchronous average. No weights -> cannot diverge. (E3's
+  // transient freeze will gate `learn` per block; for now we always learn.)
+  if (useTemplate) {
+    mEchoTemplate->process(mLinearOutputBuffer.data(), mRefBuffer.data(),
+                           frameCount, channels,
+                           static_cast<int64_t>(mCaptureFrameCount),
+                           lsLoopFrames, lsLoopStart, /*learn=*/true);
+    // Cheap E3 diagnostics (counter reads only): freeze climbing => near-end
+    // being detected; reopen climbing => E was found stale (echo changed /
+    // glitch / period mismatch). Disambiguates the degradation cause.
+    static int lsLogCount = 0;
+    if (++lsLogCount % 300 == 0) {
+      aecLog("[LSAEC] P=%lld conf=%.3f freeze=%u\n", (long long)lsLoopFrames,
+             mEchoTemplate->meanConfidence(), mEchoTemplate->freezeCount());
+    }
+  }
+
   // ---- Shadow-filter promotion (settled-snapshot / Polyak-Ruppert) -------
   // We promote a per-channel EMA of the background weights (the candidate,
   // mShadow[ch].candWeights), NOT the background's instantaneous noisy weights —
@@ -555,7 +615,7 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   // floor), which keeps high-misadjustment iterates out of the average and is
   // also the double-talk guard (near-end raises the residual -> raises the
   // ratio -> halts ingest).
-  if (adaptiveMode) {
+  if (adaptiveMode && !useTemplate) {
     const size_t kShadowPromoteBlock = 2048;   // ~43 ms @ 48 kHz
     const double kShadowPromoteMargin = 0.95;  // candidate must beat fg by >=5%
     const float kShadowMaxCoeff = 50.0f;       // divergence sanity ceiling
@@ -649,15 +709,59 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   // SECOND STAGE: Neural Post-Filter
   // This stage runs on the output of the linear stage to remove
   // residual echo and non-linearities.
-  if (mAecMode == aecModeNeural || mAecMode == aecModeHybrid ||
-      mAecMode == aecModeFrozenNeural) {
+  // (LSAEC isolates the template for now — neural runs only on the legacy path.)
+  if (!useTemplate &&
+      (mAecMode == aecModeNeural || mAecMode == aecModeHybrid ||
+       mAecMode == aecModeFrozenNeural)) {
     mNeuralFilter->process(mLinearOutputBuffer.data(), mRefBuffer.data(),
                            mLinearOutputBuffer.data(), frameCount);
   }
 
-  // Write final results back to the original input buffer
-  for (unsigned int i = 0; i < totalSamples; ++i) {
-    input[i] = denormalizeSample<T>(mLinearOutputBuffer[i]);
+  // Write final results back to the original input buffer, accumulating LSAEC
+  // E5 gated-ERLE telemetry in the SAME pass. At this point `input` still holds
+  // the original mic (it is overwritten below) and mLinearOutputBuffer holds
+  // the FINAL output (post linear + neural) — exactly what gets recorded. The
+  // audio thread does only adds/compares here; all dB math is deferred to the
+  // Dart-side poller. "Far-end-active" gates ERLE to samples where the speaker
+  // is actually playing, so a filter that eats the performer shows up as low
+  // ERLE rather than being rewarded for it.
+  {
+    constexpr float kFarEndFloor = 1e-6f; // ~-60 dB smoothed ref power
+    const uint64_t kTelemetryWindow =
+        static_cast<uint64_t>(mSampleRate) * channels / 4; // ~0.25 s
+    for (unsigned int i = 0; i < totalSamples; ++i) {
+      const float micS = normalizeSample(input[i]);
+      const float outS = mLinearOutputBuffer[i];
+      const float refS = mRefBuffer[i];
+      mRefPowerEma = 0.99f * mRefPowerEma + 0.01f * (refS * refS);
+      const double micE = static_cast<double>(micS) * micS;
+      const double outE = static_cast<double>(outS) * outS;
+      mTwMicAll += micE;
+      mTwOutAll += outE;
+      mTwRefAll += static_cast<double>(refS) * refS;
+      if (mRefPowerEma > kFarEndFloor) {
+        mTwMicFar += micE;
+        mTwOutFar += outE;
+        ++mTwFar;
+      }
+      ++mTwTotal;
+      input[i] = denormalizeSample<T>(outS);
+    }
+    if (mTwTotal >= kTelemetryWindow) {
+      AecTelemetrySnapshot snap;
+      snap.micEnergyFar = mTwMicFar;
+      snap.outEnergyFar = mTwOutFar;
+      snap.micEnergyAll = mTwMicAll;
+      snap.outEnergyAll = mTwOutAll;
+      snap.refEnergyAll = mTwRefAll;
+      snap.farSamples = mTwFar;
+      snap.totalSamples = mTwTotal;
+      snap.generation = ++mTelemetryGen;
+      mTelemetry.store(snap);
+      mTwMicFar = mTwOutFar = 0.0;
+      mTwMicAll = mTwOutAll = mTwRefAll = 0.0;
+      mTwFar = mTwTotal = 0;
+    }
   }
 
   // Debug output every ~1s (~500 callbacks at 256 frames/callback @ 48kHz)
@@ -730,7 +834,15 @@ void AdaptiveEchoCancellation::reset() {
   }
   if (mDriftAligner)
     mDriftAligner->reset();
+  if (mEchoTemplate)
+    mEchoTemplate->reset();
   mBlockSamples = 0;
+
+  // E5 telemetry window accumulators (snapshot itself is left for the poller).
+  mTwMicFar = mTwOutFar = 0.0;
+  mTwMicAll = mTwOutAll = mTwRefAll = 0.0;
+  mTwFar = mTwTotal = 0;
+  mRefPowerEma = 0.0f;
 }
 
 float AdaptiveEchoCancellation::getEchoReturnLoss() const {
@@ -1039,6 +1151,11 @@ bool AdaptiveEchoCancellation::isCalibrationCaptureComplete() const {
 }
 
 void AdaptiveEchoCancellation::setAecMode(AecMode mode) {
+  // A/B hygiene: entering or leaving LSAEC clears the learned template so each
+  // comparison run converges from scratch (no stale echo estimate).
+  if (mEchoTemplate && (mode == aecModeLsaec) != (mAecMode == aecModeLsaec)) {
+    mEchoTemplate->reset();
+  }
   mAecMode = mode;
 
   // Mode names for logging

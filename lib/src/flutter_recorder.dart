@@ -1054,6 +1054,12 @@ interface class Recorder {
     return _impl.aecGetVssMuMax();
   }
 
+  /// LSAEC E5: read the lock-free gated-ERLE telemetry snapshot. Cheap; safe to
+  /// poll at ~10 Hz to track cancellation depth and divergence off the RT thread.
+  AecTelemetry aecGetTelemetry() {
+    return _impl.aecGetTelemetry();
+  }
+
   /// Get current VSS-NLMS leakage factor.
   double aecGetVssLeakage() {
     return _impl.aecGetVssLeakage();

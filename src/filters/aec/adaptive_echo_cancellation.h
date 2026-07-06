@@ -8,12 +8,17 @@
 #include "neural_post_filter.h"
 #include "nlms_filter.h"
 #include "reference_buffer.h"
+#include "synchronous_echo_template.h"
 #include "vss_nlms_filter.h"
 
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <vector>
+
+#include "../../audio_engine/seqlock.h"
+// AecTelemetrySnapshot is defined in enums.h (included above) so the FFI layer
+// (filters.h / flutter_recorder.cpp) can see it without pulling in this header.
 
 /**
  * Adaptive Echo Cancellation Filter using NLMS algorithm.
@@ -70,6 +75,13 @@ public:
    * Higher values indicate better echo cancellation.
    */
   float getEchoReturnLoss() const;
+
+  /**
+   * LSAEC E5: lock-free gated-ERLE telemetry snapshot. Safe to read from any
+   * thread (Dart poller). The audio thread is the single writer; all dB math
+   * is done by the reader, never on the RT thread.
+   */
+  AecTelemetrySnapshot getTelemetry() const { return mTelemetry.load(); }
 
   /**
    * Set the impulse response from calibration.
@@ -224,6 +236,11 @@ private:
   // reference read in the slave-mode path.
   std::unique_ptr<DriftAligner> mDriftAligner;
 
+  // LSAEC core: loop-synchronous echo template. In slave mode with a known loop
+  // period it REPLACES the NLMS/shadow/promotion stack — it cannot diverge
+  // (no weights) and rejects the period-incoherent performer by construction.
+  std::unique_ptr<SynchronousEchoTemplate> mEchoTemplate;
+
   // Delay in samples for reference signal alignment (fallback if no timestamp)
   unsigned int mDelaySamples;
 
@@ -239,6 +256,16 @@ private:
   std::unique_ptr<NeuralPostFilter> mNeuralFilter;
 
   AecStats mCurrentStats = {0};
+
+  // --- LSAEC E5 gated-ERLE telemetry (lock-free; published per ~0.25 s window).
+  // The audio thread accumulates windowed energy SUMS (adds/compares only) and
+  // publishes a snapshot via the seqlock; a Dart poller computes dB off-thread.
+  flowstate::audio_engine::Seqlock<AecTelemetrySnapshot> mTelemetry;
+  double mTwMicFar = 0.0, mTwOutFar = 0.0;                   // far-end-active sums
+  double mTwMicAll = 0.0, mTwOutAll = 0.0, mTwRefAll = 0.0;  // all-sample sums
+  uint64_t mTwFar = 0, mTwTotal = 0;                         // window sample counts
+  uint64_t mTelemetryGen = 0;                                // published-window counter
+  float mRefPowerEma = 0.0f;                                 // smoothed ref power (far gate)
 
   // Sample-accurate sync state
   size_t mCaptureFrameCount = 0; // Set before each process() call

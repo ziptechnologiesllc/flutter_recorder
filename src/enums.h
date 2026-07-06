@@ -1,6 +1,8 @@
 #ifndef ENUMS_H
 #define ENUMS_H
 
+#include <stdint.h>
+
 /// Possible capture errors
 typedef enum CaptureErrors {
   /// No error
@@ -45,8 +47,10 @@ typedef enum AecMode {
   aecModeAlgo = 1,       // Adaptive NLMS (legacy)
   aecModeNeural = 2,     // Neural post-filter only
   aecModeHybrid = 3,     // Adaptive NLMS + Neural
-  aecModeFrozen = 4,     // Frozen FIR (pure calibrated IR, no adaptation)
-  aecModeFrozenNeural = 5 // Frozen FIR + Neural post-filter
+  aecModeFrozen = 4,      // Frozen FIR (pure calibrated IR, no adaptation)
+  aecModeFrozenNeural = 5, // Frozen FIR + Neural post-filter
+  aecModeLsaec = 6         // Loop-synchronous echo template (slave mode + known
+                           // loop period; falls back to NLMS until a loop exists)
 } AecMode_t;
 
 typedef struct {
@@ -60,5 +64,20 @@ typedef struct {
   float lastErrorDb;        // Last error in dB
   float instantCorrelation; // Instantaneous correlation metric
 } AecStats;
+
+// LSAEC E5: lock-free gated-ERLE telemetry snapshot. The audio thread publishes
+// windowed energy SUMS (not dB) once per ~0.25 s; a Dart poller computes dB
+// off-thread. Plain trivially-copyable struct so it can ride a Seqlock<T>.
+// "Far" = far-end (speaker) active — ERLE must be gated to those samples only.
+struct AecTelemetrySnapshot {
+  double micEnergyFar; // Σ mic² over far-end-active samples (gated ERLE num.)
+  double outEnergyFar; // Σ out²(final) over far-end-active samples (denom.)
+  double micEnergyAll; // Σ mic² over all samples
+  double outEnergyAll; // Σ out²(final) over all samples
+  double refEnergyAll; // Σ ref² over all samples
+  uint64_t farSamples;   // far-end-active samples in the window
+  uint64_t totalSamples; // total samples in the window
+  uint64_t generation;   // increments each published window
+};
 
 #endif // ENUMS_H

@@ -23,7 +23,7 @@ export 'src/audio_engine/pitch_class_colors.dart'
         colorForPitchClass,
         namePitchClass,
         formatKey;
-export 'src/bindings/recorder.dart' show CallbackStats;
+export 'src/bindings/recorder.dart' show CallbackStats, AecTelemetry;
 export 'src/enums.dart'
     show
         AndroidInputPreset,

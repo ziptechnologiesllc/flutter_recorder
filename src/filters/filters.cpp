@@ -229,6 +229,16 @@ float Filters::getAecVssMuMax() const {
   return aec->getVssMuMax();
 }
 
+AecTelemetrySnapshot Filters::getAecTelemetry() const {
+  int idx =
+      const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return AecTelemetrySnapshot{}; // zeroed: AEC filter not active
+  AdaptiveEchoCancellation *aec =
+      static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get());
+  return aec->getTelemetry();
+}
+
 float Filters::getAecVssLeakage() const {
   int idx =
       const_cast<Filters *>(this)->isFilterActive(adaptiveEchoCancellation);

@@ -41,6 +41,7 @@ add_library(flutter_recorder SHARED
   "filters/aec/vss_nlms_filter.cpp"
   "filters/aec/delay_estimator.cpp"
   "filters/aec/drift_aligner.cpp"
+  "filters/aec/synchronous_echo_template.cpp"
 )
 
 set_target_properties(flutter_recorder PROPERTIES

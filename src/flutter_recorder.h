@@ -198,6 +198,13 @@ FFI_PLUGIN_EXPORT bool flutter_recorder_aec_isEnabled();
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_setMode(int mode);
 FFI_PLUGIN_EXPORT int flutter_recorder_aec_getMode();
 
+// LSAEC E5: gated-ERLE telemetry. Fills `out` (caller-allocated, length 8) from
+// ONE lock-free snapshot read so the values are mutually consistent:
+//   [0]=Σmic²(far) [1]=Σout²(far) [2]=Σmic²(all) [3]=Σout²(all)
+//   [4]=Σref²(all) [5]=farSamples [6]=totalSamples [7]=generation
+// The Dart poller computes gated ERLE = 10·log10(out[0]/out[1]) off-thread.
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_getTelemetry(double *out);
+
 /////////////////////////
 /// Neural Model Control
 /////////////////////////

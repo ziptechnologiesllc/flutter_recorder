@@ -1425,6 +1425,24 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_aec_getVssMuMax =
       _flutter_recorder_aec_getVssMuMaxPtr.asFunction<double Function()>();
 
+  /// LSAEC E5: fill `out` (length 8) from one lock-free telemetry snapshot.
+  /// Hand-added (not via ffigen regen, which churns unrelated unsigned-int
+  /// type mappings); uses only Double so it is regen-churn-free.
+  void flutter_recorder_aec_getTelemetry(
+    ffi.Pointer<ffi.Double> out,
+  ) {
+    return _flutter_recorder_aec_getTelemetry(
+      out,
+    );
+  }
+
+  late final _flutter_recorder_aec_getTelemetryPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Double>)>>(
+          'flutter_recorder_aec_getTelemetry');
+  late final _flutter_recorder_aec_getTelemetry =
+      _flutter_recorder_aec_getTelemetryPtr
+          .asFunction<void Function(ffi.Pointer<ffi.Double>)>();
+
   double flutter_recorder_aec_getVssLeakage() {
     return _flutter_recorder_aec_getVssLeakage();
   }
