@@ -1250,12 +1250,21 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
          BUFFER_SIZE, (BUFFER_SIZE * 1000.0f) / sampleRate, sampleRate);
 #endif
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+  // iOS: always use the default (session-routed) input. Explicit miniaudio
+  // device IDs are meaningless here — input selection goes through
+  // AVAudioSession routing, and enumeration returns nothing until a
+  // record-capable category is active, which only the CADuplex session
+  // owner sets (at start, after this init).
+  (void)deviceID;
+#else
   if (deviceID != -1) {
     auto devices = listCaptureDevices();
     if (devices.size() == 0 || deviceID >= devices.size())
       return captureInitFailed;
     deviceConfig.capture.pDeviceID = &pCaptureInfos[deviceID].id;
   }
+#endif
 
   ma_format format;
   switch (pcmFormat) {
@@ -1403,6 +1412,13 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
     device.capture.format = ma_format_f32;
     device.playback.channels = channels;
     device.playback.format = ma_format_f32;
+    // CRITICAL: caRenderAdapter hands data_callback &g_caDevice, NOT &device.
+    // The shim must carry the same negotiated fields — with g_caDevice zeroed,
+    // data_callback sees 0 channels / unknown formats: the slave mix memsets
+    // to silence, the output-format switch never writes pOutput, and the
+    // visualization loop iterates zero samples (the original "file records
+    // but playback/FFT dead" bug).
+    memcpy(&g_caDevice, &device, sizeof(device));
     g_caActive = true;
     result = MA_SUCCESS;
     printf("[Capture::init] CADuplex: single-unit RemoteIO duplex selected "
