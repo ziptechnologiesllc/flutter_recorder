@@ -87,6 +87,16 @@ public:
   void setAecMode(AecMode mode);
   AecMode getAecMode() const;
 
+  // LSAEC: the audible mix changed WITHOUT a loop-period change — a track
+  // was muted/unmuted/paused/stopped. The template is indexed by loop phase,
+  // not by mix content, so it keeps cancelling against a now-stale reference
+  // shape until it slowly relearns. This re-arms the same convergence-seed
+  // capture used for a brand-new loop (recapture one period of the NEW
+  // reference, reconvolve with the calibrated room IR) so cancellation
+  // catches up in ~1 pass instead of several. Cheap/safe to call often —
+  // internally gated so it's a no-op while a seed job is already in flight.
+  void notifyAecReferenceChanged();
+
   // Neural Model Control
   bool loadNeuralModel(NeuralModelType modelType, const std::string &assetBasePath);
   NeuralModelType getLoadedNeuralModel() const;
@@ -131,5 +141,12 @@ public:
     mFilterProcessCount.store(0, std::memory_order_relaxed);
   }
 };
+
+// The single global filter chain instance (flutter_recorder.cpp). Exposed
+// here, matching the g_soloudSetVolume-style extern-global convention already
+// used across this plugin, so same-plugin native code outside capture.cpp
+// (e.g. audio_engine.cpp's mute/pause handling) can reach it directly without
+// a new FFI surface.
+extern std::unique_ptr<Filters> mFilters;
 
 #endif // PLAYER_H

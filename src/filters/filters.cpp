@@ -366,6 +366,14 @@ const std::vector<float> &Filters::getAecAlignedMic() const {
   return aec->getAlignedMic();
 }
 
+void Filters::notifyAecReferenceChanged() {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get())
+      ->notifyReferenceChanged();
+}
+
 void Filters::setAecMode(AecMode mode) {
   mRequestedAecMode = mode; // survives filter add/remove; applied in addFilter
   int idx = isFilterActive(adaptiveEchoCancellation);

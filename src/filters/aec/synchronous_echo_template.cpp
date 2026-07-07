@@ -99,9 +99,10 @@ void SynchronousEchoTemplate::reset() {
   mLearnedBlocks = 0;
   mFreezeCount = 0;
   mReopenCount = 0;
-  // Abandon any in-progress capture/apply. A job the worker completes for the
-  // now-stale period is discarded by the period check in process() — no
-  // handshake needed with the worker thread here.
+  // Abandon any in-progress capture/job (bump the generation so a job the
+  // worker completes for this now-stale epoch is dropped at drain time
+  // without touching mSeedBusy — see mSeedGeneration comment in the header).
+  ++mSeedGeneration;
   mSeedBusy = false;
   mSeedCaptureRemaining = 0;
   mSeedApplyPos = 0;
@@ -117,6 +118,22 @@ void SynchronousEchoTemplate::seedWorkerLoop() {
     mSeedJobPosted.store(false, std::memory_order_release);
     mSeedOutputReady.store(true, std::memory_order_release);
   }
+}
+
+void SynchronousEchoTemplate::armSeedCaptureIfPossible(const float *alignedRef) {
+  if (mSeedBusy || !alignedRef)
+    return; // already capturing/awaiting a job, or nothing to capture from
+  bool haveSeed = false;
+  if (mSeedIRMutex.try_lock()) {
+    haveSeed = !mSeedIR.empty();
+    mSeedIRMutex.unlock();
+  }
+  if (!haveSeed)
+    return;
+  ++mSeedGeneration; // this arm owns a fresh epoch; no prior job can match it
+  mSeedBusy = true;
+  mSeedCaptureRemaining = mActiveLoopFrames;
+  mSeedApplyPos = 0;
 }
 
 void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
@@ -183,32 +200,36 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     mResidBaseline = 0.0f;
     mLearnedBlocks = 0;
 
-    // Arm a convergence-seed capture for the new period, if we have a
-    // calibrated IR and aren't already mid-seed for a (now stale) period.
-    // try_lock: setSeedImpulseResponse is rare and off the audio thread; on
-    // the vanishingly-unlikely contention case we just skip seeding this
-    // cycle and fall back to normal per-pass learning (always correct, just
-    // not fast).
-    if (!mSeedBusy && alignedRef) { // no reference this call -> can't capture, skip
-      bool haveSeed = false;
-      if (mSeedIRMutex.try_lock()) {
-        haveSeed = !mSeedIR.empty();
-        mSeedIRMutex.unlock();
-      }
-      if (haveSeed) {
-        mSeedBusy = true;
-        mSeedCaptureRemaining = loopFrames;
-        mSeedApplyPos = 0;
-      }
+    // A period change supersedes any pending mix-changed notification (the
+    // capture below already covers the new state) and abandons any old-period
+    // capture/job in flight: bump the generation so its late completion is
+    // discarded at drain time (below) without touching mSeedBusy, which the
+    // fresh arm immediately below is about to own for the NEW period.
+    mReferenceChangePending.store(false, std::memory_order_relaxed);
+    if (mSeedBusy) {
+      ++mSeedGeneration;
+      mSeedBusy = false;
     }
+    armSeedCaptureIfPossible(alignedRef);
+  } else if (mReferenceChangePending.exchange(false, std::memory_order_relaxed)) {
+    // Same period, but the audible mix changed (mute/unmute/pause/stop) — the
+    // template's phase content is now stale even though P didn't move.
+    // Re-arm WITHOUT touching mTemplate/mConfidence: unaffected phases keep
+    // cancelling with what they have until the reseed lands and overwrites.
+    // If a capture/job is already in flight (mSeedBusy), leave it running —
+    // it already reflects a NEWER change than whatever queued this notify.
+    armSeedCaptureIfPossible(alignedRef);
   }
 
   // Drain a finished seed job, chunked so any single callback's apply cost is
-  // bounded regardless of loop length. mSeedJobPeriod must still match the
-  // ACTIVE period — a job that finishes after a further period change (the
-  // capture was abandoned by the branch above) is stale and discarded here.
+  // bounded regardless of loop length. Only a job stamped with the CURRENT
+  // generation is applied — see mSeedGeneration comment in the header for why
+  // period alone isn't a sufficient staleness check (a quick mute-then-unmute
+  // can return to the same P). A stale job's completion is dropped WITHOUT
+  // touching mSeedBusy, which by then belongs to whatever was armed after
+  // the abandonment, not to this late-arriving job.
   if (mSeedOutputReady.load(std::memory_order_acquire)) {
-    if (mSeedJobPeriod == mActiveLoopFrames) {
+    if (mSeedJobGeneration == mSeedGeneration) {
       const int64_t end = std::min(mSeedApplyPos + kSeedApplyChunk, mActiveLoopFrames);
       for (int64_t phi = mSeedApplyPos; phi < end; ++phi) {
         const float v = mSeedOutput[static_cast<size_t>(phi)];
@@ -223,9 +244,7 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
         mSeedBusy = false;
       }
     } else {
-      // Stale job for an old period — drop it, no apply.
-      mSeedOutputReady.store(false, std::memory_order_relaxed);
-      mSeedBusy = false;
+      mSeedOutputReady.store(false, std::memory_order_relaxed); // stale; drop only
     }
   }
 
@@ -257,6 +276,7 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
       if (--mSeedCaptureRemaining == 0 &&
           !mSeedJobPosted.load(std::memory_order_relaxed)) {
         mSeedJobPeriod = P;
+        mSeedJobGeneration = mSeedGeneration; // stamp: which arm this job belongs to
         mSeedJobPosted.store(true, std::memory_order_release);
       }
     }

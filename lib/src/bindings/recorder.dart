@@ -17,6 +17,26 @@ export 'package:flutter_recorder/src/bindings/recorder_io.dart'
 /// Timing snapshot of the native audio callback. All durations in
 /// microseconds. A callback whose duration exceeds [budgetMicros] makes the
 /// device's next buffer late — that's an underrun, heard as a pop/click.
+/// One timed section of the audio callback (see capture.cpp section list).
+class CallbackSection {
+  const CallbackSection(this.name, this.lastMicros, this.maxMicros);
+
+  final String name;
+
+  /// Duration of this section in the most recent callback.
+  final int lastMicros;
+
+  /// Worst duration of this section since the last reset. Maxima are
+  /// per-section (not from the same callback), so they name the hog but
+  /// don't sum to [CallbackStats.maxMicros].
+  final int maxMicros;
+
+  @override
+  String toString() =>
+      '$name=${(lastMicros / 1000).toStringAsFixed(2)}/'
+      '${(maxMicros / 1000).toStringAsFixed(2)}ms';
+}
+
 class CallbackStats {
   const CallbackStats({
     required this.lastMicros,
@@ -25,6 +45,7 @@ class CallbackStats {
     required this.overrunCount,
     required this.nearMissCount,
     required this.totalCount,
+    this.sections = const [],
   });
 
   /// Duration of the most recent callback.
@@ -44,6 +65,9 @@ class CallbackStats {
 
   /// Total callbacks measured since the last reset.
   final int totalCount;
+
+  /// Per-section breakdown (aec, ring, sched, mix, post) — last/max micros.
+  final List<CallbackSection> sections;
 
   static const CallbackStats zero = CallbackStats(
     lastMicros: 0,

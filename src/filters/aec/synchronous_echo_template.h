@@ -79,6 +79,23 @@ public:
     mLearnBoost.store(b < 1.0f ? 1.0f : b, std::memory_order_relaxed);
   }
 
+  /**
+   * The audible mix changed WITHOUT a loop-period change (a track was
+   * muted/unmuted/paused/stopped). E[phi] is indexed by loop phase, not by
+   * mix content, so it keeps cancelling against the OLD mix shape until
+   * ordinary per-pass learning slowly corrects it. This re-arms the same
+   * convergence-seed capture used for a brand-new loop period — recapture
+   * one period of the NEW reference, reconvolve with the calibrated room IR
+   * — WITHOUT wiping the existing template first (unaffected phases keep
+   * cancelling normally during the ~1-period gap until the reseed lands).
+   * RT-safe from any thread: sets a flag; process() performs the actual arm
+   * on the audio thread, where alignedRef is available. Safe/cheap to call
+   * often — a no-op while a seed job is already in flight.
+   */
+  void notifyReferenceChanged() {
+    mReferenceChangePending.store(true, std::memory_order_relaxed);
+  }
+
   /** Clear all learned echo (on enable/disable/reset). */
   void reset();
 
@@ -149,6 +166,21 @@ private:
   // to normal per-pass learning for that cycle, no correctness issue).
   bool mSeedBusy = false;
   int64_t mSeedCaptureRemaining = 0; // frames left to capture this period
+  // Set by notifyReferenceChanged() (any thread); consumed by process() on
+  // the audio thread, which is the only thread allowed to touch mSeedBusy et al.
+  std::atomic<bool> mReferenceChangePending{false};
+  // Monotonic, audio-thread-only "epoch" for the capture/job currently owned
+  // by mSeedBusy. Bumped on every arm AND on abandonment (a period change
+  // while a capture/job was in flight). A posted job is stamped with the
+  // generation it belongs to; at drain time only a job whose stamp still
+  // matches mSeedGeneration is applied — an abandoned job's late completion
+  // is dropped WITHOUT touching mSeedBusy, which by then belongs to whatever
+  // capture was armed after the abandonment. (Comparing loop PERIOD alone
+  // isn't sufficient: a quick mute-then-unmute can return to the same P,
+  // which would let a stale job masquerade as current.)
+  int64_t mSeedGeneration = 0;
+  int64_t mSeedJobGeneration = -1; // audio-thread-only; worker never reads this
+  void armSeedCaptureIfPossible(const float *alignedRef); // audio-thread only
   std::vector<float> mRefCapture;    // mono, pre-sized to capacity — RT-safe
 
   // Handoff to the worker thread. mSeedJobPosted: audio thread sets true when

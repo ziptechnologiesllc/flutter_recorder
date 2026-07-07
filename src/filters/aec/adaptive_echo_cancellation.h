@@ -84,6 +84,18 @@ public:
   AecTelemetrySnapshot getTelemetry() const { return mTelemetry.load(); }
 
   /**
+   * LSAEC: the audible mix changed without a loop-period change (a track was
+   * muted/unmuted/paused/stopped). Re-arms the template's convergence-seed
+   * capture for the CURRENT period so cancellation catches up in ~1 pass
+   * instead of relearning via ordinary per-pass EMA. No-op if LSAEC isn't
+   * active or a seed job is already in flight.
+   */
+  void notifyReferenceChanged() {
+    if (mEchoTemplate)
+      mEchoTemplate->notifyReferenceChanged();
+  }
+
+  /**
    * Set the impulse response from calibration.
    * Pre-initializes NLMS filter coefficients for immediate cancellation.
    *

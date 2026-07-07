@@ -276,6 +276,17 @@ std::atomic<int64_t> g_cbTotalCount{0};    // callbacks measured
 std::atomic<int64_t> g_cbOverrunCount{0};  // callbacks that blew the budget
 std::atomic<int64_t> g_cbNearMissCount{0}; // callbacks over 80% of budget
 
+// Per-section breakdown of the callback: where does the budget actually go?
+// Sections (in callback flow order):
+//   0 aec   — input format conversion + filter chain (LSAEC lives here)
+//   1 ring  — native ring buffer write
+//   2 sched — auto-record detector + scheduler events + audio engine tick
+//   3 mix   — SoLoud slave mix render
+//   4 post  — metronome, AEC reference write, monitoring, output conversion
+constexpr int kCbSections = 5;
+std::atomic<int64_t> g_cbSectionLastMicros[kCbSections] = {};
+std::atomic<int64_t> g_cbSectionMaxMicros[kCbSections] = {};
+
 void captureGetCallbackStats(int64_t *out) {
   if (out == nullptr)
     return;
@@ -285,6 +296,10 @@ void captureGetCallbackStats(int64_t *out) {
   out[3] = g_cbOverrunCount.load(std::memory_order_relaxed);
   out[4] = g_cbNearMissCount.load(std::memory_order_relaxed);
   out[5] = g_cbTotalCount.load(std::memory_order_relaxed);
+  for (int s = 0; s < kCbSections; ++s) {
+    out[6 + s * 2] = g_cbSectionLastMicros[s].load(std::memory_order_relaxed);
+    out[7 + s * 2] = g_cbSectionMaxMicros[s].load(std::memory_order_relaxed);
+  }
 }
 
 void captureResetCallbackStats() {
@@ -292,6 +307,9 @@ void captureResetCallbackStats() {
   g_cbOverrunCount.store(0, std::memory_order_relaxed);
   g_cbNearMissCount.store(0, std::memory_order_relaxed);
   g_cbTotalCount.store(0, std::memory_order_relaxed);
+  for (int s = 0; s < kCbSections; ++s) {
+    g_cbSectionMaxMicros[s].store(0, std::memory_order_relaxed);
+  }
 }
 
 namespace {
@@ -300,17 +318,49 @@ namespace {
 struct CallbackTimer {
   const std::chrono::steady_clock::time_point start;
   const int64_t budgetMicros;
+  // Section marks (flow order); initialized to `start` so a section a return
+  // path never reaches reports 0. Set by data_callback as it passes each
+  // boundary; the dtor turns consecutive marks into per-section durations.
+  std::chrono::steady_clock::time_point markAec;
+  std::chrono::steady_clock::time_point markRing;
+  std::chrono::steady_clock::time_point markSched;
+  std::chrono::steady_clock::time_point markMix;
   CallbackTimer(ma_uint32 frameCount, ma_uint32 sampleRate)
       : start(std::chrono::steady_clock::now()),
         budgetMicros(sampleRate > 0
                          ? static_cast<int64_t>(frameCount) * 1000000 /
                                static_cast<int64_t>(sampleRate)
-                         : 0) {}
+                         : 0),
+        markAec(start), markRing(start), markSched(start), markMix(start) {}
+  static void recordSection(int section, int64_t micros) {
+    g_cbSectionLastMicros[section].store(micros, std::memory_order_relaxed);
+    int64_t prev = g_cbSectionMaxMicros[section].load(std::memory_order_relaxed);
+    while (micros > prev &&
+           !g_cbSectionMaxMicros[section].compare_exchange_weak(
+               prev, micros, std::memory_order_relaxed)) {
+    }
+  }
   ~CallbackTimer() {
+    const auto end = std::chrono::steady_clock::now();
     const int64_t micros =
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - start)
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start)
             .count();
+    const auto us = [](std::chrono::steady_clock::time_point a,
+                       std::chrono::steady_clock::time_point b) {
+      return std::chrono::duration_cast<std::chrono::microseconds>(b - a)
+          .count();
+    };
+    // Clamp marks monotone: a mark a return path never reached collapses to
+    // the previous one (0-length section) and the remainder lands in "post".
+    const auto m0 = std::max(markAec, start);
+    const auto m1 = std::max(markRing, m0);
+    const auto m2 = std::max(markSched, m1);
+    const auto m3 = std::max(markMix, m2);
+    recordSection(0, us(start, m0));
+    recordSection(1, us(m0, m1));
+    recordSection(2, us(m1, m2));
+    recordSection(3, us(m2, m3));
+    recordSection(4, us(m3, end));
     g_cbLastMicros.store(micros, std::memory_order_relaxed);
     g_cbBudgetMicros.store(budgetMicros, std::memory_order_relaxed);
     g_cbTotalCount.fetch_add(1, std::memory_order_relaxed);
@@ -516,6 +566,7 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
         captured, frameCount, captureChannels,
         userData->deviceConfig.capture.format);
   }
+  cbTimer_.markAec = std::chrono::steady_clock::now();
 #if DEBUG_CALLBACK_FILTERS
   else {
 #ifdef _IS_ANDROID_
@@ -537,6 +588,7 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   if (g_nativeRingBuffer != nullptr && captured != nullptr) {
     g_nativeRingBuffer->write(captured, frameCount, captureChannels);
   }
+  cbTimer_.markRing = std::chrono::steady_clock::now();
 
   // =========================================================================
   // BOOKKEEPING (must run BEFORE SoLoud mix so the audio engine schedules
@@ -562,6 +614,7 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   flowstate::audio_engine::AudioEngine::instance().process(
       bufferStartFrame, frameCount, static_cast<uint32_t>(pDevice->sampleRate),
       static_cast<uint16_t>(captureChannels));
+  cbTimer_.markSched = std::chrono::steady_clock::now();
 
   // =========================================================================
   // SLAVE MODE: SoLoud output driven by this callback (for AEC clock sync)
@@ -584,6 +637,7 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     // Get SoLoud's mixed output into our f32 buffer (not pOutput directly)
     // This allows all processing (AEC, monitoring) to work in f32
     g_soloudSlaveMixCallback(playbackFloat, frameCount, playbackChannels);
+    cbTimer_.markMix = std::chrono::steady_clock::now();
 
     // =======================================================================
     // METRONOME (Phase 3c v2): mix sample-accurate clicks ON TOP of SoLoud's

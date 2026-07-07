@@ -4,6 +4,7 @@
 
 #include "inference.h"
 #include "../soloud_slave_bridge.h"  // g_soloudSetVolume / setPause / stop
+#include "../filters/filters.h"      // mFilters -> notifyAecReferenceChanged
 
 namespace flowstate {
 namespace audio_engine {
@@ -634,6 +635,23 @@ void AudioEngine::firePendingThroughFrame(
           (void)unregisterTrackHandle(pe.trackIndex);
           break;
         case PendingAction::None:
+          break;
+      }
+
+      // LSAEC: an on/off-type mix change (NOT a continuous gain automation,
+      // which would thrash the seed-capture worker) makes the template's
+      // per-phase content stale even though the loop period didn't move —
+      // re-arm a convergence-seed reseed so cancellation catches up in ~1
+      // pass instead of several. See synchronous_echo_template.h.
+      switch (pe.action) {
+        case PendingAction::Mute:
+        case PendingAction::Unmute:
+        case PendingAction::Pause:
+        case PendingAction::Unpause:
+        case PendingAction::Stop:
+          if (mFilters) mFilters->notifyAecReferenceChanged();
+          break;
+        default:
           break;
       }
     }
