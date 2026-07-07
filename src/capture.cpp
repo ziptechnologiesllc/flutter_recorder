@@ -18,6 +18,7 @@
 #include <memory.h>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <time.h>
 #include <vector>
 
@@ -872,12 +873,19 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     }
   }
 
-  // Calibration capture: accumulate samples if calibration is active
-  if (userData->mCalibrationActive) {
-    std::lock_guard<std::mutex> lock(userData->mCalibrationMutex);
+  // Calibration capture: accumulate samples if calibration is active.
+  // LOCK-FREE: taking mCalibrationMutex here blocked the RT thread whenever
+  // the API thread held it (observed as 40ms+ callback overruns during
+  // calibration). The acquire on mCalibrationActive pairs with the release in
+  // startCalibrationCapture, so the buffer is fully sized before we can see
+  // active==true; only this thread ever advances mCalibrationWritePos.
+  if (userData->mCalibrationActive.load(std::memory_order_acquire)) {
+    const size_t writePos =
+        userData->mCalibrationWritePos.load(std::memory_order_relaxed);
     size_t samplesToCapture = frameCount;
-    size_t spaceLeft =
-        userData->mCalibrationBuffer.size() - userData->mCalibrationWritePos;
+    size_t spaceLeft = userData->mCalibrationBuffer.size() > writePos
+                           ? userData->mCalibrationBuffer.size() - writePos
+                           : 0;
     if (samplesToCapture > spaceLeft) {
       samplesToCapture = spaceLeft;
     }
@@ -898,8 +906,7 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
         } else {
           sample = captured[i * captureChannels]; // Already mono
         }
-        userData->mCalibrationBuffer[userData->mCalibrationWritePos + i] =
-            sample;
+        userData->mCalibrationBuffer[writePos + i] = sample;
 #if DEBUG_CALLBACK_CALIBRATION
         debugBatchSum += fabsf(sample);
 #endif
@@ -914,7 +921,8 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
       }
 #endif
 
-      userData->mCalibrationWritePos += samplesToCapture;
+      userData->mCalibrationWritePos.store(writePos + samplesToCapture,
+                                           std::memory_order_release);
     }
   }
 
@@ -2039,24 +2047,37 @@ float *Capture::getWave(bool *isTheSameAsBefore) {
 float Capture::getVolumeDb() { return energy_db; }
 
 void Capture::startCalibrationCapture(size_t maxSamples) {
+  // mCalibrationMutex serializes API-thread callers only; the audio callback
+  // is lock-free (see capture.h). The resize below must never race a
+  // callback write, so if a capture is somehow still active, deactivate and
+  // let any in-flight callback block drain before touching the buffer.
   std::lock_guard<std::mutex> lock(mCalibrationMutex);
+  if (mCalibrationActive.load(std::memory_order_acquire)) {
+    mCalibrationActive.store(false, std::memory_order_release);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
   mCalibrationBuffer.resize(maxSamples, 0.0f);
-  mCalibrationWritePos = 0;
-  mCalibrationActive = true;
+  mCalibrationWritePos.store(0, std::memory_order_relaxed);
+  // Release pairs with the callback's acquire: buffer is fully sized before
+  // the callback can observe active==true.
+  mCalibrationActive.store(true, std::memory_order_release);
 }
 
 void Capture::stopCalibrationCapture() {
   std::lock_guard<std::mutex> lock(mCalibrationMutex);
-  mCalibrationActive = false;
+  mCalibrationActive.store(false, std::memory_order_release);
 }
 
 size_t Capture::readCalibrationSamples(float *dest, size_t maxSamples) {
   std::lock_guard<std::mutex> lock(mCalibrationMutex);
-  size_t samplesToRead = std::min(maxSamples, mCalibrationWritePos);
+  size_t samplesToRead =
+      std::min(maxSamples, mCalibrationWritePos.load(std::memory_order_acquire));
   if (samplesToRead > 0 && dest != nullptr) {
     memcpy(dest, mCalibrationBuffer.data(), samplesToRead * sizeof(float));
   }
   return samplesToRead;
 }
 
-bool Capture::isCalibrationCaptureActive() const { return mCalibrationActive; }
+bool Capture::isCalibrationCaptureActive() const {
+  return mCalibrationActive.load(std::memory_order_acquire);
+}

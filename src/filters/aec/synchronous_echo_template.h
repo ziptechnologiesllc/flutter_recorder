@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 /**
@@ -30,10 +32,42 @@
  *
  * Single-threaded: process() runs on the capture/audio thread. No allocation
  * after construction (capacity is sized once for the maximum supported period).
+ *
+ * CONVERGENCE SEED (fast-start): plain per-pass EMA learning is fundamentally
+ * rate-limited — you only get ONE update per phase per loop pass, and the
+ * update size (alpha) is capped for noise-floor reasons (push it too hot and
+ * a single loud performer moment gets baked into E permanently). That's why
+ * "converge in 3 loops" cannot be reached safely by tuning alpha/tau alone.
+ *
+ * The real fix: the room/device echo path h[] is exactly what a live AEC
+ * calibration already measures (see calibration.cpp's analyzeAligned — a
+ * causally-offset FIR trained on a delay-aligned chirp, the SAME delay
+ * convention as the `alignedRef` this class receives every callback). Since
+ * the reference is exactly periodic at P, the TRUE steady-state echo is the
+ * CIRCULAR convolution of h with one period of the reference — not an
+ * approximation, an exact closed form. So: capture one full period of
+ * `alignedRef` after a loop-period change, convolve it with the calibrated
+ * h off the audio thread, and drop the result straight into E[phi] with high
+ * initial confidence. Cancellation starts near its converged depth on loop 2
+ * (loop 1 is spent capturing the reference) instead of after 8-16 passes.
+ * Ongoing per-pass learning still runs afterward to track small deviations
+ * (device moved, speaker warmed up) — the governor (spectral_governor.h)
+ * re-heats it on demand exactly as before; the seed just removes the initial
+ * "many empty loops while it learns from scratch" tax entirely.
  */
 class SynchronousEchoTemplate {
 public:
   SynchronousEchoTemplate(unsigned int sampleRate, unsigned int channels);
+  ~SynchronousEchoTemplate();
+
+  /**
+   * Supply the calibrated room/device impulse response (same taps passed to
+   * AdaptiveEchoCancellation::setImpulseResponse). Copies the coefficients;
+   * safe to call from any thread (calibration runs off the audio thread).
+   * The NEXT loop-period change (new base loop, layer add) will capture one
+   * period of reference and seed the template from it — see class comment.
+   */
+  void setSeedImpulseResponse(const float *coeffs, int length);
 
   /**
    * Learning-rate multiplier from the spectral governor (>=1). Applied on top
@@ -103,6 +137,36 @@ private:
   uint32_t mLearnedBlocks = 0; // non-frozen learning blocks (arms the detector)
   uint32_t mFreezeCount = 0;   // blocks frozen (near-end) — telemetry
   uint32_t mReopenCount = 0;   // reserved (block-level recovery) — telemetry
+
+  // ---- Convergence seed (see class comment) ----------------------------
+  // Calibrated IR, settable from any thread; read only when arming a capture.
+  std::mutex mSeedIRMutex;
+  std::vector<float> mSeedIR;
+
+  // Audio-thread-only state machine (no atomics needed for these — single
+  // writer/reader). mSeedBusy spans from arm to fully-applied; while true, a
+  // NEW loop-period change will NOT re-arm (rare-edge-case: just falls back
+  // to normal per-pass learning for that cycle, no correctness issue).
+  bool mSeedBusy = false;
+  int64_t mSeedCaptureRemaining = 0; // frames left to capture this period
+  std::vector<float> mRefCapture;    // mono, pre-sized to capacity — RT-safe
+
+  // Handoff to the worker thread. mSeedJobPosted: audio thread sets true when
+  // capture completes (release); worker polls it (acquire), clears it after
+  // starting the job. mSeedOutputReady: worker sets true when done (release);
+  // audio thread polls it (acquire) and chunks the apply across callbacks
+  // (kSeedApplyChunk phases/callback) to keep any single callback O(1)
+  // regardless of loop length, then clears it (relaxed, audio-thread-only).
+  std::atomic<bool> mSeedJobPosted{false};
+  std::atomic<bool> mSeedOutputReady{false};
+  std::vector<float> mSeedOutput;    // mono, pre-sized to capacity
+  int64_t mSeedJobPeriod = 0;        // P the posted/ready job corresponds to
+  int64_t mSeedApplyPos = 0;         // chunked-apply cursor
+
+  std::atomic<bool> mSeedThreadRunning{false};
+  std::thread mSeedWorker;
+  void seedWorkerLoop();
+  void computeSeedConvolution(int64_t P); // worker thread only
 };
 
 #endif // AEC_SYNCHRONOUS_ECHO_TEMPLATE_H

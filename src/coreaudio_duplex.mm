@@ -49,8 +49,18 @@ AudioDeviceID g_aggregateDevice = kAudioObjectUnknown; // 0 if none created
 #endif
 
 AudioBufferList g_micABL;
-float *g_micBuf = nullptr;
+float *g_micBuf = nullptr;          // interleaved, g_channels — handed to the app
 unsigned int g_micBufFrames = 0;
+
+// The input DEVICE's native channel count (queried at start). When it differs
+// from g_channels we render into g_micRawBuf at the device layout and then map
+// explicitly onto the app's interleaved layout. Forcing the client format to
+// g_channels on a narrower device (e.g. the built-in Mac mic is 1ch, app wants
+// 2ch) makes AUHAL/RemoteIO fill only the first client channel and leave the
+// rest DIGITALLY SILENT — the "only hear left channel" / half-silent-WAV bug.
+unsigned int g_deviceInputChannels = 0;
+float *g_micRawBuf = nullptr;       // interleaved, g_deviceInputChannels; null
+                                    // when device layout == app layout
 
 // Shared render callback (output bus): pull the mic for THIS cycle off the same
 // clock, then hand interleaved mic+speaker to the app — one render cycle, one
@@ -76,16 +86,34 @@ OSStatus renderCallback(void *inRefCon, AudioUnitRenderActionFlags *ioActionFlag
     return noErr;
 
   bool haveMic = false;
-  if (g_micBuf && inNumberFrames <= g_micBufFrames) {
+  const unsigned int inCh =
+      g_deviceInputChannels > 0 ? g_deviceInputChannels : g_channels;
+  float *renderDst = g_micRawBuf ? g_micRawBuf : g_micBuf;
+  if (renderDst && inNumberFrames <= g_micBufFrames) {
+    // Pull the mic at the DEVICE's native channel layout — the client format
+    // set in finishStart matches it exactly, so the conversion the unit does
+    // is universally supported (sample type only, no implicit channel fill).
     g_micABL.mNumberBuffers = 1;
-    g_micABL.mBuffers[0].mNumberChannels = g_channels;
+    g_micABL.mBuffers[0].mNumberChannels = inCh;
     g_micABL.mBuffers[0].mDataByteSize =
-        inNumberFrames * g_channels * sizeof(float);
-    g_micABL.mBuffers[0].mData = g_micBuf;
+        inNumberFrames * inCh * sizeof(float);
+    g_micABL.mBuffers[0].mData = renderDst;
     AudioUnitRenderActionFlags micFlags = 0;
     OSStatus st = AudioUnitRender(g_unit, &micFlags, inTimeStamp, kInputBus,
                                   inNumberFrames, &g_micABL);
     haveMic = (st == noErr);
+  }
+  if (haveMic && g_micRawBuf && g_micBuf) {
+    // Explicit device→app channel map: app channel c reads device channel
+    // (c % inCh). Mono mic duplicates to L+R; extra device channels beyond
+    // the app's count are dropped. RT-safe: two preallocated buffers, no
+    // branches beyond the modulo (inCh is tiny and loop-invariant).
+    for (unsigned int f = 0; f < inNumberFrames; ++f) {
+      const float *src = g_micRawBuf + (size_t)f * inCh;
+      float *dst = g_micBuf + (size_t)f * g_channels;
+      for (unsigned int c = 0; c < g_channels; ++c)
+        dst[c] = src[c % inCh];
+    }
   }
   if (!haveMic && g_micBuf)
     std::memset(g_micBuf, 0,
@@ -134,11 +162,38 @@ AudioStreamBasicDescription interleavedFloatASBD(double sampleRate,
 // Common post-create wiring shared by iOS + macOS once g_unit exists and IO is
 // enabled / device is bound: formats, render callback, mic scratch, start.
 bool finishStart(double rate, unsigned int channels) {
-  AudioStreamBasicDescription asbd = interleavedFloatASBD(rate, channels);
+  // ── Input-device channel detection ──
+  // Read the DEVICE-side format of the input element (input scope, bus 1 —
+  // valid once IO is enabled / the device is bound). The client format we set
+  // below must match the device's channel count: asking the unit for MORE
+  // channels than the device has does not up-mix, it fills the first device
+  // channel and leaves the rest silent. The render callback owns the
+  // device→app mapping explicitly instead.
+  unsigned int devInCh = channels;
+  {
+    AudioStreamBasicDescription devFmt;
+    std::memset(&devFmt, 0, sizeof(devFmt));
+    UInt32 sz = sizeof(devFmt);
+    if (AudioUnitGetProperty(g_unit, kAudioUnitProperty_StreamFormat,
+                             kAudioUnitScope_Input, kInputBus, &devFmt,
+                             &sz) == noErr &&
+        devFmt.mChannelsPerFrame > 0) {
+      devInCh = devFmt.mChannelsPerFrame;
+    }
+  }
+  g_deviceInputChannels = devInCh;
+  aecLog("[CADuplex] input device channels=%u, app channels=%u%s\n", devInCh,
+         channels,
+         devInCh == channels ? "" : " -> explicit channel map engaged");
+
+  AudioStreamBasicDescription inAsbd = interleavedFloatASBD(rate, devInCh);
   AudioUnitSetProperty(g_unit, kAudioUnitProperty_StreamFormat,
-                       kAudioUnitScope_Output, kInputBus, &asbd, sizeof(asbd));
+                       kAudioUnitScope_Output, kInputBus, &inAsbd,
+                       sizeof(inAsbd));
+  AudioStreamBasicDescription outAsbd = interleavedFloatASBD(rate, channels);
   AudioUnitSetProperty(g_unit, kAudioUnitProperty_StreamFormat,
-                       kAudioUnitScope_Input, kOutputBus, &asbd, sizeof(asbd));
+                       kAudioUnitScope_Input, kOutputBus, &outAsbd,
+                       sizeof(outAsbd));
 
   AURenderCallbackStruct cb;
   cb.inputProc = renderCallback;
@@ -149,6 +204,12 @@ bool finishStart(double rate, unsigned int channels) {
   g_micBufFrames = 4096;
   g_micBuf = static_cast<float *>(
       std::malloc((size_t)g_micBufFrames * channels * sizeof(float)));
+  // Device-layout scratch only needed when the layouts differ; when they
+  // match, AudioUnitRender writes straight into g_micBuf (zero-copy path).
+  g_micRawBuf = (devInCh == channels)
+                    ? nullptr
+                    : static_cast<float *>(std::malloc(
+                          (size_t)g_micBufFrames * devInCh * sizeof(float)));
   std::memset(&g_micABL, 0, sizeof(g_micABL));
 
   if (AudioUnitInitialize(g_unit) != noErr) {
@@ -571,6 +632,11 @@ void caDuplexStop(void) {
     std::free(g_micBuf);
     g_micBuf = nullptr;
   }
+  if (g_micRawBuf) {
+    std::free(g_micRawBuf);
+    g_micRawBuf = nullptr;
+  }
+  g_deviceInputChannels = 0;
   g_running = false;
 }
 

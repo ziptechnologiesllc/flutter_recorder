@@ -1,6 +1,7 @@
 #include "synchronous_echo_template.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace {
@@ -45,6 +46,22 @@ constexpr float kEps = 1e-12f;
 // Maximum supported loop period: 16 s. Sized once at construction so process()
 // never allocates on the audio thread.
 constexpr unsigned int kMaxSeconds = 16;
+
+// ---- Convergence seed tuning (see class comment) --------------------------
+// Confidence assigned to every phase immediately after seeding: high enough
+// that alpha lands essentially at the warm floor (not the hot ceiling — the
+// seed IS the converged estimate, so treat it like one) and high enough to
+// clear kFreezeMinConf so E3 double-talk protection is active from sample one
+// instead of waiting through a fake "unsettled" window.
+constexpr float kSeedConfidence = 24.0f; // 3x kConfTau
+// Phases applied to mTemplate per process() call while draining a finished
+// seed job. Bounds the apply cost to O(1) per callback regardless of loop
+// length (a 16s loop is 768000 phases; applying it in one shot could exceed
+// the RT budget, so it's spread over ~188 callbacks — well under one pass).
+constexpr int64_t kSeedApplyChunk = 4096;
+// Worker poll interval (mirrors SpectralGovernor's cadence) — seeding is a
+// rare, one-shot event per loop-period change, not a steady-state load.
+constexpr int kSeedPollMs = 8;
 } // namespace
 
 SynchronousEchoTemplate::SynchronousEchoTemplate(unsigned int sampleRate,
@@ -53,6 +70,24 @@ SynchronousEchoTemplate::SynchronousEchoTemplate(unsigned int sampleRate,
   mCapacityFrames = static_cast<size_t>(sampleRate) * kMaxSeconds;
   mTemplate.assign(mCapacityFrames * channels, 0.0f);
   mConfidence.assign(mCapacityFrames, 0.0f);
+  mRefCapture.assign(mCapacityFrames, 0.0f);
+  mSeedOutput.assign(mCapacityFrames, 0.0f);
+  mSeedThreadRunning.store(true, std::memory_order_relaxed);
+  mSeedWorker = std::thread([this] { seedWorkerLoop(); });
+}
+
+SynchronousEchoTemplate::~SynchronousEchoTemplate() {
+  mSeedThreadRunning.store(false, std::memory_order_relaxed);
+  if (mSeedWorker.joinable())
+    mSeedWorker.join();
+}
+
+void SynchronousEchoTemplate::setSeedImpulseResponse(const float *coeffs,
+                                                     int length) {
+  if (!coeffs || length <= 0)
+    return;
+  std::lock_guard<std::mutex> lock(mSeedIRMutex);
+  mSeedIR.assign(coeffs, coeffs + length);
 }
 
 void SynchronousEchoTemplate::reset() {
@@ -64,6 +99,50 @@ void SynchronousEchoTemplate::reset() {
   mLearnedBlocks = 0;
   mFreezeCount = 0;
   mReopenCount = 0;
+  // Abandon any in-progress capture/apply. A job the worker completes for the
+  // now-stale period is discarded by the period check in process() — no
+  // handshake needed with the worker thread here.
+  mSeedBusy = false;
+  mSeedCaptureRemaining = 0;
+  mSeedApplyPos = 0;
+}
+
+void SynchronousEchoTemplate::seedWorkerLoop() {
+  while (mSeedThreadRunning.load(std::memory_order_relaxed)) {
+    if (!mSeedJobPosted.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(kSeedPollMs));
+      continue;
+    }
+    computeSeedConvolution(mSeedJobPeriod);
+    mSeedJobPosted.store(false, std::memory_order_release);
+    mSeedOutputReady.store(true, std::memory_order_release);
+  }
+}
+
+void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
+  std::vector<float> ir;
+  {
+    std::lock_guard<std::mutex> lock(mSeedIRMutex);
+    ir = mSeedIR; // snapshot — a mid-job calibration update won't tear this read
+  }
+  if (ir.empty() || P <= 0)
+    return;
+  const size_t Pu = static_cast<size_t>(P);
+  const size_t L = ir.size();
+  // Exact circular convolution: the reference is exactly periodic at P, so
+  // the true steady-state echo is h ⊛ ref computed modulo P — not a linear-
+  // convolution approximation with edge effects. seed[phi] predicts what
+  // per-pass learning would converge to, using the SAME alignedRef delay
+  // convention the live filter already uses (see calibration.cpp
+  // analyzeAligned: h is trained on a delay-pre-aligned ref/mic pair).
+  for (size_t phi = 0; phi < Pu; ++phi) {
+    double acc = 0.0;
+    for (size_t k = 0; k < L; ++k) {
+      const size_t idx = (phi + Pu - (k % Pu)) % Pu;
+      acc += static_cast<double>(ir[k]) * static_cast<double>(mRefCapture[idx]);
+    }
+    mSeedOutput[phi] = static_cast<float>(acc);
+  }
 }
 
 float SynchronousEchoTemplate::meanConfidence() const {
@@ -103,6 +182,51 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     mActiveLoopFrames = loopFrames;
     mResidBaseline = 0.0f;
     mLearnedBlocks = 0;
+
+    // Arm a convergence-seed capture for the new period, if we have a
+    // calibrated IR and aren't already mid-seed for a (now stale) period.
+    // try_lock: setSeedImpulseResponse is rare and off the audio thread; on
+    // the vanishingly-unlikely contention case we just skip seeding this
+    // cycle and fall back to normal per-pass learning (always correct, just
+    // not fast).
+    if (!mSeedBusy && alignedRef) { // no reference this call -> can't capture, skip
+      bool haveSeed = false;
+      if (mSeedIRMutex.try_lock()) {
+        haveSeed = !mSeedIR.empty();
+        mSeedIRMutex.unlock();
+      }
+      if (haveSeed) {
+        mSeedBusy = true;
+        mSeedCaptureRemaining = loopFrames;
+        mSeedApplyPos = 0;
+      }
+    }
+  }
+
+  // Drain a finished seed job, chunked so any single callback's apply cost is
+  // bounded regardless of loop length. mSeedJobPeriod must still match the
+  // ACTIVE period — a job that finishes after a further period change (the
+  // capture was abandoned by the branch above) is stale and discarded here.
+  if (mSeedOutputReady.load(std::memory_order_acquire)) {
+    if (mSeedJobPeriod == mActiveLoopFrames) {
+      const int64_t end = std::min(mSeedApplyPos + kSeedApplyChunk, mActiveLoopFrames);
+      for (int64_t phi = mSeedApplyPos; phi < end; ++phi) {
+        const float v = mSeedOutput[static_cast<size_t>(phi)];
+        const size_t base = static_cast<size_t>(phi) * channels;
+        for (unsigned int ch = 0; ch < channels; ++ch)
+          mTemplate[base + ch] = v;
+        mConfidence[static_cast<size_t>(phi)] = kSeedConfidence;
+      }
+      mSeedApplyPos = end;
+      if (mSeedApplyPos >= mActiveLoopFrames) {
+        mSeedOutputReady.store(false, std::memory_order_relaxed);
+        mSeedBusy = false;
+      }
+    } else {
+      // Stale job for an old period — drop it, no apply.
+      mSeedOutputReady.store(false, std::memory_order_relaxed);
+      mSeedBusy = false;
+    }
   }
 
   const int64_t P = loopFrames;
@@ -119,6 +243,22 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
       const float u = micInOut[i] - mTemplate[base + ch];
       micInOut[i] = u; // micInOut now holds the residual (the cancelled output)
       blockResid += static_cast<double>(u) * u;
+    }
+
+    // Convergence-seed capture: while armed, record one period of the ALIGNED
+    // reference (mono-mixed) at its exact phase. Uses the same phi as the
+    // cancel pass above, so once mSeedCaptureRemaining reaches 0 every phase
+    // in [0,P) has been written exactly once, regardless of block alignment.
+    if (mSeedBusy && mSeedCaptureRemaining > 0 && alignedRef) {
+      float rm = 0.0f;
+      for (unsigned int ch = 0; ch < channels; ++ch)
+        rm += alignedRef[f * channels + ch];
+      mRefCapture[static_cast<size_t>(phi)] = rm / static_cast<float>(channels);
+      if (--mSeedCaptureRemaining == 0 &&
+          !mSeedJobPosted.load(std::memory_order_relaxed)) {
+        mSeedJobPeriod = P;
+        mSeedJobPosted.store(true, std::memory_order_release);
+      }
     }
   }
 

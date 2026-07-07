@@ -874,6 +874,13 @@ float AdaptiveEchoCancellation::getEchoReturnLoss() const {
 
 void AdaptiveEchoCancellation::setImpulseResponse(const float *coeffs,
                                                   int length) {
+  // LSAEC convergence seed: hand the SAME measured room/device IR to the
+  // template so the NEXT loop-period change converges in ~1 pass instead of
+  // 8-16 (see synchronous_echo_template.h class comment). Harmless to call
+  // even when LSAEC isn't the active mode — just stores the coefficients.
+  if (mEchoTemplate)
+    mEchoTemplate->setSeedImpulseResponse(coeffs, length);
+
   // Pre-initialize all channel filters with the calibrated impulse response
   // This gives NLMS a starting point for immediate cancellation
   for (auto &filter : mFilters) {

@@ -169,10 +169,15 @@ public:
     mTotalFramesCaptured.store(0, std::memory_order_release);
   }
 
-  /// Calibration capture buffer and state (public for data callback access)
+  /// Calibration capture buffer and state (public for data callback access).
+  /// Lock-free on the RT thread: the callback only reads mCalibrationActive
+  /// (acquire) and advances mCalibrationWritePos (release); the buffer is
+  /// (re)allocated exclusively on the API thread BEFORE active is set, so the
+  /// callback never observes a resizing vector. mCalibrationMutex serializes
+  /// API-thread callers only — the audio callback must never take it.
   std::vector<float> mCalibrationBuffer;
-  size_t mCalibrationWritePos;
-  bool mCalibrationActive;
+  std::atomic<size_t> mCalibrationWritePos{0};
+  std::atomic<bool> mCalibrationActive{false};
   std::mutex mCalibrationMutex;
 
   /// Total frames captured since device started (for AEC sync)

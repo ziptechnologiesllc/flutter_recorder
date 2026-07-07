@@ -71,11 +71,20 @@ extern void (*dartStreamDataCallback)(const unsigned char * data, const int data
 
 extern void (*nativeStreamDataCallback)(const unsigned char * data, const int dataLength);
 
-// Recording stopped callback - called from audio thread when recording auto-stops
+// Recording stopped callback - delivered to Dart from the looper worker
+// thread (queued by the scheduler on the audio thread; never invoke the FFI
+// trampoline directly on the RT thread — it is not RT-safe and aborts if the
+// VM is tearing down).
 extern void (*dartRecordingStoppedCallback)(int64_t recordedFrames, const char* wavPath);
 
-// Recording started callback - called from audio thread when recording starts
+// Recording started callback - same worker-thread delivery as above.
 extern void (*dartRecordingStartedCallback)(int64_t startFrame, const char* wavPath);
+
+// Queue started/stopped events from the audio thread; the looper worker
+// delivers them to Dart (stopped fires after the pending WAV write).
+// Implemented in flutter_recorder.cpp. AUDIO THREAD SAFE.
+void queueRecordingStartedEvent(int64_t startFrame, const char* wavPath);
+void queueRecordingStoppedEvent(int64_t recordedFrames, const char* wavPath);
 
 // Looper playback started callback - called from worker thread when loop playback starts
 extern void (*dartLooperPlaybackStartedCallback)(unsigned int soundHash, unsigned int handle, double durationSeconds, const char* wavPath);

@@ -90,6 +90,61 @@ static std::atomic<bool> g_looperWorkPending{false};
 char g_pendingWavPath[512] = {0};
 std::atomic<bool> g_pendingWavWrite{false};
 
+// ── Queued recording started/stopped Dart events (audio thread -> worker) ──
+// The Dart NativeCallable.listener trampoline is NOT RT-safe: it enters a
+// temporary isolate and takes the port-map lock (allocation + kernel lock on
+// the render thread), and it FATALs the whole process if the VM/isolate is
+// tearing down (DLRT_GetFfiCallbackMetadata aborts — the July 5/6 crash
+// reports). The scheduler queues events into these single-shot slots on the
+// audio thread (plain stores, no locks); the looper worker delivers them to
+// Dart within one 5ms poll. Single-shot is enough: at most one recording
+// start and one stop can be in flight at a time.
+static char g_pendingStartEventPath[512] = {0};
+static int64_t g_pendingStartEventFrame = 0;
+static std::atomic<bool> g_pendingStartEvent{false};
+static char g_pendingStopEventPath[512] = {0};
+static int64_t g_pendingStopEventFrames = 0;
+static std::atomic<bool> g_pendingStopEvent{false};
+
+// AUDIO THREAD SAFE: plain stores + release flag, no locks, no allocation.
+// The worker's 5ms wait_for poll picks the flag up without a notify (a
+// notify_one from the RT thread would be a kernel call; where a stop also
+// stores recorded audio, storeRecordedAudio already notifies).
+void queueRecordingStartedEvent(int64_t startFrame, const char* wavPath) {
+  const char* src = wavPath ? wavPath : "";
+  strncpy(g_pendingStartEventPath, src, sizeof(g_pendingStartEventPath) - 1);
+  g_pendingStartEventPath[sizeof(g_pendingStartEventPath) - 1] = '\0';
+  g_pendingStartEventFrame = startFrame;
+  g_pendingStartEvent.store(true, std::memory_order_release);
+}
+
+void queueRecordingStoppedEvent(int64_t recordedFrames, const char* wavPath) {
+  const char* src = wavPath ? wavPath : "";
+  strncpy(g_pendingStopEventPath, src, sizeof(g_pendingStopEventPath) - 1);
+  g_pendingStopEventPath[sizeof(g_pendingStopEventPath) - 1] = '\0';
+  g_pendingStopEventFrames = recordedFrames;
+  g_pendingStopEvent.store(true, std::memory_order_release);
+}
+
+// Worker-side delivery. The started event fires as soon as the worker wakes;
+// the stopped event fires AFTER the pending WAV write, so Dart can rely on
+// the file existing when its await unblocks (it previously could not).
+static void dispatchPendingRecordingStarted() {
+  if (!g_pendingStartEvent.load(std::memory_order_acquire)) return;
+  g_pendingStartEvent.store(false, std::memory_order_release);
+  if (dartRecordingStartedCallback != nullptr && g_pendingStartEventPath[0] != '\0') {
+    dartRecordingStartedCallback(g_pendingStartEventFrame, g_pendingStartEventPath);
+  }
+}
+
+static void dispatchPendingRecordingStopped() {
+  if (!g_pendingStopEvent.load(std::memory_order_acquire)) return;
+  g_pendingStopEvent.store(false, std::memory_order_release);
+  if (dartRecordingStoppedCallback != nullptr && g_pendingStopEventPath[0] != '\0') {
+    dartRecordingStoppedCallback(g_pendingStopEventFrames, g_pendingStopEventPath);
+  }
+}
+
 // Forward declarations for recorded audio storage (defined later in file)
 extern float* g_lastRecordedAudio;
 extern size_t g_lastRecordedFrameCount;
@@ -179,6 +234,10 @@ static void looperWorkerThreadFunc() {
       break;
     }
 
+    // Deliver a queued recording-started event to Dart (moved off the RT
+    // audio thread — see queueRecordingStartedEvent).
+    dispatchPendingRecordingStarted();
+
     // Do the actual work - this can block, we're not on audio thread
     if (g_lastRecordedAudio != nullptr && g_lastRecordedFrameCount > 0) {
       unsigned int numSamples = g_lastRecordedFrameCount * g_lastRecordedChannels;
@@ -198,6 +257,11 @@ static void looperWorkerThreadFunc() {
         g_pendingWavPath[0] = '\0';  // Clear after writing
         g_pendingWavWrite.store(false, std::memory_order_release);
       }
+
+      // Deliver the queued recording-stopped event now that the WAV is on
+      // disk — Dart's stop handler unblocks with the file guaranteed present
+      // and always BEFORE the looper-playback-started event below.
+      dispatchPendingRecordingStopped();
 
       // STEP 2: Start playback via looper bridge (if available)
       if (g_looperBridge != nullptr) {
@@ -385,6 +449,11 @@ static void looperWorkerThreadFunc() {
       // Clear pointer (ring buffer still owns the memory)
       g_lastRecordedAudio = nullptr;
       g_lastRecordedFrameCount = 0;
+    } else {
+      // Stop-only wake: nothing was extracted (empty take or the capture
+      // fallback), but a stopped event may still be queued — deliver it so
+      // Dart's await never strands.
+      dispatchPendingRecordingStopped();
     }
   }
 

@@ -265,9 +265,8 @@ void NativeScheduler::beginAutoRecording(int64_t recordingStartGlobalFrame,
     if (g_nativeRingBuffer != nullptr) {
         g_nativeRingBuffer->startRecording((size_t)preRollFrames);
         mRecordingStartTotalFrame = g_nativeRingBuffer->getRecordingStartFrame();
-        if (dartRecordingStartedCallback != nullptr) {
-            dartRecordingStartedCallback(recordingStartGlobalFrame, recordingPath);
-        }
+        // Queued: FFI trampolines must not run on the RT audio thread.
+        queueRecordingStartedEvent(recordingStartGlobalFrame, recordingPath);
     } else {
         CaptureErrors err = capture->startRecording(recordingPath);
         if (err != captureNoError) {
@@ -275,9 +274,8 @@ void NativeScheduler::beginAutoRecording(int64_t recordingStartGlobalFrame,
             mRecordingStartFrame = 0;
             return;
         }
-        if (dartRecordingStartedCallback != nullptr) {
-            dartRecordingStartedCallback(recordingStartGlobalFrame, recordingPath);
-        }
+        // Queued: FFI trampolines must not run on the RT audio thread.
+        queueRecordingStartedEvent(recordingStartGlobalFrame, recordingPath);
     }
 
     // Idempotency flag (mirrors flutter_recorder_startRecording).
@@ -495,9 +493,8 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
 
                     // Notify Dart with the actual audio start frame (target) so
                     // _recordingStartGlobalSample matches the scheduler's view.
-                    if (dartRecordingStartedCallback != nullptr) {
-                        dartRecordingStartedCallback(targetFrame, event.recordingPath);
-                    }
+                    // Queued: FFI trampolines must not run on the RT audio thread.
+                    queueRecordingStartedEvent(targetFrame, event.recordingPath);
                 } else {
                     SCHED_DEBUG("executeEvent: no ring buffer, falling back to capture");
                     CaptureErrors err = capture->startRecording(event.recordingPath);
@@ -506,9 +503,8 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
                         mActiveRecordingPath[0] = '\0';
                         g_recordingScheduledOrActive.store(false, std::memory_order_release);
                     } else {
-                        if (dartRecordingStartedCallback != nullptr) {
-                            dartRecordingStartedCallback(targetFrame, event.recordingPath);
-                        }
+                        // Queued: FFI trampolines must not run on the RT audio thread.
+                        queueRecordingStartedEvent(targetFrame, event.recordingPath);
                     }
                 }
             } else {
@@ -579,8 +575,10 @@ void NativeScheduler::executeEvent(ScheduledEvent& event, int64_t currentFrame,
 
                 SCHED_DEBUG("Recording stopped: %lld frames", (long long)recordedFrames);
 
-                if (dartRecordingStoppedCallback != nullptr && wavPath[0] != '\0') {
-                    dartRecordingStoppedCallback(recordedFrames, wavPath);
+                if (wavPath[0] != '\0') {
+                    // Queued: delivered by the looper worker AFTER the WAV
+                    // write (FFI trampolines must not run on the RT thread).
+                    queueRecordingStoppedEvent(recordedFrames, wavPath);
                 }
 
                 // Reset idempotency flag
