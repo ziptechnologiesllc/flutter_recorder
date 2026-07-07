@@ -138,6 +138,9 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     }
   }
 
+  // Governor learning boost: loaded once per block (relaxed; RT-safe).
+  const float learnBoost = mLearnBoost.load(std::memory_order_relaxed);
+
   // ---- Pass 2: learn (annealed alpha, per-sample far-end gated) ----
   for (unsigned int f = 0; f < frameCount; ++f) {
     int64_t phi = (blockStartFrame + static_cast<int64_t>(f) - loopStartFrame) % P;
@@ -158,8 +161,11 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     }
 
     const float c = mConfidence[pphi];
-    const float alpha =
-        kAlphaMin + (kAlphaMax - kAlphaMin) * std::exp(-c / kConfTau);
+    float alpha =
+        (kAlphaMin + (kAlphaMax - kAlphaMin) * std::exp(-c / kConfTau)) *
+        learnBoost;
+    if (alpha > kAlphaMax)
+      alpha = kAlphaMax; // bounded authority: boost can re-heat, never exceed hot
     for (unsigned int ch = 0; ch < channels; ++ch)
       mTemplate[base + ch] += alpha * micInOut[f * channels + ch];
     if (c < kConfMax)

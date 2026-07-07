@@ -17,6 +17,7 @@
 #include "../../src/filters/aec/neural_post_filter.cpp"
 #include "../../src/filters/aec/delay_estimator.cpp"
 #include "../../src/filters/aec/drift_aligner.cpp"
+#include "../../src/filters/aec/spectral_governor.cpp"
 #include "../../src/filters/aec/synchronous_echo_template.cpp"
 #include "../../src/filters/aec/vss_nlms_filter.cpp"
 #include "../../src/coreaudio_duplex.mm"

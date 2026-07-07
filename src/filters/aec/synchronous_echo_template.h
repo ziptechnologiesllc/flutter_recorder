@@ -2,6 +2,7 @@
 #define AEC_SYNCHRONOUS_ECHO_TEMPLATE_H
 
 #include <cstddef>
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -33,6 +34,16 @@
 class SynchronousEchoTemplate {
 public:
   SynchronousEchoTemplate(unsigned int sampleRate, unsigned int channels);
+
+  /**
+   * Learning-rate multiplier from the spectral governor (>=1). Applied on top
+   * of the annealed alpha, capped at the hot ceiling — measured echo leakage
+   * re-heats learning; convergence lets it anneal back down. RT-safe setter
+   * (relaxed atomic store from the render thread itself).
+   */
+  void setLearnBoost(float b) {
+    mLearnBoost.store(b < 1.0f ? 1.0f : b, std::memory_order_relaxed);
+  }
 
   /** Clear all learned echo (on enable/disable/reset). */
   void reset();
@@ -84,6 +95,8 @@ private:
   // crossing of the reference waveform (hundreds/sec) — the mic echo (delayed
   // ~26 ms, nonzero there) pokes through each hole every pass = broadband
   // crackle that WORSENS as the rest of the template converges.
+  std::atomic<float> mLearnBoost{1.0f}; // spectral-governor gain
+
   float mRefEnvelope = 0.0f;
 
   float mResidBaseline = 0.0f; // EMA of per-block residual energy

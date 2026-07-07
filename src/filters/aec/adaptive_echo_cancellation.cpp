@@ -3,6 +3,7 @@
 
 #include "neural_post_filter.h"
 #include "../../soloud_slave_bridge.h"
+#include "spectral_governor.h"
 #include "../../native_scheduler.h" // LSAEC: known loop period P + start frame
 #include "../../audio_engine/audio_engine.h" // LSAEC: engine frame for div diag
 #include <algorithm>
@@ -101,6 +102,10 @@ AdaptiveEchoCancellation::AdaptiveEchoCancellation(unsigned int sampleRate,
   // here, off the audio thread).
   mEchoTemplate =
       std::make_unique<SynchronousEchoTemplate>(sampleRate, channels);
+
+  // Spectral governor worker (FFT coherence -> learning boost). Constructed
+  // on the FFI/Dart thread (addFilter), never the render thread.
+  SpectralGovernor::instance().start();
 }
 
 int AdaptiveEchoCancellation::getParamCount() const { return ParamCount; }
@@ -590,10 +595,18 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   // far-end-gated synchronous average. No weights -> cannot diverge. (E3's
   // transient freeze will gate `learn` per block; for now we always learn.)
   if (useTemplate) {
+    // Spectral governor closed loop: read the current learning boost (one
+    // relaxed load), cancel, then feed the sensor with this block's aligned
+    // reference + residual (wait-free ring write on the render thread; the
+    // FFT/coherence math runs on the governor's worker thread).
+    SpectralGovernor &gov = SpectralGovernor::instance();
+    mEchoTemplate->setLearnBoost(gov.learningBoost());
     mEchoTemplate->process(mLinearOutputBuffer.data(), mRefBuffer.data(),
                            frameCount, channels,
                            static_cast<int64_t>(mCaptureFrameCount),
                            lsLoopFrames, lsLoopStart, /*learn=*/true);
+    gov.push(mRefBuffer.data(), mLinearOutputBuffer.data(), frameCount,
+             channels);
     // Cheap E3 diagnostics (counter reads only): freeze climbing => near-end
     // being detected; reopen climbing => E was found stale (echo changed /
     // glitch / period mismatch). Disambiguates the degradation cause.
