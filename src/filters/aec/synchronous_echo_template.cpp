@@ -125,21 +125,28 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
   if (!learn)
     return; // cancel only
 
-  // ---- Block-level double-talk freeze (confidence-gated) ----
+  // Governor learning boost: loaded once per block (relaxed; RT-safe).
+  const float learnBoost = mLearnBoost.load(std::memory_order_relaxed);
+
+  // ---- Block-level double-talk freeze (confidence-gated, governor-aware) ----
+  // Interlock with the spectral governor: sustained COHERENT leakage (echo the
+  // template stopped matching — e.g. speaker thermal drift over a long soak)
+  // raises the boost; a boosted governor must also relax the freeze, or frozen
+  // blocks ignore the re-heat and the stale template can never re-learn (the
+  // slow decay-to-uncancelled death spiral). Real double-talk is INcoherent:
+  // boost decays and full freeze protection returns.
   {
     const int64_t phi0 =
         ((blockStartFrame - loopStartFrame) % P + P) % P;
     const float blockConf = mConfidence[static_cast<size_t>(phi0)];
-    if (mLearnedBlocks >= kSettleBlocks && blockConf >= kFreezeMinConf &&
+    if (learnBoost < 2.0f && mLearnedBlocks >= kSettleBlocks &&
+        blockConf >= kFreezeMinConf &&
         blockResid >
             kSpikeRatio * (static_cast<double>(mResidBaseline) + kEps)) {
       ++mFreezeCount;
       return; // near-end over a converged template -> do not update E
     }
   }
-
-  // Governor learning boost: loaded once per block (relaxed; RT-safe).
-  const float learnBoost = mLearnBoost.load(std::memory_order_relaxed);
 
   // ---- Pass 2: learn (annealed alpha, per-sample far-end gated) ----
   for (unsigned int f = 0; f < frameCount; ++f) {
