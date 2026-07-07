@@ -31,7 +31,7 @@ A new Flutter FFI plugin project.
     'OTHER_CFLAGS' => '-O3 -ffast-math -flto -funroll-loops -pthread -Wno-strict-prototypes -fvisibility=hidden',
     'OTHER_CPLUSPLUSFLAGS' => '-O3 -ffast-math -flto -funroll-loops -pthread -Wno-strict-prototypes -fvisibility=hidden -fvisibility-inlines-hidden',
     'GCC_OPTIMIZATION_LEVEL' => '3',
-    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1 ma_ios_notification_handler=fr_ma_ios_notification_handler AEC_DEBUG_LOGGING=1',
+    'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1 ma_ios_notification_handler=fr_ma_ios_notification_handler',
     'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/../src',
     'EXCLUDED_ARCHS[sdk=macosx*]' => ''
   }

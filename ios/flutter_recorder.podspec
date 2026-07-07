@@ -42,7 +42,7 @@ A new Flutter FFI plugin project.
       'OTHER_CFLAGS' => '-O3 -ffast-math -funroll-loops -pthread',
       'OTHER_CPLUSPLUSFLAGS' => '-O3 -ffast-math -funroll-loops -pthread',
       'GCC_OPTIMIZATION_LEVEL' => '3',
-      'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1 ma_ios_notification_handler=fr_ma_ios_notification_handler USE_TFLITE=1 AEC_DEBUG_LOGGING=1 AEC_DIAG_CAPTURE=1',
+      'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1 ma_ios_notification_handler=fr_ma_ios_notification_handler USE_TFLITE=1',
       'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/../src $(PODS_TARGET_SRCROOT)/../prebuilt/include',
       'LIBRARY_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/../prebuilt/ios',
       'OTHER_LDFLAGS' => '-lLiteRt'
@@ -65,7 +65,7 @@ A new Flutter FFI plugin project.
       'OTHER_CFLAGS' => '-O3 -ffast-math -funroll-loops -pthread',
       'OTHER_CPLUSPLUSFLAGS' => '-O3 -ffast-math -funroll-loops -pthread',
       'GCC_OPTIMIZATION_LEVEL' => '3',
-      'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1 ma_ios_notification_handler=fr_ma_ios_notification_handler USE_TFLITE=1 AEC_DEBUG_LOGGING=1 AEC_DIAG_CAPTURE=1',
+      'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1 ma_ios_notification_handler=fr_ma_ios_notification_handler USE_TFLITE=1',
       'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/../src $(PODS_TARGET_SRCROOT)/../prebuilt/include',
       'LIBRARY_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/../prebuilt/ios',
       'OTHER_LDFLAGS' => '-lLiteRt -Wl,-rpath,@executable_path/Frameworks'
@@ -82,7 +82,7 @@ A new Flutter FFI plugin project.
       'OTHER_CFLAGS' => '-O3 -ffast-math -funroll-loops -pthread',
       'OTHER_CPLUSPLUSFLAGS' => '-O3 -ffast-math -funroll-loops -pthread',
       'GCC_OPTIMIZATION_LEVEL' => '3',
-      'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1 ma_ios_notification_handler=fr_ma_ios_notification_handler USE_TFLITE=1 AEC_DEBUG_LOGGING=1 AEC_DIAG_CAPTURE=1',
+      'GCC_PREPROCESSOR_DEFINITIONS' => '$(inherited) MA_NO_RUNTIME_LINKING=1 NDEBUG=1 _REENTRANT=1 ma_ios_notification_handler=fr_ma_ios_notification_handler USE_TFLITE=1',
       'HEADER_SEARCH_PATHS' => '$(inherited) $(PODS_TARGET_SRCROOT)/../src'
     }
   end
