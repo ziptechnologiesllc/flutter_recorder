@@ -778,6 +778,19 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       snap.farSamples = mTwFar;
       snap.totalSamples = mTwTotal;
       snap.generation = ++mTelemetryGen;
+      if (mEchoTemplate) {
+        snap.templateConfidence = mEchoTemplate->meanConfidence();
+        snap.freezeCount = mEchoTemplate->freezeCount();
+        snap.isSeeding = mEchoTemplate->isSeeding() ? 1u : 0u;
+        snap.overCapacity = mEchoTemplate->isOverCapacity() ? 1u : 0u;
+      } else {
+        snap.templateConfidence = 0.0f;
+        snap.freezeCount = 0;
+        snap.isSeeding = 0;
+        snap.overCapacity = 0;
+      }
+      snap.govLeak = SpectralGovernor::instance().leakage();
+      snap.govBoost = SpectralGovernor::instance().learningBoost();
       mTelemetry.store(snap);
       mTwMicFar = mTwOutFar = 0.0;
       mTwMicAll = mTwOutAll = mTwRefAll = 0.0;

@@ -45,7 +45,12 @@
  * convention as the `alignedRef` this class receives every callback). Since
  * the reference is exactly periodic at P, the TRUE steady-state echo is the
  * CIRCULAR convolution of h with one period of the reference — not an
- * approximation, an exact closed form. So: capture one full period of
+ * approximation, an exact closed form, PROVIDED the kernel is truncated to
+ * at most P taps (a period-P circular convolution with a longer kernel wraps
+ * multiple taps onto the same output phase, which measurably crashed ERLE to
+ * -30 dB on-device on this feature's first live trigger — see
+ * computeSeedConvolution's truncation + defensive amplitude clamp). So:
+ * capture one full period of
  * `alignedRef` after a loop-period change, convolve it with the calibrated
  * h off the audio thread, and drop the result straight into E[phi] with high
  * initial confidence. Cancellation starts near its converged depth on loop 2
@@ -130,6 +135,20 @@ public:
   uint32_t freezeCount() const { return mFreezeCount; }
   uint32_t reopenCount() const { return mReopenCount; }
 
+  /** True while a convergence-seed capture/compute/apply is in flight — for
+   * a debug overlay to distinguish "seeding" from "ordinary per-pass
+   * learning" as the reason ERLE is moving (or not). Audio-thread-owned
+   * state; safe to read from any thread as a snapshot (single bool read). */
+  bool isSeeding() const { return mSeedBusy; }
+
+  /** True while the loop period exceeds kMaxSeconds (16s) capacity — the
+   * template falls back to pure passthrough (zero cancellation) in this
+   * state, silently, until the period drops back under the cap. Surfaced so
+   * a debug overlay / telemetry can show WHY cancellation stopped instead of
+   * it looking like a mystery "ghost bleed". Audio-thread-owned; safe single-
+   * bool snapshot read from any thread. */
+  bool isOverCapacity() const { return mOverCapacity; }
+
 private:
   unsigned int mSampleRate;
   unsigned int mChannels;
@@ -154,6 +173,40 @@ private:
   uint32_t mLearnedBlocks = 0; // non-frozen learning blocks (arms the detector)
   uint32_t mFreezeCount = 0;   // blocks frozen (near-end) — telemetry
   uint32_t mReopenCount = 0;   // reserved (block-level recovery) — telemetry
+  bool mOverCapacity = false;  // loopFrames > mCapacityFrames — see isOverCapacity()
+
+  // ---- Trust gate (fast, time-based — NOT loop-bound) -------------------
+  // The reseed mechanism fixes a stale template correctly, but takes up to
+  // one full loop pass (capture + compute + apply) to land — during which
+  // the OLD template is still subtracted at full strength every callback.
+  // If the mix change was a track going silent (mute/pause/stop), that
+  // stale subtraction has nothing left to cancel against and instead
+  // INJECTS a phase-inverted copy of whatever that track used to sound
+  // like — confirmed on-device as a full recording replaced by a
+  // phase-inverted ghost of a paused loop layer. This gate closes
+  // IMMEDIATELY (frame-accurate, no loop-period wait) on any mix/period
+  // change and ramps back to full strength over kTrustRampMs — independent
+  // of and much faster than the reseed, which still runs in the background
+  // and restores full per-phase accuracy once it lands. Global (not
+  // per-phase): simple, RT-cheap, and correct enough since the window is
+  // short — a brief, honest reduction in cancellation for still-playing
+  // tracks beats a loud, wrong, phase-inverted injection every time.
+  int64_t mMixChangeFrame = INT64_MIN / 2; // far enough back that gate() = 1.0 from frame 0
+  int64_t mTrustRampFrames = 0;            // set from sampleRate in the constructor
+
+  // 0 immediately after a mix/period change, ramping linearly to 1 over
+  // mTrustRampFrames. audio-thread-only; cheap (one subtract/divide/clamp
+  // per block, not per sample).
+  float trustGate(int64_t blockStartFrame) const {
+    if (mTrustRampFrames <= 0)
+      return 1.0f;
+    const int64_t elapsed = blockStartFrame - mMixChangeFrame;
+    if (elapsed <= 0)
+      return 0.0f;
+    if (elapsed >= mTrustRampFrames)
+      return 1.0f;
+    return static_cast<float>(elapsed) / static_cast<float>(mTrustRampFrames);
+  }
 
   // ---- Convergence seed (see class comment) ----------------------------
   // Calibrated IR, settable from any thread; read only when arming a capture.

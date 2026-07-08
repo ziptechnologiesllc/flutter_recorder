@@ -1425,7 +1425,7 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_aec_getVssMuMax =
       _flutter_recorder_aec_getVssMuMaxPtr.asFunction<double Function()>();
 
-  /// LSAEC E5: fill `out` (length 8) from one lock-free telemetry snapshot.
+  /// LSAEC E5: fill `out` (length 14) from one lock-free telemetry snapshot.
   /// Hand-added (not via ffigen regen, which churns unrelated unsigned-int
   /// type mappings); uses only Double so it is regen-churn-free.
   void flutter_recorder_aec_getTelemetry(
@@ -1442,6 +1442,21 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_aec_getTelemetry =
       _flutter_recorder_aec_getTelemetryPtr
           .asFunction<void Function(ffi.Pointer<ffi.Double>)>();
+
+  /// LSAEC: tell the template the audible mix changed (e.g. a one-shot
+  /// source like the metronome click toggled on/off) even though no loop-
+  /// period change occurred. Hand-added, same regen-churn-free rationale as
+  /// flutter_recorder_aec_getTelemetry above.
+  void flutter_recorder_aec_notifyReferenceChanged() {
+    return _flutter_recorder_aec_notifyReferenceChanged();
+  }
+
+  late final _flutter_recorder_aec_notifyReferenceChangedPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function()>>(
+          'flutter_recorder_aec_notifyReferenceChanged');
+  late final _flutter_recorder_aec_notifyReferenceChanged =
+      _flutter_recorder_aec_notifyReferenceChangedPtr
+          .asFunction<void Function()>();
 
   double flutter_recorder_aec_getVssLeakage() {
     return _flutter_recorder_aec_getVssLeakage();

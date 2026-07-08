@@ -686,6 +686,9 @@ class RecorderWeb extends RecorderImpl {
   AecTelemetry aecGetTelemetry() => AecTelemetry.zero;
 
   @override
+  void aecNotifyReferenceChanged() {}
+
+  @override
   double aecGetVssLeakage() {
     throw UnsupportedError('AEC is not supported on web platform');
   }

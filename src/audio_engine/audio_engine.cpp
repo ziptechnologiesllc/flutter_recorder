@@ -286,15 +286,33 @@ void AudioEngine::handleCommand(const Command& cmd) noexcept {
       }
       break;
 
-    case Command::Type::SetMetronome:
+    case Command::Type::SetMetronome: {
+      const bool wasEnabled = mMetronomeEnabled;
       mMetronomeEnabled       = (cmd.flags & 0x1u) != 0;
       mMetronomeDownbeatOnly  = (cmd.flags & 0x2u) != 0;
       // Re-anchor the beat counter so we don't emit a backlog when the
       // metronome is turned on mid-session.
       mLastEmittedBeat = kBeatCounterUninit;
+      // LSAEC: the click is mixed into the AEC reference (mixMetronomeIntoOutput,
+      // BEFORE the reference write in capture.cpp) specifically so cancellation
+      // removes it from what gets recorded. Toggling it on/off changes the
+      // audible mix without a loop-period change — exactly the case
+      // notifyAecReferenceChanged() exists for. Unlike mute/unmute/pause/stop
+      // on a registered voice, the metronome has no trackIndex/PendingAction,
+      // so this SetMetronome command (the single choke point for the click
+      // regardless of which UI toggles it) is the right place to wire it.
+      // Without this, E[phi] keeps expecting the click at whatever phases it
+      // learned it and never gets told to relearn — confirmed on-device as a
+      // permanent "ghost click" that per-pass learning alone cannot clear
+      // once the E3 freeze locks onto the resulting residual spike (see
+      // synchronous_echo_template.cpp's freeze comment).
+      if (mMetronomeEnabled != wasEnabled && mFilters) {
+        mFilters->notifyAecReferenceChanged();
+      }
       // No event emitted for the SetMetronome itself; Dart already knows
       // the setting it just posted.
       break;
+    }
 
     case Command::Type::ReportKeyInferred: {
       // Worker thread → audio thread → Dart. We just unpack and forward as

@@ -14,9 +14,6 @@ import 'package:meta/meta.dart';
 export 'package:flutter_recorder/src/bindings/recorder_io.dart'
     if (dart.library.js_interop) 'package:flutter_recorder/src/bindings/recorder_web.dart';
 
-/// Timing snapshot of the native audio callback. All durations in
-/// microseconds. A callback whose duration exceeds [budgetMicros] makes the
-/// device's next buffer late — that's an underrun, heard as a pop/click.
 /// One timed section of the audio callback (see capture.cpp section list).
 class CallbackSection {
   const CallbackSection(this.name, this.lastMicros, this.maxMicros);
@@ -32,11 +29,13 @@ class CallbackSection {
   final int maxMicros;
 
   @override
-  String toString() =>
-      '$name=${(lastMicros / 1000).toStringAsFixed(2)}/'
+  String toString() => '$name=${(lastMicros / 1000).toStringAsFixed(2)}/'
       '${(maxMicros / 1000).toStringAsFixed(2)}ms';
 }
 
+/// Timing snapshot of the native audio callback. All durations in
+/// microseconds. A callback whose duration exceeds [budgetMicros] makes the
+/// device's next buffer late — that's an underrun, heard as a pop/click.
 class CallbackStats {
   const CallbackStats({
     required this.lastMicros,
@@ -101,6 +100,12 @@ class AecTelemetry {
     required this.farSamples,
     required this.totalSamples,
     required this.generation,
+    required this.templateConfidence,
+    required this.freezeCount,
+    required this.isSeeding,
+    required this.overCapacity,
+    required this.govLeak,
+    required this.govBoost,
   });
 
   /// Σ mic² over far-end-active samples (gated ERLE numerator).
@@ -127,6 +132,27 @@ class AecTelemetry {
   /// Increments each published window (detects a stalled audio thread).
   final int generation;
 
+  /// Mean per-phase LSAEC template confidence, 0..1 (0 = not in LSAEC mode
+  /// or template never learned; 1 = every phase at max confidence).
+  final double templateConfidence;
+
+  /// E3 double-talk-freeze counter (monotonic, blocks skipped as near-end).
+  final int freezeCount;
+
+  /// True while a convergence-seed capture/compute/apply is in flight.
+  final bool isSeeding;
+
+  /// True when the loop period exceeds the 16s template capacity —
+  /// cancellation is OFF (pure passthrough) until the period drops back
+  /// under the cap. See SynchronousEchoTemplate::isOverCapacity().
+  final bool overCapacity;
+
+  /// Spectral governor's last coherence-leak reading.
+  final double govLeak;
+
+  /// Spectral governor's current learning-rate boost (1.0 = no boost).
+  final double govBoost;
+
   static const AecTelemetry zero = AecTelemetry(
     micEnergyFar: 0,
     outEnergyFar: 0,
@@ -136,6 +162,12 @@ class AecTelemetry {
     farSamples: 0,
     totalSamples: 0,
     generation: 0,
+    templateConfidence: 0,
+    freezeCount: 0,
+    isSeeding: false,
+    overCapacity: false,
+    govLeak: 0,
+    govBoost: 1.0,
   );
 
   /// Fraction of the window where the speaker (far end) was actually playing.
@@ -157,6 +189,11 @@ class AecTelemetry {
     final erleStr = erle == null ? 'n/a' : '${erle.toStringAsFixed(1)}dB';
     return 'AecTelemetry(gatedERLE=$erleStr '
         'farActive=${(farActiveFraction * 100).toStringAsFixed(0)}% '
+        'conf=${(templateConfidence * 100).toStringAsFixed(0)}% '
+        'freeze=$freezeCount '
+        '${isSeeding ? 'SEEDING ' : ''}'
+        '${overCapacity ? 'OVER-CAPACITY ' : ''}'
+        'gov(leak=${govLeak.toStringAsFixed(2)},boost=${govBoost.toStringAsFixed(2)}) '
         'gen=$generation)';
   }
 }
@@ -710,6 +747,15 @@ abstract class RecorderImpl {
   /// poll at ~10 Hz. Returns [AecTelemetry.zero] when the AEC filter is absent.
   @mustBeOverridden
   AecTelemetry aecGetTelemetry();
+
+  /// LSAEC: tell the template the audible mix changed (e.g. a one-shot
+  /// source like the metronome click toggled on/off) even though no loop-
+  /// period change occurred. Mute/unmute/pause/stop on a registered SoLoud
+  /// voice already trigger this internally via the native PendingAction
+  /// path; call this directly for anything that path doesn't cover. Cheap;
+  /// safe to call often — a no-op while a seed job is already in flight.
+  @mustBeOverridden
+  void aecNotifyReferenceChanged();
 
   /// Get current VSS-NLMS leakage factor.
   @mustBeOverridden

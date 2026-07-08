@@ -73,6 +73,109 @@ std::unique_ptr<CircularBuffer<float>> circularBuffer;
 /// the buffer used for streaming.
 std::unique_ptr<std::vector<unsigned char>> streamBuffer;
 
+namespace {
+// ----------------------------------------------------------------------------
+// Off-audio-thread stream dispatch. The Dart FFI contract (fresh heap
+// pointer per chunk, freed by Dart via flutter_recorder_nativeFree — see
+// recorder_io.dart _streamDataCallback) is unchanged; what moves is WHICH
+// thread performs the `new[]` + memcpy + NativeCallable dispatch. Doing that
+// directly in data_callback (the original design) put a heap allocation on
+// the render thread on every ~256-frame chunk during ANY active recording —
+// the same class of RT-unsafety already root-caused twice tonight elsewhere
+// (RT-thread fprintf/syslog, RT-thread file I/O). Allocator contention grows
+// with session length as the heap fragments, which matches the reported
+// symptom exactly: fine at first, progressively worse overruns, eventual
+// crash. Fix: a wait-free SPSC byte ring (audio thread writes, drops on
+// overflow rather than ever blocking) drained by a dedicated worker thread
+// that does the allocation/copy/dispatch — mirrors SpectralGovernor's proven
+// pattern from the same session.
+class StreamDispatchWorker {
+public:
+  static StreamDispatchWorker &instance() {
+    static StreamDispatchWorker w;
+    return w;
+  }
+
+  void start() {
+    bool expected = false;
+    if (!mRunning.compare_exchange_strong(expected, true))
+      return;
+    mWriteIdx.store(0, std::memory_order_relaxed);
+    mReadIdx.store(0, std::memory_order_relaxed);
+    mDroppedBytes.store(0, std::memory_order_relaxed);
+    mWorker = std::thread([this] { workerLoop(); });
+  }
+
+  void stop() {
+    if (!mRunning.exchange(false))
+      return;
+    if (mWorker.joinable())
+      mWorker.join();
+  }
+
+  // Audio-thread call: wait-free. Drops (and counts) bytes if the ring is
+  // full rather than ever blocking the render thread.
+  void push(const unsigned char *data, size_t n) {
+    if (!mRunning.load(std::memory_order_relaxed) || !data || n == 0)
+      return;
+    const uint64_t w = mWriteIdx.load(std::memory_order_relaxed);
+    const uint64_t r = mReadIdx.load(std::memory_order_acquire);
+    if (w - r + n > kCapacity) {
+      mDroppedBytes.fetch_add(n, std::memory_order_relaxed);
+      return;
+    }
+    for (size_t i = 0; i < n; ++i)
+      mRing[(w + i) % kCapacity] = data[i];
+    mWriteIdx.store(w + n, std::memory_order_release);
+  }
+
+private:
+  StreamDispatchWorker() : mRing(kCapacity) {}
+
+  static constexpr size_t kCapacity = 1 << 20; // 1 MiB — many seconds of PCM
+  static constexpr int kPollMs = 2; // low latency: Dart consumers stream live
+
+  std::vector<unsigned char> mRing;
+  std::atomic<uint64_t> mWriteIdx{0};
+  std::atomic<uint64_t> mReadIdx{0};
+  std::atomic<uint64_t> mDroppedBytes{0};
+  std::atomic<bool> mRunning{false};
+  std::thread mWorker;
+
+  void workerLoop() {
+    while (mRunning.load(std::memory_order_relaxed)) {
+      const size_t targetBufferSize =
+          static_cast<size_t>(STREAM_BUFFER_SIZE) * mChunkFrameSize;
+      if (targetBufferSize == 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+        continue;
+      }
+      const uint64_t w = mWriteIdx.load(std::memory_order_acquire);
+      const uint64_t r = mReadIdx.load(std::memory_order_relaxed);
+      if (w - r < targetBufferSize) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+        continue;
+      }
+      auto *dataCopy = new unsigned char[targetBufferSize];
+      for (size_t i = 0; i < targetBufferSize; ++i)
+        dataCopy[i] = mRing[(r + i) % kCapacity];
+      mReadIdx.store(r + targetBufferSize, std::memory_order_release);
+      if (nativeStreamDataCallback)
+        nativeStreamDataCallback(dataCopy, static_cast<int>(targetBufferSize));
+      else
+        delete[] dataCopy; // no Dart listener registered — avoid a leak
+    }
+  }
+
+public:
+  // Bytes-per-frame for the CURRENT stream (channels * sizeof(float)); set
+  // once per startStreamingData() call from the audio-thread-known channel
+  // count. Plain int, written only while the worker isn't consuming it
+  // (before start()/after stop()) — no synchronization needed.
+  int mChunkFrameSize = 0;
+};
+} // namespace
+
 static CaptureErrors setAndroidInputPreset(ma_device_config *config,
                                            int androidInputPreset) {
   switch (androidInputPreset) {
@@ -986,40 +1089,17 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   if (captured != nullptr)
     calculateEnergy(captured, frameCount, captureChannels);
 
-  // Stream the audio data?
+  // Stream the audio data? Wait-free push into the ring; the dedicated
+  // StreamDispatchWorker thread owns the heap allocation + Dart dispatch
+  // (see class comment) — the render thread never allocates here.
   if (userData->isStreamingData && nativeStreamDataCallback != nullptr) {
     const unsigned char *data = (const unsigned char *)captured;
-    // Calculate total size in bytes considering frame size
     // IMPORTANT: captured is ALWAYS f32 after format conversion above,
     // so we must use sizeof(float), NOT bytesPerSample (which is the native
     // format)
-    int frameSize = sizeof(float) * captureChannels;
-    int dataSize = frameCount * frameSize;
-
-    // Add new data to the stream buffer
-    streamBuffer->insert(streamBuffer->end(), data, data + dataSize);
-
-    // Calculate target buffer size in bytes
-    int targetBufferSize = STREAM_BUFFER_SIZE * frameSize;
-
-    // If we've reached the target buffer size, send the data
-    if (streamBuffer->size() >= targetBufferSize) {
-      // Create a copy of the data to send
-      auto *dataCopy = new unsigned char[targetBufferSize];
-      memcpy(dataCopy, streamBuffer->data(), targetBufferSize);
-
-      // Send copy to Dart - it will be responsible for freeing the memory
-      nativeStreamDataCallback(dataCopy, targetBufferSize);
-
-      // Remove sent data and keep remaining data
-      if (streamBuffer->size() > targetBufferSize) {
-        std::vector<unsigned char> remaining(
-            streamBuffer->begin() + targetBufferSize, streamBuffer->end());
-        *streamBuffer = std::move(remaining);
-      } else {
-        streamBuffer->clear();
-      }
-    }
+    const int frameSize = sizeof(float) * captureChannels;
+    const int dataSize = frameCount * frameSize;
+    StreamDispatchWorker::instance().push(data, static_cast<size_t>(dataSize));
   }
 
   // Detect silence - captured is always f32 after conversion
@@ -1855,6 +1935,7 @@ void Capture::dispose() {
     circularBuffer.reset();
   if (streamBuffer)
     streamBuffer.reset();
+  StreamDispatchWorker::instance().stop(); // no-op if streaming wasn't active
   isRecording = false;
 
   printf("[Capture::dispose] Calling ma_device_uninit...\n");
@@ -1956,17 +2037,21 @@ void Capture::stop() {
 }
 
 void Capture::startStreamingData() {
-  if (streamBuffer)
-    streamBuffer.reset();
-  streamBuffer = std::make_unique<std::vector<unsigned char>>();
-  streamBuffer->reserve(STREAM_BUFFER_SIZE * 6);
+  // Channel count for this stream: matches the f32 conversion in
+  // data_callback (captureChannels), read from the live device config so the
+  // worker's chunk-size math agrees with what push() actually sends.
+  StreamDispatchWorker::instance().mChunkFrameSize =
+      static_cast<int>(sizeof(float)) *
+      static_cast<int>(deviceConfig.capture.channels > 0
+                           ? deviceConfig.capture.channels
+                           : 1);
+  StreamDispatchWorker::instance().start();
   isStreamingData = true;
 }
 
 void Capture::stopStreamingData() {
   isStreamingData = false;
-  if (streamBuffer)
-    streamBuffer.reset();
+  StreamDispatchWorker::instance().stop();
 }
 
 void Capture::setSilenceDetection(bool enable) {

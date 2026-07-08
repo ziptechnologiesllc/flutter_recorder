@@ -78,6 +78,16 @@ struct AecTelemetrySnapshot {
   uint64_t farSamples;   // far-end-active samples in the window
   uint64_t totalSamples; // total samples in the window
   uint64_t generation;   // increments each published window
+
+  // LSAEC debug-overlay fields (added alongside the seed/mute-notify work):
+  // distinguish "converging normally" from "seeding" from "stuck" without
+  // grepping raw logs. Zeroed when the AEC filter isn't in LSAEC mode.
+  float templateConfidence; // mean per-phase confidence, 0..1
+  uint32_t freezeCount;     // E3 double-talk-freeze counter (monotonic)
+  uint32_t isSeeding;       // 1 while a convergence-seed job is in flight
+  uint32_t overCapacity;    // 1 = loop period exceeds 16s cap: cancellation OFF
+  float govLeak;            // spectral governor's last coherence-leak reading
+  float govBoost;           // spectral governor's current learning-rate boost
 };
 
 #endif // ENUMS_H

@@ -1658,6 +1658,24 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_getTelemetry(double *out) {
   out[5] = static_cast<double>(t.farSamples);
   out[6] = static_cast<double>(t.totalSamples);
   out[7] = static_cast<double>(t.generation);
+  out[8] = static_cast<double>(t.templateConfidence);
+  out[9] = static_cast<double>(t.freezeCount);
+  out[10] = static_cast<double>(t.isSeeding);
+  out[11] = static_cast<double>(t.overCapacity);
+  out[12] = static_cast<double>(t.govLeak);
+  out[13] = static_cast<double>(t.govBoost);
+}
+
+// LSAEC: tell the template the audible mix changed (e.g. the metronome click
+// was toggled on/off) even though no loop-period change occurred. Unlike
+// mute/unmute/pause/stop on a registered SoLoud voice — which already fires
+// this via the PendingAction path in audio_engine.cpp — one-shot sources
+// like the metronome click have no trackIndex/PendingAction to hang this
+// off, so Dart-side callers that don't go through that path need a direct
+// hook. Cheap/safe to call often; internally gated (no-op while a seed job
+// is already in flight).
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_notifyReferenceChanged() {
+  if (mFilters) mFilters->notifyAecReferenceChanged();
 }
 
 FFI_PLUGIN_EXPORT float flutter_recorder_aec_getVssLeakage() {

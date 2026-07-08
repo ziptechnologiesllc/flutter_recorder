@@ -170,7 +170,8 @@ class RecorderFfi extends RecorderImpl {
   ffi.NativeCallable<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>?
       _nativeRecordingStoppedCallable;
 
-  void _recordingStoppedCallback(int recordedFrames, ffi.Pointer<ffi.Char> wavPath) {
+  void _recordingStoppedCallback(
+      int recordedFrames, ffi.Pointer<ffi.Char> wavPath) {
     if (_recordingStoppedController.isClosed) return;
     final path = wavPath.cast<Utf8>().toDartString();
     _recordingStoppedController.add(
@@ -180,9 +181,9 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   Future<void> setRecordingStoppedCallback() async {
-    _nativeRecordingStoppedCallable = ffi
-        .NativeCallable<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>
-        .listener(_recordingStoppedCallback);
+    _nativeRecordingStoppedCallable = ffi.NativeCallable<
+        ffi.Void Function(ffi.Int64,
+            ffi.Pointer<ffi.Char>)>.listener(_recordingStoppedCallback);
     _bindings.flutter_recorder_setRecordingStoppedCallback(
       _nativeRecordingStoppedCallable!.nativeFunction,
     );
@@ -199,7 +200,8 @@ class RecorderFfi extends RecorderImpl {
   ffi.NativeCallable<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>?
       _nativeRecordingStartedCallable;
 
-  void _recordingStartedCallback(int startFrame, ffi.Pointer<ffi.Char> wavPath) {
+  void _recordingStartedCallback(
+      int startFrame, ffi.Pointer<ffi.Char> wavPath) {
     if (_recordingStartedController.isClosed) return;
     final path = wavPath.cast<Utf8>().toDartString();
     _recordingStartedController.add(
@@ -209,9 +211,9 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   Future<void> setRecordingStartedCallback() async {
-    _nativeRecordingStartedCallable = ffi
-        .NativeCallable<ffi.Void Function(ffi.Int64, ffi.Pointer<ffi.Char>)>
-        .listener(_recordingStartedCallback);
+    _nativeRecordingStartedCallable = ffi.NativeCallable<
+        ffi.Void Function(ffi.Int64,
+            ffi.Pointer<ffi.Char>)>.listener(_recordingStartedCallback);
     _bindings.flutter_recorder_setRecordingStartedCallback(
       _nativeRecordingStartedCallable!.nativeFunction,
     );
@@ -228,7 +230,8 @@ class RecorderFfi extends RecorderImpl {
   ffi.NativeCallable<bindings_gen.dartLooperPlaybackStartedCallback_tFunction>?
       _nativeLooperPlaybackStartedCallable;
 
-  void _looperPlaybackStartedCallback(int soundHash, int handle, double durationSeconds, ffi.Pointer<ffi.Char> wavPath) {
+  void _looperPlaybackStartedCallback(int soundHash, int handle,
+      double durationSeconds, ffi.Pointer<ffi.Char> wavPath) {
     if (_looperPlaybackStartedController.isClosed) return;
     final path = wavPath.cast<Utf8>().toDartString();
     _looperPlaybackStartedController.add(
@@ -244,8 +247,8 @@ class RecorderFfi extends RecorderImpl {
   @override
   Future<void> setLooperPlaybackStartedCallback() async {
     _nativeLooperPlaybackStartedCallable = ffi.NativeCallable<
-            bindings_gen.dartLooperPlaybackStartedCallback_tFunction>
-        .listener(_looperPlaybackStartedCallback);
+            bindings_gen.dartLooperPlaybackStartedCallback_tFunction>.listener(
+        _looperPlaybackStartedCallback);
     _bindings.flutter_recorder_setLooperPlaybackStartedCallback(
       _nativeLooperPlaybackStartedCallable!.nativeFunction,
     );
@@ -779,7 +782,10 @@ class RecorderFfi extends RecorderImpl {
   // ── Audio-callback profiling ──────────────────────────────────────────────
   @override
   CallbackStats getCallbackStats() {
-    final out = calloc<ffi.Int64>(6);
+    // 6 aggregate slots + 5 sections × (last, max). Order matches
+    // captureGetCallbackStats in capture.cpp.
+    const sectionNames = ['aec', 'ring', 'sched', 'mix', 'post'];
+    final out = calloc<ffi.Int64>(6 + sectionNames.length * 2);
     try {
       _bindings.flutter_recorder_getCallbackStats(out);
       return CallbackStats(
@@ -789,6 +795,10 @@ class RecorderFfi extends RecorderImpl {
         overrunCount: out[3],
         nearMissCount: out[4],
         totalCount: out[5],
+        sections: [
+          for (var s = 0; s < sectionNames.length; s++)
+            CallbackSection(sectionNames[s], out[6 + s * 2], out[7 + s * 2]),
+        ],
       );
     } finally {
       calloc.free(out);
@@ -1173,7 +1183,7 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   AecTelemetry aecGetTelemetry() {
-    final out = calloc<ffi.Double>(8);
+    final out = calloc<ffi.Double>(14);
     try {
       _bindings.flutter_recorder_aec_getTelemetry(out);
       return AecTelemetry(
@@ -1185,10 +1195,21 @@ class RecorderFfi extends RecorderImpl {
         farSamples: out[5].toInt(),
         totalSamples: out[6].toInt(),
         generation: out[7].toInt(),
+        templateConfidence: out[8],
+        freezeCount: out[9].toInt(),
+        isSeeding: out[10] != 0,
+        overCapacity: out[11] != 0,
+        govLeak: out[12],
+        govBoost: out[13],
       );
     } finally {
       calloc.free(out);
     }
+  }
+
+  @override
+  void aecNotifyReferenceChanged() {
+    _bindings.flutter_recorder_aec_notifyReferenceChanged();
   }
 
   @override
@@ -1312,7 +1333,8 @@ class RecorderFfi extends RecorderImpl {
     final callback = ffi.Pointer<ffi.Void>.fromAddress(callbackAddress);
     final userData = ffi.Pointer<ffi.Void>.fromAddress(userDataAddress);
     _bindings.flutter_recorder_setNativeAudioSink(
-      callback.cast<ffi.NativeFunction<bindings_gen.NativeAudioSinkCallbackFunction>>(),
+      callback.cast<
+          ffi.NativeFunction<bindings_gen.NativeAudioSinkCallbackFunction>>(),
       userData,
     );
   }
@@ -1358,7 +1380,8 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   void schedulerSetBaseLoop(int loopFrames, int loopStartFrame) {
-    _bindings.flutter_recorder_scheduler_setBaseLoop(loopFrames, loopStartFrame);
+    _bindings.flutter_recorder_scheduler_setBaseLoop(
+        loopFrames, loopStartFrame);
   }
 
   @override
@@ -1469,9 +1492,8 @@ class RecorderFfi extends RecorderImpl {
       int sampleRate, bool measureAmbient) {
     final pathPtr = wavPath.toNativeUtf8();
     try {
-      _bindings.flutter_recorder_armAutoRecord(
-          pathPtr.cast(), barCount, framesPerBar, sampleRate,
-          measureAmbient ? 1 : 0);
+      _bindings.flutter_recorder_armAutoRecord(pathPtr.cast(), barCount,
+          framesPerBar, sampleRate, measureAmbient ? 1 : 0);
     } finally {
       malloc.free(pathPtr);
     }

@@ -227,8 +227,32 @@ uint32_t NativeScheduler::scheduleQuantizedStop(int64_t recordingStartFrame) {
         // No latency compensation in loop mode (quantized start/stop)
         int64_t framesRecorded = currentFrame - recordingStartFrame;
 
-        // Find next loop multiple
-        int64_t loops = (framesRecorded / loopFrames) + 1;
+        // Late-tap grace: a stop tapped just AFTER a loop boundary almost
+        // certainly meant THAT boundary — the musician reacted late, they
+        // didn't want a whole extra loop. If at least one full loop is down
+        // and the tap is within the grace window past the boundary, target
+        // the boundary just passed (a past frame): processEvents fires the
+        // stop on the next buffer and extraction rounds to the nearest loop
+        // multiple, trimming the overhang (with its usual crossfade).
+        // Grace = min(15% of the loop, 350 ms) — scales down for short loops,
+        // capped so long loops don't swallow deliberate early stops.
+        int64_t posInLoop = framesRecorded % loopFrames;
+        int64_t graceFrames = loopFrames * 15 / 100;
+        if (g_nativeRingBuffer != nullptr) {
+            int64_t graceCap =
+                (int64_t)g_nativeRingBuffer->sampleRate() * 350 / 1000;
+            if (graceCap > 0 && graceFrames > graceCap) graceFrames = graceCap;
+        }
+
+        int64_t loops;
+        if (framesRecorded >= loopFrames && posInLoop <= graceFrames) {
+            loops = framesRecorded / loopFrames; // boundary just passed
+            SCHED_DEBUG("scheduleQuantizedStop: late tap (%lld frames past "
+                        "boundary, grace=%lld) - trimming to previous boundary",
+                        (long long)posInLoop, (long long)graceFrames);
+        } else {
+            loops = (framesRecorded / loopFrames) + 1; // next boundary
+        }
         int64_t targetDuration = loops * loopFrames;
         targetFrame = recordingStartFrame + targetDuration;
 

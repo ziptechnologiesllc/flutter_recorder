@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 
+extern void aecLog(const char *fmt, ...); // see nlms_filter.h
+
 namespace {
 // CONFIDENCE-ANNEALED synchronous-average rate: E[phi] += alpha*(mic - E[phi])
 // once per loop pass at this phase. alpha starts HOT (fast convergence) and
@@ -67,6 +69,11 @@ constexpr int kSeedPollMs = 8;
 SynchronousEchoTemplate::SynchronousEchoTemplate(unsigned int sampleRate,
                                                  unsigned int channels)
     : mSampleRate(sampleRate), mChannels(channels) {
+  // 100ms: short enough to feel immediate relative to typical loop periods
+  // (seconds), long enough to avoid an audible click from the gate itself
+  // snapping open. Deliberately decoupled from loop length / the reseed's
+  // own (much slower, up-to-one-pass) landing time — see trustGate().
+  mTrustRampFrames = static_cast<int64_t>(sampleRate) / 10;
   mCapacityFrames = static_cast<size_t>(sampleRate) * kMaxSeconds;
   mTemplate.assign(mCapacityFrames * channels, 0.0f);
   mConfidence.assign(mCapacityFrames, 0.0f);
@@ -145,27 +152,77 @@ void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
   if (ir.empty() || P <= 0)
     return;
   const size_t Pu = static_cast<size_t>(P);
-  const size_t L = ir.size();
-  // Exact circular convolution: the reference is exactly periodic at P, so
-  // the true steady-state echo is h ⊛ ref computed modulo P — not a linear-
-  // convolution approximation with edge effects. seed[phi] predicts what
-  // per-pass learning would converge to, using the SAME alignedRef delay
-  // convention the live filter already uses (see calibration.cpp
-  // analyzeAligned: h is trained on a delay-pre-aligned ref/mic pair).
+  // CRITICAL: circular convolution is only well-posed as "one clean copy of
+  // h wrapped around a period-P cycle" when L <= P. If the calibrated IR
+  // (4096 taps = 85 ms @ 48 kHz) is LONGER than the loop period — a short
+  // loop, entirely plausible right after calibrating — using all L taps
+  // makes `k % Pu` wrap MULTIPLE times, so several taps land on the SAME
+  // output phase and sum constructively. A real IR carries meaningful energy
+  // across most of its length (this session's calibration measured
+  // echoGain=sqrt(Σh²)=4.05), so that pileup produces an output tens of dB
+  // louder than the mic — confirmed on-device: ERLE cratered to -30 dB on
+  // the very first seed after a fresh calibration. Fix: use only the first
+  // min(L, P) taps — the standard, correct treatment for a period-P circular
+  // convolution with a kernel that may exceed the period. A P-tap prefix
+  // still carries the direct-path + early-reflection energy that matters
+  // most; the discarded reverb tail was going to alias into garbage anyway.
+  const size_t L = std::min(ir.size(), Pu);
+
+  // Defense in depth: a real acoustic echo (speaker leaking into the mic) is
+  // essentially always QUIETER than the direct/reference signal — the room
+  // attenuates it. A seed predicting echo energy comparable to or louder
+  // than the reference is never physically correct, and applying it doesn't
+  // just under/over-cancel by a little: with confidence set to max on
+  // arrival, an over-estimated seed dominates the subtraction outright,
+  // producing a phase-inverted copy of whatever the reference was instead of
+  // the near-end performance. Confirmed on-device: a seed applied here
+  // produced a recording that was an audible, phase-inverted, ~30ms-delayed
+  // copy of the OTHER loop layer instead of near-silence. The prior bound
+  // (4x — i.e. "allow the seed to be up to 4x LOUDER than the reference")
+  // contradicted this comment's own reasoning; a real echo shouldn't exceed
+  // the reference at all, so cap at unity — never let the seed claim more
+  // echo energy than the reference itself carried.
+  float refPeak = 0.0f;
+  for (size_t phi = 0; phi < Pu; ++phi)
+    refPeak = std::max(refPeak, std::fabs(mRefCapture[phi]));
+  constexpr float kMaxSeedToRefRatio = 1.0f;
+
+  // Exact circular convolution over the (possibly truncated) kernel: the
+  // reference is exactly periodic at P, so the true steady-state echo is
+  // h ⊛ ref computed modulo P — not a linear-convolution approximation with
+  // edge effects. seed[phi] predicts what per-pass learning would converge
+  // to, using the SAME alignedRef delay convention the live filter already
+  // uses (see calibration.cpp analyzeAligned: h is trained on a delay-
+  // pre-aligned ref/mic pair).
+  float seedPeak = 0.0f;
   for (size_t phi = 0; phi < Pu; ++phi) {
     double acc = 0.0;
     for (size_t k = 0; k < L; ++k) {
-      const size_t idx = (phi + Pu - (k % Pu)) % Pu;
+      const size_t idx = (phi + Pu - k) % Pu; // k < L <= Pu: no wraparound aliasing
       acc += static_cast<double>(ir[k]) * static_cast<double>(mRefCapture[idx]);
     }
-    mSeedOutput[phi] = static_cast<float>(acc);
+    const float v = static_cast<float>(acc);
+    mSeedOutput[phi] = v;
+    seedPeak = std::max(seedPeak, std::fabs(v));
+  }
+
+  if (refPeak > 0.0f && seedPeak > kMaxSeedToRefRatio * refPeak) {
+    const float scale = (kMaxSeedToRefRatio * refPeak) / seedPeak;
+    for (size_t phi = 0; phi < Pu; ++phi)
+      mSeedOutput[phi] *= scale;
   }
 }
 
 float SynchronousEchoTemplate::meanConfidence() const {
   if (mActiveLoopFrames <= 0)
     return 0.0f;
-  const size_t n = static_cast<size_t>(mActiveLoopFrames);
+  // mActiveLoopFrames can be left set to an OVERSIZED value by process()'s
+  // capacity guard (a loop period beyond kMaxSeconds falls back to pure
+  // passthrough and stores the raw, over-capacity loopFrames for telemetry
+  // continuity) — clamp before indexing mConfidence (sized to mCapacityFrames)
+  // or this reads past the end of the array.
+  const size_t n =
+      std::min(static_cast<size_t>(mActiveLoopFrames), mCapacityFrames);
   double acc = 0.0;
   for (size_t i = 0; i < n; ++i)
     acc += mConfidence[i];
@@ -181,13 +238,29 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
   if (!micInOut || frameCount == 0)
     return;
 
-  // No loop yet, or period beyond capacity -> passthrough.
+  // No loop yet, or period beyond capacity -> passthrough. A period beyond
+  // kMaxSeconds (16s) is a SILENT, total cancellation outage — zero taps
+  // applied, raw mic straight through — confirmed on-device as the cause of
+  // "ghost" bleed-through of prior loop layers into a new take once a
+  // composite period grows past this cap. Surface it (rate-limited log +
+  // isOverCapacity() telemetry flag) so it's diagnosable instead of looking
+  // like a mystery regression.
   if (loopFrames <= 0 ||
       static_cast<size_t>(loopFrames) > mCapacityFrames ||
       channels > mChannels) {
+    const bool wasOverCapacity = mOverCapacity;
+    mOverCapacity =
+        static_cast<size_t>(loopFrames) > mCapacityFrames; // not the ch/0 cases
+    if (mOverCapacity && !wasOverCapacity) {
+      aecLog("[LSAEC] CAPACITY EXCEEDED: loopFrames=%lld > cap=%zu — "
+             "cancellation OFF (passthrough) until period drops back under "
+             "%us\n",
+             (long long)loopFrames, mCapacityFrames, kMaxSeconds);
+    }
     mActiveLoopFrames = (loopFrames > 0) ? loopFrames : 0;
     return;
   }
+  mOverCapacity = false;
 
   // Loop period changed (a layer added/removed): the old per-phase estimates
   // remap to different content, so clear the in-use span ONCE at the boundary.
@@ -199,6 +272,7 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     mActiveLoopFrames = loopFrames;
     mResidBaseline = 0.0f;
     mLearnedBlocks = 0;
+    mMixChangeFrame = blockStartFrame; // close the trust gate — see trustGate()
 
     // A period change supersedes any pending mix-changed notification (the
     // capture below already covers the new state) and abandons any old-period
@@ -216,8 +290,24 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     // template's phase content is now stale even though P didn't move.
     // Re-arm WITHOUT touching mTemplate/mConfidence: unaffected phases keep
     // cancelling with what they have until the reseed lands and overwrites.
-    // If a capture/job is already in flight (mSeedBusy), leave it running —
-    // it already reflects a NEWER change than whatever queued this notify.
+    //
+    // If a capture/job is ALREADY in flight, its captured samples span up to
+    // one full loop period of wall-clock time — long enough for a SECOND mix
+    // change (another mute/unmute) to land mid-capture. Letting it "keep
+    // running" (the previous behavior) means the capture straddles TWO
+    // different mixes: early phases reflect the mix active when it was
+    // armed, later phases reflect whatever's playing now. Convolving that
+    // temporally-inconsistent capture against the calibrated IR bakes a
+    // hybrid into E[phi] — confirmed on a real recording this session as an
+    // audible "ghost" of a loop layer that wasn't even playing anymore, once
+    // some phases were seeded from the stale portion. Abort and restart
+    // clean, exactly like a period change does, so the eventual capture is
+    // always a single, internally-consistent mix throughout.
+    if (mSeedBusy) {
+      ++mSeedGeneration;
+      mSeedBusy = false;
+    }
+    mMixChangeFrame = blockStartFrame; // close the trust gate — see trustGate()
     armSeedCaptureIfPossible(alignedRef);
   }
 
@@ -250,7 +340,11 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
 
   const int64_t P = loopFrames;
 
-  // ---- Pass 1: cancel in place (out = mic - E[phi]); accumulate block residual.
+  // Computed once per block (100ms ramp; sub-block precision buys nothing) —
+  // see trustGate()'s class-comment-level rationale on mMixChangeFrame.
+  const float gate = trustGate(blockStartFrame);
+
+  // ---- Pass 1: cancel in place (out = mic - gate*E[phi]); accumulate block residual.
   double blockResid = 0.0;
   for (unsigned int f = 0; f < frameCount; ++f) {
     int64_t phi = (blockStartFrame + static_cast<int64_t>(f) - loopStartFrame) % P;
@@ -259,7 +353,7 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     const size_t base = static_cast<size_t>(phi) * channels;
     for (unsigned int ch = 0; ch < channels; ++ch) {
       const size_t i = f * channels + ch;
-      const float u = micInOut[i] - mTemplate[base + ch];
+      const float u = micInOut[i] - gate * mTemplate[base + ch];
       micInOut[i] = u; // micInOut now holds the residual (the cancelled output)
       blockResid += static_cast<double>(u) * u;
     }

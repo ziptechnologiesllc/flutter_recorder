@@ -1060,6 +1060,17 @@ interface class Recorder {
     return _impl.aecGetTelemetry();
   }
 
+  /// LSAEC: tell the template the audible mix changed (e.g. a one-shot
+  /// source like the metronome click toggled on/off) even though no loop-
+  /// period change occurred. Mute/unmute/pause/stop on a registered SoLoud
+  /// voice already trigger this internally; call this directly for anything
+  /// that path doesn't cover — otherwise the template keeps expecting that
+  /// content at whatever phases it learned it, over/under-cancelling once
+  /// it's gone until ordinary per-pass learning slowly corrects it.
+  void aecNotifyReferenceChanged() {
+    _impl.aecNotifyReferenceChanged();
+  }
+
   /// Get current VSS-NLMS leakage factor.
   double aecGetVssLeakage() {
     return _impl.aecGetVssLeakage();
