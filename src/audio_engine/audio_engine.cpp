@@ -661,12 +661,34 @@ void AudioEngine::firePendingThroughFrame(
       // per-phase content stale even though the loop period didn't move —
       // re-arm a convergence-seed reseed so cancellation catches up in ~1
       // pass instead of several. See synchronous_echo_template.h.
+      //
+      // Per-track exact subtraction (setAecTrackActive) fires at this SAME
+      // site, same sample-accurate fire-frame, for this SAME reason but a
+      // stronger fix where available: for a track that finished registering
+      // (registerTrackAudio already computed its exact contribution), this
+      // is an O(P) arithmetic edit with ZERO reconvergence latency — no
+      // reseed race, no suppression heuristic, nothing to wait on. It's a
+      // no-op (falls through to the reseed/suppression path above) for any
+      // track that hasn't registered yet, so this is purely additive.
       switch (pe.action) {
         case PendingAction::Mute:
+          if (mFilters) mFilters->setAecTrackActive(pe.trackIndex, false);
+          if (mFilters) mFilters->notifyAecReferenceChanged();
+          break;
         case PendingAction::Unmute:
+          if (mFilters) mFilters->setAecTrackActive(pe.trackIndex, true);
+          if (mFilters) mFilters->notifyAecReferenceChanged();
+          break;
         case PendingAction::Pause:
+          if (mFilters) mFilters->setAecTrackActive(pe.trackIndex, false);
+          if (mFilters) mFilters->notifyAecReferenceChanged();
+          break;
         case PendingAction::Unpause:
+          if (mFilters) mFilters->setAecTrackActive(pe.trackIndex, true);
+          if (mFilters) mFilters->notifyAecReferenceChanged();
+          break;
         case PendingAction::Stop:
+          if (mFilters) mFilters->setAecTrackActive(pe.trackIndex, false);
           if (mFilters) mFilters->notifyAecReferenceChanged();
           break;
         default:

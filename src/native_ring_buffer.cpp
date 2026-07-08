@@ -363,6 +363,26 @@ void NativeRingBuffer::reset() {
 
 // AUDIO THREAD SAFE: No printf/fprintf calls, no allocations
 void NativeRingBuffer::startRecording(size_t latencyCompFrames) {
+  // Guard against double-entry. Without this, calling startRecording() a
+  // second time while a PRIOR recording session never got a matching
+  // stopRecording() (a missed/delayed stop event) treats whatever LINEAR
+  // write position that stale session has reached as if it were a small
+  // ring-mode offset. The pre-roll math below then reads
+  // "writePos - latencyCompFrames" relative to that stale, far-advanced
+  // position instead of relative to a fresh ring position — silently
+  // pulling in whatever audio was most recently written during the
+  // stuck-active session (which, since write() keeps linearly appending
+  // the whole time mRecordingActive stays true, includes anything spoken
+  // or played during that entire stretch) as if it were "just before the
+  // button press." Confirmed on-device as the mechanism behind speech
+  // spoken during an earlier, supposedly-idle period reappearing in a
+  // later recording. If we're already active, cleanly close out the
+  // stale session first (drop its data — it was never properly claimed
+  // by anyone) rather than let a second start corrupt the pre-roll math.
+  if (mRecordingActive.load(std::memory_order_acquire)) {
+    mRecordingActive.store(false, std::memory_order_release);
+  }
+
   size_t writePos = mWritePos.load(std::memory_order_acquire);
   size_t currentTotal = mTotalFramesWritten.load(std::memory_order_acquire);
 
@@ -394,12 +414,21 @@ void NativeRingBuffer::startRecording(size_t latencyCompFrames) {
       size_t firstPartSamples = firstPartFrames * mChannels;
       size_t secondPartSamples = secondPartFrames * mChannels;
 
+      // Copy head of ring (start portion) to its final destination FIRST —
+      // its source is mBuffer.data() (position 0), which the tail copy
+      // below is about to overwrite. Doing the tail copy first (the
+      // original order) read the head's source AFTER it had already been
+      // clobbered by the tail write, corrupting/duplicating this segment
+      // of the pre-roll whenever writePos < latencyCompFrames at
+      // record-start. Reading src before it becomes a write destination
+      // fixes it; the two regions this touches (this destination, and the
+      // tail copy's source near the end of the ring) don't overlap since
+      // the pre-roll is always tiny relative to the ring's full capacity.
+      std::memmove(mBuffer.data() + firstPartSamples, mBuffer.data(),
+                   secondPartSamples * sizeof(float));
       // Copy tail of ring (end portion) to beginning of buffer
       std::memmove(mBuffer.data(), mBuffer.data() + wrapStart * mChannels,
                    firstPartSamples * sizeof(float));
-      // Copy head of ring (start portion) right after
-      std::memmove(mBuffer.data() + firstPartSamples, mBuffer.data(),
-                   secondPartSamples * sizeof(float));
     }
 
     // Linear recording starts after the pre-roll

@@ -193,9 +193,17 @@ uint32_t NativeScheduler::scheduleQuantizedStart(const char* recordingPath) {
     // Schedule the START event
     uint32_t startEventId = scheduleEvent(SchedulerAction::StartRecording, targetStartFrame, recordingPath);
 
-    // If we have a base loop AND auto-stop is enabled, also schedule the STOP event upfront
-    bool autoStop = mAutoStopEnabled.load(std::memory_order_acquire);
-    if (startEventId != 0 && loopFrames > 0 && autoStop) {
+    // Landing an overdub on an exact multiple of the base loop is a hard
+    // invariant, not an optional convenience — every downstream consumer of
+    // loop length (AEC's phase indexing, LSAEC per-track registration,
+    // split/bisect's period math) assumes it. mAutoStopEnabled used to gate
+    // this, but that setting defaults OFF and has no effect in free-record
+    // mode either way (both branches already require loopFrames > 0) — so
+    // it was silently letting overdubs drift off the grid on any session
+    // where the user hadn't explicitly opted in. Once a base loop exists,
+    // always schedule the STOP; the setting is left in place for a future
+    // free-record-mode use, just no longer consulted here.
+    if (startEventId != 0 && loopFrames > 0) {
         // STOP is START + loopFrames. targetStartFrame already carries the
         // latency-comp offset, so STOP inherits it — the take stays exactly
         // loopFrames long, just phase-shifted off the grid by latencyComp.
@@ -203,9 +211,6 @@ uint32_t NativeScheduler::scheduleQuantizedStart(const char* recordingPath) {
         uint32_t stopEventId = scheduleEvent(SchedulerAction::StopRecording, targetStopFrame, recordingPath);
         SCHED_LOG("scheduleQuantizedStart: auto-scheduled STOP at frame %lld (startEventId=%u, stopEventId=%u)",
                   (long long)targetStopFrame, startEventId, stopEventId);
-    } else if (startEventId != 0 && loopFrames > 0 && !autoStop) {
-        SCHED_LOG("scheduleQuantizedStart: auto-stop DISABLED, no STOP scheduled (startEventId=%u)",
-                  startEventId);
     }
 
     return startEventId;

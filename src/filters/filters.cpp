@@ -374,6 +374,23 @@ void Filters::notifyAecReferenceChanged() {
       ->notifyReferenceChanged();
 }
 
+void Filters::registerAecTrackAudio(int trackIndex, const float *audioMono,
+                                    int64_t frames) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get())
+      ->registerTrackAudio(trackIndex, audioMono, frames);
+}
+
+void Filters::setAecTrackActive(int trackIndex, bool active) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get())
+      ->setTrackActive(trackIndex, active);
+}
+
 void Filters::setAecMode(AecMode mode) {
   mRequestedAecMode = mode; // survives filter add/remove; applied in addFilter
   int idx = isFilterActive(adaptiveEchoCancellation);

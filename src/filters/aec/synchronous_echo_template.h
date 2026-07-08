@@ -1,6 +1,7 @@
 #ifndef AEC_SYNCHRONOUS_ECHO_TEMPLATE_H
 #define AEC_SYNCHRONOUS_ECHO_TEMPLATE_H
 
+#include <array>
 #include <cstddef>
 #include <atomic>
 #include <cstdint>
@@ -149,6 +150,47 @@ public:
    * bool snapshot read from any thread. */
   bool isOverCapacity() const { return mOverCapacity; }
 
+  /**
+   * PER-TRACK EXACT SUBTRACTION — the real fix for mute/unmute ghosts.
+   *
+   * Every reactive attempt to catch a stale-template ghost after the fact
+   * (a time-based trust gate, then three iterations of an energy-ratio
+   * suppression gate) failed on-device: an aggregate-energy heuristic
+   * cannot reliably distinguish "this track's echo is now gone" from
+   * "this track's echo is just quiet", because it only ever sees a TOTAL,
+   * never an attribution. The fix is to not need the heuristic: since every
+   * track's audio is fully known and controlled by the app (a recorded
+   * loop, not a live unknown signal), that track's OWN echo contribution
+   * can be computed once, analytically, and then literally ADDED or
+   * SUBTRACTED from E[phi] the instant it mutes/unmutes — an exact
+   * arithmetic edit, not an estimate that needs to reconverge or a
+   * suppression that needs to guess.
+   *
+   * registerTrackAudio(): call once a track's audio is known (e.g. right
+   * after it's loaded into the mixer), from ANY thread. Computes E_track
+   * off-thread (reuses computeSeedConvolution's exact math — circular
+   * convolution of the calibrated IR against this track's own audio,
+   * instead of a live-captured reference) via the existing seed worker.
+   * ASSUMES the track's period equals the CURRENT composite loop period
+   * (P) and that audioMono is already phase-aligned to the loop's phase-0
+   * origin — both true by construction for a quantized-to-loop-boundary
+   * recording in this app's existing architecture. A track whose own
+   * period is a strict sub-multiple of P, or isn't yet aligned, is future
+   * work — falls back to the ordinary composite-template path (harmless,
+   * just not instant) until then.
+   *
+   * setTrackActive(): call at the SAME sample-accurate instant the
+   * SoLoud mute/unmute/pause/unpause/stop setter fires (audio thread).
+   * O(P) plain addition — cheap enough (a few hundred thousand float
+   * adds, no convolution) to run synchronously, unlike registration. A
+   * no-op if the track was never registered or isn't computed yet, in
+   * which case cancellation falls back to whatever the composite template
+   * (ordinary per-pass learning / the shared reseed) already provides —
+   * this mechanism is additive, never a regression from today's behavior.
+   */
+  void registerTrackAudio(int trackIndex, const float *audioMono, int64_t frames);
+  void setTrackActive(int trackIndex, bool active);
+
 private:
   unsigned int mSampleRate;
   unsigned int mChannels;
@@ -156,6 +198,14 @@ private:
   std::vector<float> mTemplate;    // E[phi*channels + ch] — echo estimate
   std::vector<float> mConfidence;  // per-phase saturating update count (anneal)
   int64_t mActiveLoopFrames = 0;   // P currently in use (<= capacity)
+  // Cross-thread-safe mirror of mActiveLoopFrames, updated at the same
+  // write sites. computeTrackContribution() runs on the worker thread and
+  // needs to know the CURRENT phase period to fold a registered track's
+  // raw audio (which may span multiple base-loop periods, or — per a
+  // separate recording-pipeline bug — occasionally land on a non-multiple
+  // length) down to exactly one period before convolving; reading the
+  // plain mActiveLoopFrames from that thread would be a data race.
+  std::atomic<int64_t> mActiveLoopFramesAtomic{0};
 
   // E3 block-level double-talk freeze. A smoothed per-BLOCK residual floor; a
   // block whose residual spikes well above it is near-end -> skip learning that
@@ -175,38 +225,36 @@ private:
   uint32_t mReopenCount = 0;   // reserved (block-level recovery) — telemetry
   bool mOverCapacity = false;  // loopFrames > mCapacityFrames — see isOverCapacity()
 
-  // ---- Trust gate (fast, time-based — NOT loop-bound) -------------------
-  // The reseed mechanism fixes a stale template correctly, but takes up to
-  // one full loop pass (capture + compute + apply) to land — during which
-  // the OLD template is still subtracted at full strength every callback.
-  // If the mix change was a track going silent (mute/pause/stop), that
-  // stale subtraction has nothing left to cancel against and instead
-  // INJECTS a phase-inverted copy of whatever that track used to sound
-  // like — confirmed on-device as a full recording replaced by a
-  // phase-inverted ghost of a paused loop layer. This gate closes
-  // IMMEDIATELY (frame-accurate, no loop-period wait) on any mix/period
-  // change and ramps back to full strength over kTrustRampMs — independent
-  // of and much faster than the reseed, which still runs in the background
-  // and restores full per-phase accuracy once it lands. Global (not
-  // per-phase): simple, RT-cheap, and correct enough since the window is
-  // short — a brief, honest reduction in cancellation for still-playing
-  // tracks beats a loud, wrong, phase-inverted injection every time.
-  int64_t mMixChangeFrame = INT64_MIN / 2; // far enough back that gate() = 1.0 from frame 0
-  int64_t mTrustRampFrames = 0;            // set from sampleRate in the constructor
+  // ---- Cancel-pass safety suppression -----------------------------------
+  // Pass 1 caps the OUTPUT/recording's energy to never exceed the raw mic's
+  // — see process()'s Pass 1 comment for the full rationale. Decided at
+  // BLOCK granularity (one gain per callback, smoothed block-to-block), NOT
+  // per-sample: a hard per-sample version of this exact idea was tried first
+  // and produced broadband static, confirmed on-device — near-end and echo
+  // interfere constantly, so their instantaneous sum legitimately crosses a
+  // per-sample energy threshold many times per cycle even when cancellation
+  // is working CORRECTLY, not just when it's stale. This is the same lesson
+  // mRefEnvelope's per-sample-vs-smoothed fix already taught elsewhere in
+  // this file. Pass 2 (learning) reads the UNCLAMPED raw residual (stored
+  // here) regardless of this gain — it needs the true (mic - E[phi]) to know
+  // how wrong E[phi] is, or a heavily-suppressed block would starve learning
+  // of the very signal it needs to self-correct.
+  std::vector<float> mRawResidual; // grow-only scratch; Pass 2's learning input
+  float mOutputSuppressGain = 1.0f; // smoothed 0..1; see process()'s Pass 1
+  // Smoothed mic/raw energy RATIO (not the derived gain) — averaging THIS
+  // first, over several blocks, is what lets the margin below be tight
+  // enough to catch sustained-but-moderate staleness (confirmed on-device:
+  // a wide single-block margin missed a real, consistently-negative-ERLE
+  // ghost) while still ignoring genuine single-block statistical noise.
+  float mSmoothedEnergyRatio = 1.0f;
 
-  // 0 immediately after a mix/period change, ramping linearly to 1 over
-  // mTrustRampFrames. audio-thread-only; cheap (one subtract/divide/clamp
-  // per block, not per sample).
-  float trustGate(int64_t blockStartFrame) const {
-    if (mTrustRampFrames <= 0)
-      return 1.0f;
-    const int64_t elapsed = blockStartFrame - mMixChangeFrame;
-    if (elapsed <= 0)
-      return 0.0f;
-    if (elapsed >= mTrustRampFrames)
-      return 1.0f;
-    return static_cast<float>(elapsed) / static_cast<float>(mTrustRampFrames);
-  }
+  // Replaced a fixed-100ms time-based "trust gate" that used to live here
+  // (mMixChangeFrame/mTrustRampFrames/trustGate()) — it guessed how long to
+  // distrust the template after a mix change, and that guess was wrong by
+  // up to an order of magnitude (100ms vs. a reseed that can take a full
+  // loop pass), confirmed on-device as inadequate. The Pass-1 clamp above
+  // needs no guess: it reacts to whether THIS SPECIFIC sample's cancellation
+  // is demonstrably wrong, not to how long ago some notification fired.
 
   // ---- Convergence seed (see class comment) ----------------------------
   // Calibrated IR, settable from any thread; read only when arming a capture.
@@ -252,6 +300,29 @@ private:
   std::thread mSeedWorker;
   void seedWorkerLoop();
   void computeSeedConvolution(int64_t P); // worker thread only
+
+  // ---- Per-track exact subtraction (see registerTrackAudio/setTrackActive
+  // doc comment above for the full rationale) ------------------------------
+  struct TrackContribution {
+    std::vector<float> E;             // per-phase*channel contribution, same
+                                       // layout as mTemplate; empty until computed
+    std::atomic<bool> computed{false}; // set (release) once E is fully populated
+    bool active = false;              // audio-thread-only: mirrors what's
+                                       // CURRENTLY summed into mTemplate
+  };
+  static constexpr int kMaxTracks = 64; // matches AudioEngine::kMaxTrackHandles
+  std::array<TrackContribution, kMaxTracks> mTrackContributions;
+
+  // Registration jobs queued from any thread, drained by the seed worker
+  // (reuses its poll loop — registration is a rare, one-shot-per-track
+  // event, not a steady-state load, exactly like the composite seed).
+  struct TrackRegJob {
+    int trackIndex;
+    std::vector<float> audio; // mono, full-period copy
+  };
+  std::mutex mTrackJobMutex;
+  std::vector<TrackRegJob> mPendingTrackJobs;
+  void computeTrackContribution(int trackIndex, const std::vector<float> &audio); // worker thread only
 };
 
 #endif // AEC_SYNCHRONOUS_ECHO_TEMPLATE_H

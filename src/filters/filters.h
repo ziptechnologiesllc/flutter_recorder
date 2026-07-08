@@ -97,6 +97,17 @@ public:
   // internally gated so it's a no-op while a seed job is already in flight.
   void notifyAecReferenceChanged();
 
+  // LSAEC per-track exact subtraction — see SynchronousEchoTemplate's doc
+  // comment for the full rationale. registerAecTrackAudio: call once a
+  // track's audio is known (any thread); computes that track's echo
+  // contribution off-thread. setAecTrackActive: call at the SAME sample-
+  // accurate instant the SoLoud mute/unmute/pause/unpause/stop setter
+  // fires, so the AEC state change and the audible state change are
+  // atomic. Both no-ops if LSAEC isn't active.
+  void registerAecTrackAudio(int trackIndex, const float *audioMono,
+                             int64_t frames);
+  void setAecTrackActive(int trackIndex, bool active);
+
   // Neural Model Control
   bool loadNeuralModel(NeuralModelType modelType, const std::string &assetBasePath);
   NeuralModelType getLoadedNeuralModel() const;

@@ -96,6 +96,32 @@ public:
   }
 
   /**
+   * LSAEC per-track exact subtraction (see SynchronousEchoTemplate's doc
+   * comment for the full rationale): register a track's own known audio so
+   * its echo contribution can be computed once, off-thread, and later
+   * added/subtracted from the template EXACTLY on mute/unmute instead of
+   * relying on reactive suppression or a reseed race. No-op if LSAEC isn't
+   * active.
+   */
+  void registerTrackAudio(int trackIndex, const float *audioMono, int64_t frames) {
+    if (mEchoTemplate)
+      mEchoTemplate->registerTrackAudio(trackIndex, audioMono, frames);
+  }
+
+  /**
+   * Toggle a registered track's contribution in/out of the live template.
+   * Call at the SAME sample-accurate instant the SoLoud mute/unmute/pause/
+   * unpause/stop setter fires, so the AEC state change and the audible
+   * state change happen atomically. No-op if LSAEC isn't active or the
+   * track hasn't finished registering yet (falls back to the composite
+   * template's existing behavior for that track in the meantime).
+   */
+  void setTrackActive(int trackIndex, bool active) {
+    if (mEchoTemplate)
+      mEchoTemplate->setTrackActive(trackIndex, active);
+  }
+
+  /**
    * Set the impulse response from calibration.
    * Pre-initializes NLMS filter coefficients for immediate cancellation.
    *

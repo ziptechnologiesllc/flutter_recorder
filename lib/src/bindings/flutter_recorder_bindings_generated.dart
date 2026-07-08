@@ -1458,6 +1458,46 @@ class FlutterRecorderBindings {
       _flutter_recorder_aec_notifyReferenceChangedPtr
           .asFunction<void Function()>();
 
+  /// LSAEC per-track exact subtraction: register a track's own known audio
+  /// (mono float samples) so its echo contribution can be computed once,
+  /// off-thread, instead of relying on reactive suppression. Hand-added,
+  /// same regen-churn-free rationale as flutter_recorder_aec_getTelemetry.
+  void flutter_recorder_aec_registerTrackAudio(
+    int trackIndex,
+    ffi.Pointer<ffi.Float> audioMono,
+    int frames,
+  ) {
+    return _flutter_recorder_aec_registerTrackAudio(
+      trackIndex,
+      audioMono,
+      frames,
+    );
+  }
+
+  late final _flutter_recorder_aec_registerTrackAudioPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Void Function(
+              ffi.Int32, ffi.Pointer<ffi.Float>, ffi.Int64)>>(
+      'flutter_recorder_aec_registerTrackAudio');
+  late final _flutter_recorder_aec_registerTrackAudio =
+      _flutter_recorder_aec_registerTrackAudioPtr
+          .asFunction<void Function(int, ffi.Pointer<ffi.Float>, int)>();
+
+  /// Toggle a registered track's contribution in/out of the live template.
+  /// Not normally called from Dart directly — the mute/unmute/pause/stop
+  /// toggle fires natively (audio_engine.cpp, same fire-frame as the SoLoud
+  /// setter) — exposed for completeness/debug use.
+  void flutter_recorder_aec_setTrackActive(int trackIndex, int active) {
+    return _flutter_recorder_aec_setTrackActive(trackIndex, active);
+  }
+
+  late final _flutter_recorder_aec_setTrackActivePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int32, ffi.Int32)>>(
+          'flutter_recorder_aec_setTrackActive');
+  late final _flutter_recorder_aec_setTrackActive =
+      _flutter_recorder_aec_setTrackActivePtr
+          .asFunction<void Function(int, int)>();
+
   double flutter_recorder_aec_getVssLeakage() {
     return _flutter_recorder_aec_getVssLeakage();
   }

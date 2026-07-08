@@ -815,10 +815,6 @@ FFI_PLUGIN_EXPORT int flutter_recorder_isDeviceStarted() {
   return capture.isDeviceStarted();
 }
 
-FFI_PLUGIN_EXPORT int flutter_recorder_isCaptureStarted() {
-  return capture.isDeviceStarted() ? 1 : 0;
-}
-
 FFI_PLUGIN_EXPORT enum CaptureErrors flutter_recorder_start() {
   if (!capture.isInited())
     return captureNotInited;
@@ -1666,6 +1662,19 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_getTelemetry(double *out) {
   out[13] = static_cast<double>(t.govBoost);
 }
 
+// Must be `extern "C"` so the symbols are emitted with C linkage (unmangled)
+// and `dlsym`-discoverable by name — same rationale as the engine/link block
+// above. These three have no flutter_recorder.h declaration (hand-added,
+// regen-churn-free), so without this wrapper they silently compile with C++
+// mangled names and every Dart-side call throws "symbol not found" at
+// runtime while the build itself reports success. Confirmed on-device: this
+// exact symptom for both the newly-added track functions AND
+// notifyAecReferenceChanged, which predates tonight and had silently never
+// been callable either (masked by the try/catch every call site wraps it
+// in) — bisect/split's "re-arm convergence seed" notify has likely been a
+// no-op since it was added.
+extern "C" {
+
 // LSAEC: tell the template the audible mix changed (e.g. the metronome click
 // was toggled on/off) even though no loop-period change occurred. Unlike
 // mute/unmute/pause/stop on a registered SoLoud voice — which already fires
@@ -1677,6 +1686,25 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_getTelemetry(double *out) {
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_notifyReferenceChanged() {
   if (mFilters) mFilters->notifyAecReferenceChanged();
 }
+
+// LSAEC per-track exact subtraction — see SynchronousEchoTemplate's doc
+// comment for the full rationale. Register once a track's audio is known
+// (mono float samples, length `frames`); the native side copies the data
+// immediately (safe to free/reuse the Dart-side buffer right after this
+// call returns) and computes the track's echo contribution off-thread.
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_registerTrackAudio(
+    int trackIndex, const float *audioMono, int64_t frames) {
+  if (mFilters) mFilters->registerAecTrackAudio(trackIndex, audioMono, frames);
+}
+
+// Toggle a registered track's contribution in/out of the live template.
+// `active` = 1 to include (unmuted/playing), 0 to exclude (muted/stopped).
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setTrackActive(int trackIndex,
+                                                           int active) {
+  if (mFilters) mFilters->setAecTrackActive(trackIndex, active != 0);
+}
+
+}  // extern "C"
 
 FFI_PLUGIN_EXPORT float flutter_recorder_aec_getVssLeakage() {
   if (mFilters) {
@@ -1758,7 +1786,11 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_stopAlignedCalibrationCapture() {
   }
 }
 
-FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationAnalysis(
+// extern "C": no flutter_recorder.h declaration (same missing-linkage issue
+// as the LSAEC block above, confirmed via nm — was mangled, never
+// dlsym-reachable). Not currently called from Dart either way, so this is a
+// correctness fix with no behavior change today.
+extern "C" FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationAnalysis(
     unsigned int sampleRate, int *outDelaySamples, float *outDelayMs,
     float *outGain, float *outCorrelation, int64_t *outCalibratedOffset) {
 

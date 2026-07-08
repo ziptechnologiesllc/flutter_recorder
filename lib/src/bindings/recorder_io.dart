@@ -1213,6 +1213,22 @@ class RecorderFfi extends RecorderImpl {
   }
 
   @override
+  void aecRegisterTrackAudio(int trackIndex, Float32List audioMono) {
+    if (audioMono.isEmpty) return;
+    final buf = calloc<ffi.Float>(audioMono.length);
+    try {
+      buf.asTypedList(audioMono.length).setAll(0, audioMono);
+      _bindings.flutter_recorder_aec_registerTrackAudio(
+        trackIndex,
+        buf,
+        audioMono.length,
+      );
+    } finally {
+      calloc.free(buf); // native side copies synchronously before returning
+    }
+  }
+
+  @override
   double aecGetVssLeakage() {
     return _bindings.flutter_recorder_aec_getVssLeakage();
   }

@@ -1071,6 +1071,18 @@ interface class Recorder {
     _impl.aecNotifyReferenceChanged();
   }
 
+  /// LSAEC per-track exact subtraction: register a track's own known audio
+  /// (mono float samples, phase-aligned to the loop's phase-0 origin,
+  /// length equal to the CURRENT composite loop period) so its echo
+  /// contribution is computed once, off-thread, and mute/unmute becomes an
+  /// exact arithmetic edit instead of a reactive suppression heuristic.
+  /// Safe to call again to re-register (e.g. after a split changes a
+  /// track's content) — supersedes any still-pending prior job for the
+  /// same trackIndex.
+  void aecRegisterTrackAudio(int trackIndex, Float32List audioMono) {
+    _impl.aecRegisterTrackAudio(trackIndex, audioMono);
+  }
+
   /// Get current VSS-NLMS leakage factor.
   double aecGetVssLeakage() {
     return _impl.aecGetVssLeakage();

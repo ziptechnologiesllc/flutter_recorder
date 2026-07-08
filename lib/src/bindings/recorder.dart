@@ -757,6 +757,19 @@ abstract class RecorderImpl {
   @mustBeOverridden
   void aecNotifyReferenceChanged();
 
+  /// LSAEC per-track exact subtraction: register a track's own known audio
+  /// (mono float samples, already phase-aligned to the loop's phase-0
+  /// origin, length equal to the CURRENT composite loop period) so its echo
+  /// contribution can be computed once, off-thread — an exact arithmetic
+  /// edit on mute/unmute instead of a reactive suppression heuristic or a
+  /// reseed race. Native copies the data immediately; safe to discard
+  /// [audioMono] right after this call returns. No-op if LSAEC isn't
+  /// active. The mute/unmute/pause/stop toggle itself fires natively (same
+  /// fire-frame as the SoLoud setter) — nothing further to call from Dart
+  /// once a track is registered.
+  @mustBeOverridden
+  void aecRegisterTrackAudio(int trackIndex, Float32List audioMono);
+
   /// Get current VSS-NLMS leakage factor.
   @mustBeOverridden
   double aecGetVssLeakage();

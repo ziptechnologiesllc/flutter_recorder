@@ -689,6 +689,9 @@ class RecorderWeb extends RecorderImpl {
   void aecNotifyReferenceChanged() {}
 
   @override
+  void aecRegisterTrackAudio(int trackIndex, Float32List audioMono) {}
+
+  @override
   double aecGetVssLeakage() {
     throw UnsupportedError('AEC is not supported on web platform');
   }
