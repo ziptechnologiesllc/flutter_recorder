@@ -616,6 +616,11 @@ class RecorderWeb extends RecorderImpl {
   }
 
   @override
+  void aecSetImpulseResponse(Float32List coeffs) {
+    throw UnsupportedError('AEC calibration is not supported on web platform');
+  }
+
+  @override
   Float32List aecGetCalibrationRefSignal(int maxLength) {
     throw UnsupportedError('AEC calibration is not supported on web platform');
   }
@@ -690,6 +695,9 @@ class RecorderWeb extends RecorderImpl {
 
   @override
   void aecRegisterTrackAudio(int trackIndex, Float32List audioMono) {}
+
+  @override
+  void aecReleaseTrackContribution(int trackIndex) {}
 
   @override
   double aecGetVssLeakage() {

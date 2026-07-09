@@ -122,6 +122,17 @@ public:
   }
 
   /**
+   * Release a track's per-track AEC slot — call when a loop is deleted so
+   * a long session doesn't exhaust the fixed-size slot table with
+   * contributions for loops that no longer exist. No-op if LSAEC isn't
+   * active or the track was never registered.
+   */
+  void releaseTrackContribution(int trackIndex) {
+    if (mEchoTemplate)
+      mEchoTemplate->releaseTrackSlot(trackIndex);
+  }
+
+  /**
    * Set the impulse response from calibration.
    * Pre-initializes NLMS filter coefficients for immediate cancellation.
    *

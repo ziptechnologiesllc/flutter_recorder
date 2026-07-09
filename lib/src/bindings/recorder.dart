@@ -684,6 +684,12 @@ abstract class RecorderImpl {
   @mustBeOverridden
   void aecApplyImpulseResponse();
 
+  /// Apply externally-provided impulse response coefficients directly — for
+  /// restoring a persisted calibration on cold start, where there's no
+  /// live-just-computed impulse response to re-apply.
+  @mustBeOverridden
+  void aecSetImpulseResponse(Float32List coeffs);
+
   /// Get captured reference signal for visualization.
   @mustBeOverridden
   Float32List aecGetCalibrationRefSignal(int maxLength);
@@ -769,6 +775,13 @@ abstract class RecorderImpl {
   /// once a track is registered.
   @mustBeOverridden
   void aecRegisterTrackAudio(int trackIndex, Float32List audioMono);
+
+  /// Release a deleted track's per-track AEC slot back to the pool. Call
+  /// whenever a loop is removed so a long session doesn't exhaust the
+  /// fixed-size slot table with contributions for loops that no longer
+  /// exist. No-op if the track was never registered.
+  @mustBeOverridden
+  void aecReleaseTrackContribution(int trackIndex);
 
   /// Get current VSS-NLMS leakage factor.
   @mustBeOverridden

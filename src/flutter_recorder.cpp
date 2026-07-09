@@ -1495,6 +1495,20 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_applyImpulseResponse() {
          g_lastImpulseResponse.size());
 }
 
+// Apply externally-provided impulse response coefficients directly — for
+// restoring a PERSISTED calibration on cold start, where there's no
+// g_lastImpulseResponse yet (that global is populated only by a live
+// calibration run THIS process). Also updates g_lastImpulseResponse so
+// subsequent flutter_recorder_aec_getImpulseResponse calls see it.
+extern "C" FFI_PLUGIN_EXPORT void flutter_recorder_aec_setImpulseResponse(
+    const float *coeffs, int length) {
+  if (!coeffs || length <= 0 || !mFilters) return;
+  g_lastImpulseResponse.assign(coeffs, coeffs + length);
+  mFilters->setAecImpulseResponse(coeffs, length);
+  aecLog("[AEC] Restored persisted impulse response: %d coefficients\n",
+         length);
+}
+
 // Get captured reference signal for visualization
 // Prioritizes aligned buffers (from aligned calibration) over static buffers
 FFI_PLUGIN_EXPORT int
@@ -1702,6 +1716,14 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_registerTrackAudio(
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_setTrackActive(int trackIndex,
                                                            int active) {
   if (mFilters) mFilters->setAecTrackActive(trackIndex, active != 0);
+}
+
+// Release a deleted track's per-track AEC slot. Call whenever a loop is
+// removed so a long session doesn't exhaust the fixed-size slot table with
+// contributions for loops that no longer exist.
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_releaseTrackContribution(
+    int trackIndex) {
+  if (mFilters) mFilters->releaseAecTrackContribution(trackIndex);
 }
 
 }  // extern "C"

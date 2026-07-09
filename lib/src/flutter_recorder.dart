@@ -980,6 +980,12 @@ interface class Recorder {
     _impl.aecApplyImpulseResponse();
   }
 
+  /// Apply externally-provided impulse response coefficients directly — for
+  /// restoring a persisted calibration on cold start.
+  void aecSetImpulseResponse(Float32List coeffs) {
+    _impl.aecSetImpulseResponse(coeffs);
+  }
+
   /// Get captured reference signal for visualization.
   Float32List aecGetCalibrationRefSignal(int maxLength) {
     return _impl.aecGetCalibrationRefSignal(maxLength);
@@ -1081,6 +1087,14 @@ interface class Recorder {
   /// same trackIndex.
   void aecRegisterTrackAudio(int trackIndex, Float32List audioMono) {
     _impl.aecRegisterTrackAudio(trackIndex, audioMono);
+  }
+
+  /// Release a deleted track's per-track AEC slot back to the pool. Call
+  /// whenever a loop is removed so a long session doesn't exhaust the
+  /// fixed-size slot table with contributions for loops that no longer
+  /// exist.
+  void aecReleaseTrackContribution(int trackIndex) {
+    _impl.aecReleaseTrackContribution(trackIndex);
   }
 
   /// Get current VSS-NLMS leakage factor.

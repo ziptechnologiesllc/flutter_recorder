@@ -1025,6 +1025,18 @@ class RecorderFfi extends RecorderImpl {
   }
 
   @override
+  void aecSetImpulseResponse(Float32List coeffs) {
+    if (coeffs.isEmpty) return;
+    final buf = calloc<ffi.Float>(coeffs.length);
+    try {
+      buf.asTypedList(coeffs.length).setAll(0, coeffs);
+      _bindings.flutter_recorder_aec_setImpulseResponse(buf, coeffs.length);
+    } finally {
+      calloc.free(buf); // native side copies synchronously before returning
+    }
+  }
+
+  @override
   Float32List aecGetCalibrationRefSignal(int maxLength) {
     final dest = calloc<ffi.Float>(maxLength);
     try {
@@ -1226,6 +1238,11 @@ class RecorderFfi extends RecorderImpl {
     } finally {
       calloc.free(buf); // native side copies synchronously before returning
     }
+  }
+
+  @override
+  void aecReleaseTrackContribution(int trackIndex) {
+    _bindings.flutter_recorder_aec_releaseTrackContribution(trackIndex);
   }
 
   @override

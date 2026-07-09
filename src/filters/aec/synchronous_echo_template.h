@@ -190,6 +190,10 @@ public:
    */
   void registerTrackAudio(int trackIndex, const float *audioMono, int64_t frames);
   void setTrackActive(int trackIndex, bool active);
+  // Release trackIndex's slot (if any) back to the pool — call when a
+  // track is deleted so a long session doesn't exhaust all 64 slots with
+  // contributions for loops that no longer exist. Any thread; lock-free.
+  void releaseTrackSlot(int trackIndex);
 
 private:
   unsigned int mSampleRate;
@@ -197,6 +201,14 @@ private:
   size_t mCapacityFrames;          // max P we can hold (per channel)
   std::vector<float> mTemplate;    // E[phi*channels + ch] — echo estimate
   std::vector<float> mConfidence;  // per-phase saturating update count (anneal)
+  // Incrementally-maintained sum of mConfidence over the CURRENT active
+  // window [0, mActiveLoopFrames) — every write to mConfidence within that
+  // window must update this by the delta, and every place that clears/
+  // resizes the window must reset it to match. meanConfidence() reads this
+  // instead of re-summing (was an O(min(P,capacity)) loop — up to 768,000
+  // iterations for a 16s/48kHz loop — called unconditionally on the audio
+  // thread ~4x/sec for E5 telemetry, live in every production build).
+  double mConfidenceSum = 0.0;
   int64_t mActiveLoopFrames = 0;   // P currently in use (<= capacity)
   // Cross-thread-safe mirror of mActiveLoopFrames, updated at the same
   // write sites. computeTrackContribution() runs on the worker thread and
@@ -218,6 +230,26 @@ private:
   std::atomic<float> mLearnBoost{1.0f}; // spectral-governor gain
 
   float mRefEnvelope = 0.0f;
+
+  // Reference-presence gate for the SUBTRACTION (distinct from mRefEnvelope,
+  // which gates LEARNING). E[phi] is a STORED per-phase echo estimate that
+  // Pass 1 subtracts unconditionally — but a stored echo is only correct
+  // while the speaker is actually reproducing the content that created it.
+  // The instant the far-end goes silent (every track muted/paused, quiet
+  // room), there is no echo present, yet E[phi] is still full of the echo it
+  // learned while those tracks played — and learning is gated OFF by that
+  // same silence, so it can never self-correct. Subtracting E[phi] from a
+  // silent mic then EMITS -E[phi]: a phase-inverted ghost of the old echo,
+  // baked into the whole take (the user's "ghosts when everything muted").
+  // The fix is textbook near-end/far-end gating: scale the subtraction by
+  // how much far-end signal is ACTUALLY present right now (a smoothed
+  // envelope of the aligned reference). Speaker playing -> full subtraction
+  // (cancellation unchanged); speaker silent -> subtract nothing (output =
+  // mic, no ghost). Slow release (~reverb time) so the echo TAIL keeps
+  // cancelling as the reference decays. Uses the KNOWN reference, not an
+  // output-energy heuristic — this is the principled version of what the
+  // block-level suppression gate only approximated.
+  float mSubGateEnv = 0.0f;
 
   float mResidBaseline = 0.0f; // EMA of per-block residual energy
   uint32_t mLearnedBlocks = 0; // non-frozen learning blocks (arms the detector)
@@ -303,15 +335,48 @@ private:
 
   // ---- Per-track exact subtraction (see registerTrackAudio/setTrackActive
   // doc comment above for the full rationale) ------------------------------
+  //
+  // trackIndex (as generated everywhere in Dart: `<hash>.hashCode &
+  // 0x7FFFFFFF`, a ~31-bit value up to ~2.1 billion) is NOT a dense small
+  // index — it must never be used to directly index a fixed-size array.
+  // This mirrors AudioEngine::mTrackHandles's scan-and-allocate slot table
+  // (audio_engine.h/.cpp) rather than array-indexing by trackIndex directly.
+  // slotIndex.load()==-1 means the slot is free. Allocation (registerTrack-
+  // Audio, any thread) uses compare_exchange to claim a free slot
+  // lock-free; lookup (setTrackActive, AUDIO THREAD — must never block) is
+  // a plain atomic-load scan over kMaxTracks (64) entries, which is O(64)
+  // and negligible next to the O(P) work already done per callback.
   struct TrackContribution {
+    std::atomic<int> slotIndex{-1};   // the trackIndex owning this slot, or
+                                       // -1 if free. Named slotIndex (not
+                                       // trackIndex) to avoid confusion with
+                                       // the array position, which is NOT
+                                       // the trackIndex.
     std::vector<float> E;             // per-phase*channel contribution, same
                                        // layout as mTemplate; empty until computed
     std::atomic<bool> computed{false}; // set (release) once E is fully populated
     bool active = false;              // audio-thread-only: mirrors what's
                                        // CURRENTLY summed into mTemplate
+    // The track's own raw mono audio, RETAINED so the contribution can be
+    // recomputed if the impulse response arrives/changes AFTER the track was
+    // registered (a track recorded BEFORE a live calibration this session, or
+    // after a recalibration). Written and read only from the Dart-facing
+    // (non-audio) thread — registerTrackAudio writes it, requeueAll... reads
+    // it — so no atomic needed; the worker thread computes from a job's OWN
+    // copy, never this field.
+    std::vector<float> audio;
   };
   static constexpr int kMaxTracks = 64; // matches AudioEngine::kMaxTrackHandles
   std::array<TrackContribution, kMaxTracks> mTrackContributions;
+
+  // Find the slot already owned by trackIndex, or atomically claim a free
+  // one. Callable from any thread; lock-free. Returns -1 if trackIndex is
+  // invalid or the table is full (all 64 slots owned by OTHER tracks).
+  int findOrAllocTrackSlot(int trackIndex);
+  // Find the slot already owned by trackIndex without allocating. Callable
+  // from any thread including the audio thread; lock-free, non-blocking.
+  // Returns -1 if trackIndex has no slot.
+  int findTrackSlot(int trackIndex) const;
 
   // Registration jobs queued from any thread, drained by the seed worker
   // (reuses its poll loop — registration is a rare, one-shot-per-track
@@ -323,6 +388,14 @@ private:
   std::mutex mTrackJobMutex;
   std::vector<TrackRegJob> mPendingTrackJobs;
   void computeTrackContribution(int trackIndex, const std::vector<float> &audio); // worker thread only
+
+  // Re-queue a compute job for every registered track that has retained
+  // audio, so their contributions are (re)computed against the CURRENT
+  // impulse response. Called from setSeedImpulseResponse whenever the IR
+  // arrives or changes — the fix for "recorded a track before calibrating,
+  // so it registered against an empty IR and never got a contribution."
+  // Dart-thread only (same as registerTrackAudio).
+  void requeueAllTrackContributions();
 };
 
 #endif // AEC_SYNCHRONOUS_ECHO_TEMPLATE_H

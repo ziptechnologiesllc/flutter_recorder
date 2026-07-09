@@ -107,6 +107,8 @@ public:
   void registerAecTrackAudio(int trackIndex, const float *audioMono,
                              int64_t frames);
   void setAecTrackActive(int trackIndex, bool active);
+  // Release a deleted track's per-track AEC slot back to the pool.
+  void releaseAecTrackContribution(int trackIndex);
 
   // Neural Model Control
   bool loadNeuralModel(NeuralModelType modelType, const std::string &assetBasePath);

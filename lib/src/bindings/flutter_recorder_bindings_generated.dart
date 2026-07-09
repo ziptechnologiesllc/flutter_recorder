@@ -1146,6 +1146,25 @@ class FlutterRecorderBindings {
       _flutter_recorder_aec_getImpulseResponsePtr
           .asFunction<int Function(ffi.Pointer<ffi.Float>, int)>();
 
+  /// Apply externally-provided impulse response coefficients directly —
+  /// for restoring a persisted calibration on cold start (no
+  /// g_lastImpulseResponse yet this process). Hand-added, same regen-
+  /// churn-free rationale as flutter_recorder_aec_getTelemetry.
+  void flutter_recorder_aec_setImpulseResponse(
+    ffi.Pointer<ffi.Float> coeffs,
+    int length,
+  ) {
+    return _flutter_recorder_aec_setImpulseResponse(coeffs, length);
+  }
+
+  late final _flutter_recorder_aec_setImpulseResponsePtr = _lookup<
+          ffi.NativeFunction<
+              ffi.Void Function(ffi.Pointer<ffi.Float>, ffi.Int)>>(
+      'flutter_recorder_aec_setImpulseResponse');
+  late final _flutter_recorder_aec_setImpulseResponse =
+      _flutter_recorder_aec_setImpulseResponsePtr
+          .asFunction<void Function(ffi.Pointer<ffi.Float>, int)>();
+
   /// Apply stored impulse response to AEC filter
   void flutter_recorder_aec_applyImpulseResponse() {
     return _flutter_recorder_aec_applyImpulseResponse();
@@ -1497,6 +1516,19 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_aec_setTrackActive =
       _flutter_recorder_aec_setTrackActivePtr
           .asFunction<void Function(int, int)>();
+
+  /// Release a deleted track's per-track AEC slot back to the pool. Hand-
+  /// added, same regen-churn-free rationale as flutter_recorder_aec_getTelemetry.
+  void flutter_recorder_aec_releaseTrackContribution(int trackIndex) {
+    return _flutter_recorder_aec_releaseTrackContribution(trackIndex);
+  }
+
+  late final _flutter_recorder_aec_releaseTrackContributionPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int32)>>(
+          'flutter_recorder_aec_releaseTrackContribution');
+  late final _flutter_recorder_aec_releaseTrackContribution =
+      _flutter_recorder_aec_releaseTrackContributionPtr
+          .asFunction<void Function(int)>();
 
   double flutter_recorder_aec_getVssLeakage() {
     return _flutter_recorder_aec_getVssLeakage();

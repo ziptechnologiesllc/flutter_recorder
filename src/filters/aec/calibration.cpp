@@ -320,7 +320,21 @@ static CalibrationResult analyzeClickCalibration(
     }
   }
 
-  if (validClicks > 0) {
+  // A real acoustic impulse response has a sharp, dominant peak from the
+  // direct path, with everything else (reverb tail, noise floor) well
+  // below it. Random mic self-noise averaged across trials does not — this
+  // is what actually distinguishes "the room answered" from "the mic was
+  // just on". Require most of CLICK_COUNT to have matched (not just >0 —
+  // a single spurious peak match was previously enough to reach this
+  // block at all) before even attempting to accept.
+  constexpr int kMinValidClickNumerator = 3; // >= 3/5 of CLICK_COUNT
+  constexpr int kMinValidClickDenominator = 5;
+  const int minValidClicks =
+      (AECCalibration::CLICK_COUNT * kMinValidClickNumerator +
+       kMinValidClickDenominator - 1) /
+      kMinValidClickDenominator;
+
+  if (validClicks >= minValidClicks) {
     // Average
     float scale = 1.0f / validClicks;
     float energy = 0.0f;
@@ -351,14 +365,41 @@ static CalibrationResult analyzeClickCalibration(
       peakVal = -peakVal;
     }
 
+    // Peak-to-floor ratio: RMS of the IR EXCLUDING a window around the
+    // peak (the "floor" — reverb tail + noise) vs. the peak itself. A real
+    // direct-path echo dominates the floor; averaged noise doesn't. This
+    // also becomes result.correlation, which was previously assigned
+    // nowhere in this function (always 0.0f, silently unreliable as a
+    // diagnostic — this is the same field the production/click calibration
+    // path actually uses, unlike the legacy chirp analyze() path).
+    constexpr size_t kPeakExclusionRadius = 8;
+    double floorSumSq = 0.0;
+    size_t floorCount = 0;
+    for (size_t i = 0; i < irLen; ++i) {
+      if (i + kPeakExclusionRadius >= peakIdx && i <= peakIdx + kPeakExclusionRadius)
+        continue;
+      floorSumSq += static_cast<double>(avgIR[i]) * avgIR[i];
+      ++floorCount;
+    }
+    const float floorRms = floorCount > 0
+        ? static_cast<float>(std::sqrt(floorSumSq / floorCount))
+        : 0.0f;
+    const float peakToFloor = maxAmp / (maxAmp + floorRms + 1e-9f); // 0..1
+
     result.impulseResponse = avgIR;
     result.echoGain = std::sqrt(energy);
-    result.success = (energy > 1e-6f);
+    result.correlation = peakToFloor;
+    constexpr float kMinPeakToFloorRatio = 0.3f;
+    result.success = (energy > 1e-6f) && (peakToFloor >= kMinPeakToFloorRatio);
 
-    aecLog("[AEC Click Calibration] Averaged IR from %d clicks: energy=%.4f, peak=%.4f at idx %zu\n",
-           validClicks, energy, maxAmp, peakIdx);
+    aecLog("[AEC Click Calibration] Averaged IR from %d/%d clicks: energy=%.4f, "
+           "peak=%.4f at idx %zu, floorRms=%.5f, peakToFloor=%.3f, success=%d\n",
+           validClicks, AECCalibration::CLICK_COUNT, energy, maxAmp, peakIdx,
+           floorRms, peakToFloor, result.success ? 1 : 0);
   } else {
-    aecLog("[AEC Click Calibration] Warning: No valid clicks for IR extraction\n");
+    aecLog("[AEC Click Calibration] Warning: only %d/%d clicks matched "
+           "(need >=%d) — rejecting rather than seeding a low-confidence IR\n",
+           validClicks, AECCalibration::CLICK_COUNT, minValidClicks);
     result.success = false;
   }
 

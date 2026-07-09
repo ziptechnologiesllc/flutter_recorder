@@ -391,6 +391,14 @@ void Filters::setAecTrackActive(int trackIndex, bool active) {
       ->setTrackActive(trackIndex, active);
 }
 
+void Filters::releaseAecTrackContribution(int trackIndex) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get())
+      ->releaseTrackContribution(trackIndex);
+}
+
 void Filters::setAecMode(AecMode mode) {
   mRequestedAecMode = mode; // survives filter add/remove; applied in addFilter
   int idx = isFilterActive(adaptiveEchoCancellation);

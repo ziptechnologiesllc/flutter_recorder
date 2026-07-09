@@ -602,6 +602,21 @@ void AudioEngine::firePendingThroughFrame(
   // Two-pass: emit events for entries due this buffer, then compact the
   // array. We rebuild in-place to keep allocation-free behavior on the
   // audio thread.
+  //
+  // setAecTrackActive() is O(active loop period) — cheap for a single call
+  // (a mute tap), but mPendingQueue can hold up to kMaxPendingQueueEntries
+  // (32) entries sharing the same quantized fireFrame (e.g. a "stop all
+  // tracks" gesture, or several quantized mutes landing on the same beat).
+  // Bound how many of THOSE get an AEC-side update in one callback so a
+  // burst can't stack dozens of O(P) loops into a single ~2.7-5.3ms audio
+  // callback. The audible SoLoud change (mute/pause/stop itself) is NEVER
+  // gated by this — only the AEC template edit is skipped for entries past
+  // the cap, which just means that track falls back to the composite/
+  // suppression-gate path until its NEXT mute/unmute event or the ordinary
+  // per-pass reseed catches up — the same graceful-degradation fallback
+  // already used for a track that hasn't finished registering.
+  constexpr int kMaxAecUpdatesPerCallback = 4;
+  int aecUpdatesThisCallback = 0;
   std::size_t write = 0;
   for (std::size_t read = 0; read < mPendingQueueCount; ++read) {
     const PendingEntry& pe = mPendingQueue[read];
@@ -655,45 +670,52 @@ void AudioEngine::firePendingThroughFrame(
         case PendingAction::None:
           break;
       }
+    }
 
-      // LSAEC: an on/off-type mix change (NOT a continuous gain automation,
-      // which would thrash the seed-capture worker) makes the template's
-      // per-phase content stale even though the loop period didn't move —
-      // re-arm a convergence-seed reseed so cancellation catches up in ~1
-      // pass instead of several. See synchronous_echo_template.h.
-      //
-      // Per-track exact subtraction (setAecTrackActive) fires at this SAME
-      // site, same sample-accurate fire-frame, for this SAME reason but a
-      // stronger fix where available: for a track that finished registering
-      // (registerTrackAudio already computed its exact contribution), this
-      // is an O(P) arithmetic edit with ZERO reconvergence latency — no
-      // reseed race, no suppression heuristic, nothing to wait on. It's a
-      // no-op (falls through to the reseed/suppression path above) for any
-      // track that hasn't registered yet, so this is purely additive.
-      switch (pe.action) {
-        case PendingAction::Mute:
-          if (mFilters) mFilters->setAecTrackActive(pe.trackIndex, false);
-          if (mFilters) mFilters->notifyAecReferenceChanged();
-          break;
-        case PendingAction::Unmute:
-          if (mFilters) mFilters->setAecTrackActive(pe.trackIndex, true);
-          if (mFilters) mFilters->notifyAecReferenceChanged();
-          break;
-        case PendingAction::Pause:
-          if (mFilters) mFilters->setAecTrackActive(pe.trackIndex, false);
-          if (mFilters) mFilters->notifyAecReferenceChanged();
-          break;
-        case PendingAction::Unpause:
-          if (mFilters) mFilters->setAecTrackActive(pe.trackIndex, true);
-          if (mFilters) mFilters->notifyAecReferenceChanged();
-          break;
-        case PendingAction::Stop:
-          if (mFilters) mFilters->setAecTrackActive(pe.trackIndex, false);
-          if (mFilters) mFilters->notifyAecReferenceChanged();
-          break;
-        default:
-          break;
+    // LSAEC per-track update — MUST run regardless of whether the SoLoud
+    // handle is registered (i.e. OUTSIDE the `soloudHandle != 0` block
+    // above). This is keyed on pe.trackIndex, not the SoLoud handle table:
+    // a locally-recorded loop plays via the NATIVE looper bridge and is
+    // never registered in mTrackHandles (only Dart-side soloud.play() voices
+    // are), so lookupSoloudHandle returns 0 for exactly the tracks a
+    // performer records and then mutes. Nesting this inside the handle
+    // check meant mute/pause NEVER removed those tracks' contribution from
+    // the template — the estimate stayed, `mic - template` produced a
+    // phase-inverted ghost of the muted track, and that negative spike then
+    // tripped the E3 onset-freeze so the template locked the ghost in
+    // permanently. That was the entire "ghosts when everything muted" bug.
+    //
+    // An on/off-type mix change makes the template's per-phase content stale
+    // even though the loop period didn't move. setAecTrackActive is the O(P)
+    // exact edit (per-callback-capped); notifyAecReferenceChanged is cheap
+    // (arms a reseed) and always fires so a capped/unregistered track still
+    // gets the slower reseed-based catch-up. Both are no-ops for a track
+    // that hasn't finished registering — purely additive, never a regression.
+    switch (pe.action) {
+      case PendingAction::Mute:
+      case PendingAction::Unmute:
+      case PendingAction::Pause:
+      case PendingAction::Unpause:
+      case PendingAction::Stop: {
+        const bool active = (pe.action == PendingAction::Unmute ||
+                             pe.action == PendingAction::Unpause);
+        if (mFilters && aecUpdatesThisCallback < kMaxAecUpdatesPerCallback) {
+          mFilters->setAecTrackActive(pe.trackIndex, active);
+          ++aecUpdatesThisCallback;
+        }
+        if (mFilters) mFilters->notifyAecReferenceChanged();
+        break;
       }
+      case PendingAction::SetGain:
+        // Not yet reachable from Dart (no setTrackGain call site exists
+        // today), but a future per-track volume fader would move the audible
+        // mix without this — same "stale echo estimate" class of bug the
+        // per-track mechanism exists to eliminate. No exact-subtraction case
+        // (a gain change isn't a binary in/out toggle), so just reseed.
+        if (mFilters) mFilters->notifyAecReferenceChanged();
+        break;
+      default:
+        break;
     }
 
     Event ev{};
