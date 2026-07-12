@@ -237,17 +237,27 @@ void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
   // just under/over-cancel by a little: with confidence set to max on
   // arrival, an over-estimated seed dominates the subtraction outright,
   // producing a phase-inverted copy of whatever the reference was instead of
-  // the near-end performance. Confirmed on-device: a seed applied here
-  // produced a recording that was an audible, phase-inverted, ~30ms-delayed
-  // copy of the OTHER loop layer instead of near-silence. The prior bound
-  // (4x — i.e. "allow the seed to be up to 4x LOUDER than the reference")
-  // contradicted this comment's own reasoning; a real echo shouldn't exceed
-  // the reference at all, so cap at unity — never let the seed claim more
-  // echo energy than the reference itself carried.
-  float refPeak = 0.0f;
-  for (size_t phi = 0; phi < Pu; ++phi)
-    refPeak = std::max(refPeak, std::fabs(mRefCapture[phi]));
-  constexpr float kMaxSeedToRefRatio = 1.0f;
+  // Amplitude bound on the seed. This was a reference-relative unity cap
+  // ("echo can't exceed the reference") — but that is FALSE on real hardware
+  // with hot mic gain: measured echoGain is 2.7-3x (iOS/macOS), so capping
+  // the seed at 1x the reference lands it at only ~35% of the true echo. The
+  // remaining ~65% then has to be closed by per-pass learning at the low
+  // post-seed alpha (~0.08 after the seed stamps confidence 24) — ~20 loop
+  // passes, i.e. the "takes too long to converge" the user reported. The IR
+  // already encodes the true echo gain (and calibration success now requires
+  // a real quality metric), so trust it: use only a loose ABSOLUTE blow-up
+  // guard, same as the per-track path (kMaxContribAbs).
+  //
+  // The on-device failure that originally motivated the unity cap (a seed
+  // that recorded as a phase-inverted, ~30ms-delayed copy of the OTHER loop
+  // layer) was a STALENESS bug — a seed computed against a reference that no
+  // longer matched the audible mix — not an amplitude bug. That is now
+  // defended structurally by (a) aborting+restarting the capture on any
+  // mid-capture mix change (consistent-mix capture, see the arm logic) and
+  // (b) the reference-presence subtraction gate (mSubGateEnv) which refuses
+  // to subtract ANY stored estimate while the far-end is silent. Neither
+  // existed when the unity cap was chosen.
+  constexpr float kMaxSeedAbs = 8.0f; // matches per-track kMaxContribAbs
 
   // Exact circular convolution over the (possibly truncated) kernel: the
   // reference is exactly periodic at P, so the true steady-state echo is
@@ -268,8 +278,8 @@ void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
     seedPeak = std::max(seedPeak, std::fabs(v));
   }
 
-  if (refPeak > 0.0f && seedPeak > kMaxSeedToRefRatio * refPeak) {
-    const float scale = (kMaxSeedToRefRatio * refPeak) / seedPeak;
+  if (seedPeak > kMaxSeedAbs) {
+    const float scale = kMaxSeedAbs / seedPeak;
     for (size_t phi = 0; phi < Pu; ++phi)
       mSeedOutput[phi] *= scale;
   }
