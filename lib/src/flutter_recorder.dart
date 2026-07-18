@@ -1097,6 +1097,24 @@ interface class Recorder {
     _impl.aecReleaseTrackContribution(trackIndex);
   }
 
+  /// Enable/disable the LSAEC Stage-2 nonlinear HF residual-echo suppressor —
+  /// the post-filter that cleans the high-frequency ghost / metronome click
+  /// linear cancellation can't reach. For on-device A/B. Default enabled.
+  void aecSetResidualSuppressor(bool enabled) {
+    _impl.aecSetResidualSuppressor(enabled);
+  }
+
+  /// Whether the Stage-2 HF residual-echo suppressor is currently enabled.
+  bool aecGetResidualSuppressor() {
+    return _impl.aecGetResidualSuppressor();
+  }
+
+  /// Live-tune the LSAEC subtraction gate (attack ms / release ms /
+  /// floor dB). See the Recorder interface doc for the audible meaning.
+  void aecSetSubGateTuning(double attackMs, double releaseMs, double floorDb) {
+    _impl.aecSetSubGateTuning(attackMs, releaseMs, floorDb);
+  }
+
   /// Get current VSS-NLMS leakage factor.
   double aecGetVssLeakage() {
     return _impl.aecGetVssLeakage();

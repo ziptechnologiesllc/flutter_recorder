@@ -133,6 +133,27 @@ public:
   }
 
   /**
+   * Enable/disable the LSAEC Stage-2 nonlinear HF residual-echo suppressor
+   * (the post-filter that cleans the high-frequency ghost / metronome click
+   * linear cancellation can't reach). Exposed for on-device A/B — linear-only
+   * vs. linear+suppressor on the same take. No-op if LSAEC isn't active.
+   */
+  void setResidualSuppressorEnabled(bool enabled) {
+    if (mEchoTemplate)
+      mEchoTemplate->setResidualSuppressorEnabled(enabled);
+  }
+  bool residualSuppressorEnabled() const {
+    return mEchoTemplate ? mEchoTemplate->residualSuppressorEnabled() : false;
+  }
+
+  /** Live-tune the LSAEC subtraction gate (attack ms / release ms / floor dB)
+   * — see SynchronousEchoTemplate::setSubGateTuning. No-op without LSAEC. */
+  void setSubGateTuning(float attackMs, float releaseMs, float floorDb) {
+    if (mEchoTemplate)
+      mEchoTemplate->setSubGateTuning(attackMs, releaseMs, floorDb);
+  }
+
+  /**
    * Set the impulse response from calibration.
    * Pre-initializes NLMS filter coefficients for immediate cancellation.
    *

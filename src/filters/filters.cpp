@@ -399,6 +399,32 @@ void Filters::releaseAecTrackContribution(int trackIndex) {
       ->releaseTrackContribution(trackIndex);
 }
 
+void Filters::setAecResidualSuppressorEnabled(bool enabled) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get())
+      ->setResidualSuppressorEnabled(enabled);
+}
+
+bool Filters::aecResidualSuppressorEnabled() {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return false;
+  return static_cast<AdaptiveEchoCancellation *>(
+             filters[idx].get()->filter.get())
+      ->residualSuppressorEnabled();
+}
+
+void Filters::setAecSubGateTuning(float attackMs, float releaseMs,
+                                  float floorDb) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return;
+  static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get())
+      ->setSubGateTuning(attackMs, releaseMs, floorDb);
+}
+
 void Filters::setAecMode(AecMode mode) {
   mRequestedAecMode = mode; // survives filter add/remove; applied in addFilter
   int idx = isFilterActive(adaptiveEchoCancellation);

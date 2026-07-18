@@ -700,6 +700,15 @@ class RecorderWeb extends RecorderImpl {
   void aecReleaseTrackContribution(int trackIndex) {}
 
   @override
+  void aecSetResidualSuppressor(bool enabled) {}
+
+  @override
+  bool aecGetResidualSuppressor() => false;
+
+  @override
+  void aecSetSubGateTuning(double attackMs, double releaseMs, double floorDb) {}
+
+  @override
   double aecGetVssLeakage() {
     throw UnsupportedError('AEC is not supported on web platform');
   }

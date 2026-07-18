@@ -1195,7 +1195,7 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   AecTelemetry aecGetTelemetry() {
-    final out = calloc<ffi.Double>(14);
+    final out = calloc<ffi.Double>(19);
     try {
       _bindings.flutter_recorder_aec_getTelemetry(out);
       return AecTelemetry(
@@ -1213,6 +1213,11 @@ class RecorderFfi extends RecorderImpl {
         overCapacity: out[11] != 0,
         govLeak: out[12],
         govBoost: out[13],
+        seedArms: out[14].toInt(),
+        seedAborts: out[15].toInt(),
+        seedLands: out[16].toInt(),
+        gateEnv: out[17],
+        gateOpen: out[18],
       );
     } finally {
       calloc.free(out);
@@ -1243,6 +1248,22 @@ class RecorderFfi extends RecorderImpl {
   @override
   void aecReleaseTrackContribution(int trackIndex) {
     _bindings.flutter_recorder_aec_releaseTrackContribution(trackIndex);
+  }
+
+  @override
+  void aecSetResidualSuppressor(bool enabled) {
+    _bindings.flutter_recorder_aec_setResidualSuppressor(enabled);
+  }
+
+  @override
+  bool aecGetResidualSuppressor() {
+    return _bindings.flutter_recorder_aec_getResidualSuppressor();
+  }
+
+  @override
+  void aecSetSubGateTuning(double attackMs, double releaseMs, double floorDb) {
+    _bindings.flutter_recorder_aec_setSubGateTuning(
+        attackMs, releaseMs, floorDb);
   }
 
   @override

@@ -106,6 +106,11 @@ class AecTelemetry {
     required this.overCapacity,
     required this.govLeak,
     required this.govBoost,
+    this.seedArms = 0,
+    this.seedAborts = 0,
+    this.seedLands = 0,
+    this.gateEnv = 0,
+    this.gateOpen = 1,
   });
 
   /// Σ mic² over far-end-active samples (gated ERLE numerator).
@@ -152,6 +157,18 @@ class AecTelemetry {
 
   /// Spectral governor's current learning-rate boost (1.0 = no boost).
   final double govBoost;
+
+  /// Convergence-seed lifecycle counters (monotonic). aborts >> lands means
+  /// mix-change notifies keep killing the one-period reference capture, so
+  /// convergence is riding pure per-pass EMA (the "takes forever" mode).
+  final int seedArms;
+  final int seedAborts;
+  final int seedLands;
+
+  /// Subtraction-gate state for the scrolling-monitor overlay: smoothed
+  /// far-end power envelope and the resulting gate opening (0..1).
+  final double gateEnv;
+  final double gateOpen;
 
   static const AecTelemetry zero = AecTelemetry(
     micEnergyFar: 0,
@@ -782,6 +799,24 @@ abstract class RecorderImpl {
   /// exist. No-op if the track was never registered.
   @mustBeOverridden
   void aecReleaseTrackContribution(int trackIndex);
+
+  /// Enable/disable the LSAEC Stage-2 nonlinear HF residual-echo suppressor —
+  /// the post-filter that cleans the high-frequency ghost / metronome click
+  /// linear cancellation can't reach. For on-device A/B (linear-only vs.
+  /// linear+suppressor). Default enabled in the engine.
+  @mustBeOverridden
+  void aecSetResidualSuppressor(bool enabled);
+
+  /// Whether the Stage-2 HF residual-echo suppressor is currently enabled.
+  @mustBeOverridden
+  bool aecGetResidualSuppressor();
+
+  /// Live-tune the LSAEC subtraction gate: far-end envelope attack/release
+  /// (ms) and soft-knee floor (dB power). The release+knee pair sets how
+  /// long cancellation hangs on after content stops (the audible "tail") —
+  /// a per-room, by-ear judgment, hand-tuned from the AEC debug panel.
+  @mustBeOverridden
+  void aecSetSubGateTuning(double attackMs, double releaseMs, double floorDb);
 
   /// Get current VSS-NLMS leakage factor.
   @mustBeOverridden

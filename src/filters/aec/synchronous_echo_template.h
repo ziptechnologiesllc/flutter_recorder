@@ -9,6 +9,8 @@
 #include <thread>
 #include <vector>
 
+#include "spectral_residual_suppressor.h"
+
 /**
  * SynchronousEchoTemplate — the core of LSAEC (Loop-Synchronous AEC).
  *
@@ -102,6 +104,37 @@ public:
     mReferenceChangePending.store(true, std::memory_order_relaxed);
   }
 
+  /**
+   * Live-tune the reference-presence SUBTRACTION gate (see mSubGateEnv doc):
+   * attack/release of the far-end envelope and the soft-knee floor. Exposed
+   * because the release+knee pair sets how long cancellation hangs on after
+   * content stops (the audible "tail"), and the right value is a per-room,
+   * by-ear judgment — hand-tuned live from the AEC debug panel. RT-safe
+   * (relaxed atomics; process() snapshots once per block).
+   *
+   * @param attackMs  envelope attack time constant, ms (default 1.0)
+   * @param releaseMs envelope release time constant, ms (default ~69)
+   * @param floorDb   soft-knee floor in dB power (default -54): gate is ~0.5
+   *                  AT the floor, ~1 well above, ~0 well below. Raising it
+   *                  closes the gate sooner as content decays.
+   */
+  void setSubGateTuning(float attackMs, float releaseMs, float floorDb);
+
+  /** Seed lifecycle counters (monotonic since construction) — release-visible
+   * convergence diagnostics. A high aborts:arms ratio with few lands means
+   * mix-change notifies keep killing the capture (seed livelock) and
+   * convergence is riding pure per-pass EMA. */
+  uint32_t seedArms() const { return mSeedArms.load(std::memory_order_relaxed); }
+  uint32_t seedAborts() const { return mSeedAborts.load(std::memory_order_relaxed); }
+  uint32_t seedLands() const { return mSeedLands.load(std::memory_order_relaxed); }
+
+  /** UI feed for the gate overlay on the scrolling monitor: the smoothed
+   * far-end envelope the gate tracks (linear power) and the resulting gate
+   * opening (0..1, block-smoothed). Racy single-float reads by design —
+   * audio thread writes, UI snapshots at ~4 Hz. */
+  float subGateEnv() const { return mSubGateEnv; }
+  float refGateOpen() const { return mRefGateSmooth; }
+
   /** Clear all learned echo (on enable/disable/reset). */
   void reset();
 
@@ -125,6 +158,20 @@ public:
                unsigned int frameCount, unsigned int channels,
                int64_t blockStartFrame, int64_t loopFrames,
                int64_t loopStartFrame, bool learn);
+
+  /**
+   * Enable/disable the nonlinear HF residual-echo suppressor (Stage 2). The
+   * linear template (Stage 1) is untouched either way — this only gates the
+   * post-filter that cleans the high-frequency ghost / metronome click linear
+   * cancellation structurally leaves behind. RT-safe; default enabled.
+   * Exposed for on-device A/B (a linear-only vs. linear+suppressor compare).
+   */
+  void setResidualSuppressorEnabled(bool e) { mSuppressor.setEnabled(e); }
+  bool residualSuppressorEnabled() const { return mSuppressor.enabled(); }
+  /** Per-HF-band duck gain (0..1) and learned residual-echo coupling, ch 0,
+   * for a debug overlay. b in [0, SpectralResidualSuppressor::kBands). */
+  float suppressorBandGain(int b) const { return mSuppressor.bandGain(b); }
+  float suppressorBandKappa(int b) const { return mSuppressor.bandKappa(b); }
 
   /** Active loop period actually in use (0 if passthrough). */
   int64_t activeLoopFrames() const { return mActiveLoopFrames; }
@@ -198,6 +245,14 @@ public:
 private:
   unsigned int mSampleRate;
   unsigned int mChannels;
+
+  // Stage 2: nonlinear HF residual-echo suppressor. Runs AFTER the linear
+  // template subtraction in Pass 1, on the residual, to clean the
+  // high-frequency ghost / metronome click that linear cancellation can't
+  // reach (see the class's own doc comment for the full rationale). Zero
+  // added latency at unity gain, so it's safe in the record path.
+  SpectralResidualSuppressor mSuppressor;
+
   size_t mCapacityFrames;          // max P we can hold (per channel)
   std::vector<float> mTemplate;    // E[phi*channels + ch] — echo estimate
   std::vector<float> mConfidence;  // per-phase saturating update count (anneal)
@@ -250,6 +305,25 @@ private:
   // output-energy heuristic — this is the principled version of what the
   // block-level suppression gate only approximated.
   float mSubGateEnv = 0.0f;
+
+  // Live-tunable subtraction-gate parameters (see setSubGateTuning). Stored
+  // as the raw per-sample EMA rates / linear power the hot loop consumes;
+  // defaults match the previously hardcoded constants (1 ms attack, ~69 ms
+  // release, -54 dB floor — a touch above the learning floor so the gate
+  // closes before learning would). Relaxed atomics: any thread may tune,
+  // process() snapshots once per call.
+  std::atomic<float> mSubGateAttackRate{0.02f};
+  std::atomic<float> mSubGateReleaseRate{0.0003f};
+  std::atomic<float> mSubGateFloorPow{4e-6f};
+
+  // Seed lifecycle counters (see seedArms()/seedAborts()/seedLands()).
+  std::atomic<uint32_t> mSeedArms{0};
+  std::atomic<uint32_t> mSeedAborts{0};
+  std::atomic<uint32_t> mSeedLands{0};
+
+  // Block-smoothed gate opening (0..1) for the UI overlay — last frame's
+  // refGate, EMA'd once per block. Audio-thread-owned; UI reads racily.
+  float mRefGateSmooth = 1.0f;
 
   float mResidBaseline = 0.0f; // EMA of per-block residual energy
   uint32_t mLearnedBlocks = 0; // non-frozen learning blocks (arms the detector)

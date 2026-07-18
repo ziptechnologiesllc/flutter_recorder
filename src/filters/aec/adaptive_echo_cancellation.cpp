@@ -783,11 +783,21 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
         snap.freezeCount = mEchoTemplate->freezeCount();
         snap.isSeeding = mEchoTemplate->isSeeding() ? 1u : 0u;
         snap.overCapacity = mEchoTemplate->isOverCapacity() ? 1u : 0u;
+        snap.seedArms = mEchoTemplate->seedArms();
+        snap.seedAborts = mEchoTemplate->seedAborts();
+        snap.seedLands = mEchoTemplate->seedLands();
+        snap.gateEnv = mEchoTemplate->subGateEnv();
+        snap.gateOpen = mEchoTemplate->refGateOpen();
       } else {
         snap.templateConfidence = 0.0f;
         snap.freezeCount = 0;
         snap.isSeeding = 0;
         snap.overCapacity = 0;
+        snap.seedArms = 0;
+        snap.seedAborts = 0;
+        snap.seedLands = 0;
+        snap.gateEnv = 0.0f;
+        snap.gateOpen = 1.0f;
       }
       snap.govLeak = SpectralGovernor::instance().leakage();
       snap.govBoost = SpectralGovernor::instance().learningBoost();

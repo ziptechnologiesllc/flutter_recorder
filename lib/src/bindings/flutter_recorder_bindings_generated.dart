@@ -1530,6 +1530,44 @@ class FlutterRecorderBindings {
       _flutter_recorder_aec_releaseTrackContributionPtr
           .asFunction<void Function(int)>();
 
+  /// LSAEC Stage-2 nonlinear HF residual-echo suppressor on/off. Hand-added,
+  /// same regen-churn-free rationale as flutter_recorder_aec_getTelemetry.
+  void flutter_recorder_aec_setResidualSuppressor(bool enabled) {
+    return _flutter_recorder_aec_setResidualSuppressor(enabled);
+  }
+
+  late final _flutter_recorder_aec_setResidualSuppressorPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Bool)>>(
+          'flutter_recorder_aec_setResidualSuppressor');
+  late final _flutter_recorder_aec_setResidualSuppressor =
+      _flutter_recorder_aec_setResidualSuppressorPtr
+          .asFunction<void Function(bool)>();
+
+  bool flutter_recorder_aec_getResidualSuppressor() {
+    return _flutter_recorder_aec_getResidualSuppressor();
+  }
+
+  /// LSAEC subtraction-gate live tuning (attack ms / release ms / floor dB).
+  /// Hand-added, same regen-churn-free rationale as getTelemetry.
+  void flutter_recorder_aec_setSubGateTuning(
+      double attackMs, double releaseMs, double floorDb) {
+    return _flutter_recorder_aec_setSubGateTuning(attackMs, releaseMs, floorDb);
+  }
+
+  late final _flutter_recorder_aec_setSubGateTuningPtr = _lookup<
+          ffi.NativeFunction<ffi.Void Function(ffi.Float, ffi.Float, ffi.Float)>>(
+      'flutter_recorder_aec_setSubGateTuning');
+  late final _flutter_recorder_aec_setSubGateTuning =
+      _flutter_recorder_aec_setSubGateTuningPtr
+          .asFunction<void Function(double, double, double)>();
+
+  late final _flutter_recorder_aec_getResidualSuppressorPtr =
+      _lookup<ffi.NativeFunction<ffi.Bool Function()>>(
+          'flutter_recorder_aec_getResidualSuppressor');
+  late final _flutter_recorder_aec_getResidualSuppressor =
+      _flutter_recorder_aec_getResidualSuppressorPtr
+          .asFunction<bool Function()>();
+
   double flutter_recorder_aec_getVssLeakage() {
     return _flutter_recorder_aec_getVssLeakage();
   }

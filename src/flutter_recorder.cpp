@@ -1674,6 +1674,11 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_getTelemetry(double *out) {
   out[11] = static_cast<double>(t.overCapacity);
   out[12] = static_cast<double>(t.govLeak);
   out[13] = static_cast<double>(t.govBoost);
+  out[14] = static_cast<double>(t.seedArms);
+  out[15] = static_cast<double>(t.seedAborts);
+  out[16] = static_cast<double>(t.seedLands);
+  out[17] = static_cast<double>(t.gateEnv);
+  out[18] = static_cast<double>(t.gateOpen);
 }
 
 // Must be `extern "C"` so the symbols are emitted with C linkage (unmangled)
@@ -1724,6 +1729,28 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_setTrackActive(int trackIndex,
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_releaseTrackContribution(
     int trackIndex) {
   if (mFilters) mFilters->releaseAecTrackContribution(trackIndex);
+}
+
+// LSAEC Stage-2 nonlinear HF residual-echo suppressor on/off. Toggles the
+// post-filter that cleans the high-frequency ghost / metronome click that
+// linear cancellation structurally can't reach. Exposed for on-device A/B
+// (linear-only vs. linear+suppressor on the same take). Default enabled.
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setResidualSuppressor(bool enabled) {
+  if (mFilters) mFilters->setAecResidualSuppressorEnabled(enabled);
+}
+
+FFI_PLUGIN_EXPORT bool flutter_recorder_aec_getResidualSuppressor() {
+  return mFilters ? mFilters->aecResidualSuppressorEnabled() : false;
+}
+
+// Live-tune the LSAEC subtraction gate: attack/release of the far-end
+// envelope (ms) and the soft-knee floor (dB power). Hand-tuned by ear from
+// the AEC debug panel; the release+knee pair sets the audible cancellation
+// "tail" after content stops.
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setSubGateTuning(float attackMs,
+                                                             float releaseMs,
+                                                             float floorDb) {
+  if (mFilters) mFilters->setAecSubGateTuning(attackMs, releaseMs, floorDb);
 }
 
 }  // extern "C"

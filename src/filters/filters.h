@@ -110,6 +110,13 @@ public:
   // Release a deleted track's per-track AEC slot back to the pool.
   void releaseAecTrackContribution(int trackIndex);
 
+  // LSAEC Stage-2 nonlinear HF residual-echo suppressor on/off (on-device A/B).
+  void setAecResidualSuppressorEnabled(bool enabled);
+  bool aecResidualSuppressorEnabled();
+
+  // Live-tune the LSAEC subtraction gate (attack ms / release ms / floor dB).
+  void setAecSubGateTuning(float attackMs, float releaseMs, float floorDb);
+
   // Neural Model Control
   bool loadNeuralModel(NeuralModelType modelType, const std::string &assetBasePath);
   NeuralModelType getLoadedNeuralModel() const;

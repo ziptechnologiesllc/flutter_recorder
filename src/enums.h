@@ -88,6 +88,20 @@ struct AecTelemetrySnapshot {
   uint32_t overCapacity;    // 1 = loop period exceeds 16s cap: cancellation OFF
   float govLeak;            // spectral governor's last coherence-leak reading
   float govBoost;           // spectral governor's current learning-rate boost
+
+  // Convergence-seed lifecycle counters (monotonic). aborts >> lands means
+  // mix-change notifies keep killing the one-period reference capture (seed
+  // livelock): convergence is riding pure per-pass EMA, which on real loop
+  // lengths is 30-60 s of wall clock — the "takes forever to converge" report.
+  uint32_t seedArms;
+  uint32_t seedAborts;
+  uint32_t seedLands;
+
+  // Subtraction-gate state for the scrolling-monitor overlay (compressor-
+  // threshold-style visual editor): the smoothed far-end power envelope the
+  // gate tracks, and the resulting gate opening (0..1, block-smoothed).
+  float gateEnv;
+  float gateOpen;
 };
 
 #endif // ENUMS_H

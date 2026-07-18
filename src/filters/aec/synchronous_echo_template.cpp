@@ -26,18 +26,12 @@ constexpr float kConfTau = 8.0f;   // anneal time-constant in loop passes
 constexpr float kFarEndFloorPow = 1e-6f; // ~-60 dB envelope
 constexpr float kRefEnvRate = 0.014f;    // per-sample EMA, tau ~1.5 ms @ 48 kHz
 
-// Reference-presence subtraction gate (see mSubGateEnv doc in the header).
-// Attack fast so cancellation re-engages the instant the speaker starts;
-// release slow (~reverb time) so the echo tail keeps cancelling as the
-// reference decays after the last track mutes. refGate = env/(env+floor),
-// a soft 0..1 knee: at the -60 dB floor the gate is ~0.5, well below it it
-// collapses to ~0 (no subtraction -> no inverted ghost from a silent room).
-constexpr float kSubGateAttackRate = 0.02f;   // per-sample EMA, tau ~1 ms
-constexpr float kSubGateReleaseRate = 0.0003f; // per-sample EMA, tau ~70 ms
-constexpr float kSubGateFloorPow = 4e-6f;      // ~-54 dB: a touch above the
-                                               // learning floor so the gate
-                                               // closes before learning would
-                                               // (both agree "speaker silent")
+// Reference-presence subtraction gate rates/floor now live as tunable
+// members (mSubGateAttackRate/mSubGateReleaseRate/mSubGateFloorPow — see
+// setSubGateTuning in the header). Defaults preserve the old constants:
+// fast attack so cancellation re-engages the instant the speaker starts;
+// slow release (~reverb time) so the echo tail keeps cancelling as the
+// reference decays; refGate = env/(env+floor), a soft 0..1 knee.
 
 constexpr float kConfMax = 4096.0f; // confidence saturates (~enough passes)
 
@@ -103,7 +97,8 @@ constexpr int kSeedPollMs = 8;
 
 SynchronousEchoTemplate::SynchronousEchoTemplate(unsigned int sampleRate,
                                                  unsigned int channels)
-    : mSampleRate(sampleRate), mChannels(channels) {
+    : mSampleRate(sampleRate), mChannels(channels),
+      mSuppressor(sampleRate, channels) {
   mCapacityFrames = static_cast<size_t>(sampleRate) * kMaxSeconds;
   mTemplate.assign(mCapacityFrames * channels, 0.0f);
   mConfidence.assign(mCapacityFrames, 0.0f);
@@ -117,6 +112,27 @@ SynchronousEchoTemplate::~SynchronousEchoTemplate() {
   mSeedThreadRunning.store(false, std::memory_order_relaxed);
   if (mSeedWorker.joinable())
     mSeedWorker.join();
+}
+
+void SynchronousEchoTemplate::setSubGateTuning(float attackMs, float releaseMs,
+                                               float floorDb) {
+  // ms time-constant -> per-sample EMA rate (rate = 1/tau_samples), clamped
+  // to sane bounds so a bad slider value can't disable or destabilize the
+  // gate. dB (power) -> linear floor.
+  const float fs = static_cast<float>(mSampleRate ? mSampleRate : 48000);
+  auto msToRate = [fs](float ms) {
+    const float tauSamples = std::max(1.0f, ms * fs / 1000.0f);
+    return std::min(1.0f, 1.0f / tauSamples);
+  };
+  mSubGateAttackRate.store(msToRate(std::max(0.05f, attackMs)),
+                           std::memory_order_relaxed);
+  mSubGateReleaseRate.store(msToRate(std::max(0.5f, releaseMs)),
+                            std::memory_order_relaxed);
+  const float db = std::min(-10.0f, std::max(-90.0f, floorDb));
+  mSubGateFloorPow.store(std::pow(10.0f, db / 10.0f),
+                         std::memory_order_relaxed);
+  aecLog("[LSAEC] sub-gate tuning: attack=%.2fms release=%.1fms floor=%.1fdB\n",
+         attackMs, releaseMs, floorDb);
 }
 
 void SynchronousEchoTemplate::setSeedImpulseResponse(const float *coeffs,
@@ -146,10 +162,13 @@ void SynchronousEchoTemplate::reset() {
   mLearnedBlocks = 0;
   mFreezeCount = 0;
   mReopenCount = 0;
+  mSuppressor.reset();
   // Abandon any in-progress capture/job (bump the generation so a job the
   // worker completes for this now-stale epoch is dropped at drain time
   // without touching mSeedBusy — see mSeedGeneration comment in the header).
   ++mSeedGeneration;
+  if (mSeedBusy)
+    mSeedAborts.fetch_add(1, std::memory_order_relaxed);
   mSeedBusy = false;
   mSeedCaptureRemaining = 0;
   mSeedApplyPos = 0;
@@ -203,6 +222,7 @@ void SynchronousEchoTemplate::armSeedCaptureIfPossible(const float *alignedRef) 
   mSeedBusy = true;
   mSeedCaptureRemaining = mActiveLoopFrames;
   mSeedApplyPos = 0;
+  mSeedArms.fetch_add(1, std::memory_order_relaxed);
 }
 
 void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
@@ -631,6 +651,7 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     if (mSeedBusy) {
       ++mSeedGeneration;
       mSeedBusy = false;
+      mSeedAborts.fetch_add(1, std::memory_order_relaxed);
     }
     armSeedCaptureIfPossible(alignedRef);
   } else if (mReferenceChangePending.exchange(false, std::memory_order_relaxed)) {
@@ -654,6 +675,7 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     if (mSeedBusy) {
       ++mSeedGeneration;
       mSeedBusy = false;
+      mSeedAborts.fetch_add(1, std::memory_order_relaxed);
     }
     armSeedCaptureIfPossible(alignedRef);
   }
@@ -680,6 +702,7 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
       if (mSeedApplyPos >= mActiveLoopFrames) {
         mSeedOutputReady.store(false, std::memory_order_relaxed);
         mSeedBusy = false;
+        mSeedLands.fetch_add(1, std::memory_order_relaxed);
       }
     } else {
       mSeedOutputReady.store(false, std::memory_order_relaxed); // stale; drop only
@@ -687,6 +710,12 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
   }
 
   const int64_t P = loopFrames;
+
+  // Snapshot the live-tunable subtraction-gate params once per block (relaxed
+  // atomics; a slider drag lands between callbacks, never mid-loop).
+  const float sgAttack = mSubGateAttackRate.load(std::memory_order_relaxed);
+  const float sgRelease = mSubGateReleaseRate.load(std::memory_order_relaxed);
+  const float sgFloor = mSubGateFloorPow.load(std::memory_order_relaxed);
 
   // ---- Pass 1a: cancel (raw residual); accumulate block raw/mic energy.
   //
@@ -722,6 +751,7 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
 
   double blockResid = 0.0;    // gated-output residual energy — E3 freeze / Pass-1b input
   double blockMicEnergy = 0.0;
+  float lastRefGate = 1.0f;   // UI overlay feed — see mRefGateSmooth
   for (unsigned int f = 0; f < frameCount; ++f) {
     int64_t phi = (blockStartFrame + static_cast<int64_t>(f) - loopStartFrame) % P;
     if (phi < 0)
@@ -741,10 +771,10 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
         const float r = alignedRef[f * channels + ch];
         refPow += r * r;
       }
-      const float rate =
-          (refPow > mSubGateEnv) ? kSubGateAttackRate : kSubGateReleaseRate;
+      const float rate = (refPow > mSubGateEnv) ? sgAttack : sgRelease;
       mSubGateEnv += rate * (refPow - mSubGateEnv);
-      refGate = mSubGateEnv / (mSubGateEnv + kSubGateFloorPow); // soft 0..1
+      refGate = mSubGateEnv / (mSubGateEnv + sgFloor); // soft 0..1
+      lastRefGate = refGate;
     }
 
     for (unsigned int ch = 0; ch < channels; ++ch) {
@@ -760,7 +790,16 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
       // plays, ~0 in a silent room so a stale E[phi] can't become an
       // inverted ghost.
       const float outR = mic - refGate * est;
-      micInOut[i] = outR; // Pass 1b scales this in place
+      // Stage-2 nonlinear polish: duck the HF sub-bands whose leftover energy
+      // is explained by residual echo (the ghost / metronome click linear
+      // cancellation can't reach). The anchor is the reference-GATED echo
+      // estimate, so in a silent room (refGate~0) the anchor is ~0 and the
+      // suppressor passes the mic through untouched. Zero-latency at unity.
+      const float suppressed = mSuppressor.processSample(ch, refGate * est, outR);
+      micInOut[i] = suppressed; // Pass 1b scales this in place
+      // E3 freeze and the Pass-1b safety clamp reason about LINEAR
+      // cancellation correctness, so they see the pre-suppressor residual —
+      // the suppressor is a final output polish, not part of that decision.
       blockResid += static_cast<double>(outR) * outR;
       blockMicEnergy += static_cast<double>(mic) * mic;
     }
@@ -823,6 +862,30 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
   // the residual from exceeding the mic energy).
   for (size_t i = 0; i < totalSamples; ++i)
     micInOut[i] *= mOutputSuppressGain;
+
+  // UI overlay feed: block-smoothed gate opening (see refGateOpen()).
+  mRefGateSmooth += 0.2f * (lastRefGate - mRefGateSmooth);
+
+  // Tell the suppressor whether it may adapt its per-band residual-echo
+  // coupling (kappa) on the NEXT block: only when the far-end is actually
+  // playing AND the near-end is absent, so the performer is never learned as
+  // "surviving echo" and over-suppressed. Far-end presence reuses the same
+  // smoothed reference envelope the subtraction gate uses; near-end absence
+  // reuses the E3 residual-vs-baseline test, but with a TIGHTER ratio than
+  // the freeze threshold — kappa drives how hard we duck, so it must only
+  // move under confident echo-only conditions, not merely "not a huge spike".
+  // When unsure (baseline not established, or any elevated residual) kappa is
+  // held at its conservative init, which under- rather than over-suppresses.
+  {
+    constexpr float kSuppCleanRatio = 4.0f; // << kSpikeRatio (freeze uses 25)
+    const bool farEndPresent = mSubGateEnv > sgFloor;
+    const bool nearEndAbsent =
+        mLearnedBlocks >= kSettleBlocks &&
+        blockResid <=
+            static_cast<double>(kSuppCleanRatio) *
+                (static_cast<double>(mResidBaseline) + kEps);
+    mSuppressor.setCouplingUpdateAllowed(farEndPresent && nearEndAbsent);
+  }
 
   if (!learn)
     return; // cancel only
