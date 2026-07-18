@@ -251,7 +251,11 @@ private:
 
   unsigned int mSampleRate;
   unsigned int mChannels;
-  bool mEnabled = true;
+  // SAFE MODE default: OFF until the underwater/low-pass reports are fully
+  // resolved — the user's field tests implicate Stage-2 coloration in noisy
+  // rooms even with the minimum-statistics floor. The AEC panel's 'HF Sup'
+  // toggle turns it on for A/B; flip the default back once field-verified.
+  bool mEnabled = false;
   bool mAllowKappa = false;
   std::array<std::array<float, 5>, kBands> mCoef;
   std::array<ChannelState, kMaxChannels> mState;
