@@ -478,6 +478,26 @@ void SynchronousEchoTemplate::computeTrackContribution(
   for (size_t i = 0; i < rawLen; ++i)
     folded[i % P] += audio[i];
 
+  // Rotate onto the template's MIC-phase time base: registered audio is
+  // OUTPUT-clock (sample 0 plays at loop phase 0) but alignedRef — and
+  // therefore the seed and the learned template — sees the output LAMBDA
+  // frames late (acoustic delay + one callback buffer). Without this the
+  // contribution landed LAMBDA (~60 ms) EARLY, and subtracting a wrong-phase
+  // echo estimate ADDS energy: the "cancelled my own sounds, kept the
+  // bleed" regression. shifted[p] = folded[(p - LAMBDA) mod P].
+  const int64_t lambdaRaw =
+      mReferenceShiftFrames.load(std::memory_order_relaxed);
+  const size_t lambda =
+      static_cast<size_t>(((lambdaRaw % static_cast<int64_t>(P)) +
+                           static_cast<int64_t>(P)) %
+                          static_cast<int64_t>(P));
+  if (lambda != 0) {
+    std::vector<float> shifted(P);
+    for (size_t p = 0; p < P; ++p)
+      shifted[p] = folded[(p + P - lambda) % P];
+    folded.swap(shifted);
+  }
+
   // Same truncation rationale as computeSeedConvolution: a period-P
   // circular convolution is only well-posed with a kernel <= P taps.
   const size_t L = std::min(ir.size(), P);
@@ -674,6 +694,18 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     mActiveLoopFramesAtomic.store(loopFrames, std::memory_order_relaxed);
     mResidBaseline = 0.0f;
     mLearnedBlocks = 0;
+
+    // The template was just cleared, so NO per-track contribution is summed
+    // in anymore — but the slots' bookkeeping still said active. A later
+    // deactivation would then SUBTRACT a contribution the template doesn't
+    // contain (negative injection), and stale-period contributions would be
+    // size-mismatched anyway. Reset the bookkeeping; contributions recompute
+    // against the new period when the IR/requeue path fires. O(64) scan on
+    // the audio thread — negligible.
+    for (auto &tc : mTrackContributions) {
+      tc.active = false;
+      tc.appliedGain = 0.0f;
+    }
 
     // A period change supersedes any pending mix-changed notification (the
     // capture below already covers the new state) and abandons any old-period

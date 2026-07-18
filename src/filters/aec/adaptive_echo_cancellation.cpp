@@ -319,6 +319,16 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       // reference is just a fixed integer offset back by the acoustic delay —
       // NO drift estimation, no cross-correlation. This reference is used only
       // for far-end gating of the template (it learns the echo from the mic).
+      // Publish the OUTPUT-clock -> alignedRef time shift so per-track
+      // contribution jobs can rotate registered (output-clock) audio onto
+      // the template's mic-phase index. alignedRef(t) = out(t - LAMBDA)
+      // with LAMBDA = effectiveDelay + frameCount, exactly the offset of
+      // the read below. Without this rotation every exact-subtraction
+      // contribution landed ~LAMBDA (~60 ms) EARLY — a wrong-phase
+      // subtraction that ADDS energy: the "cancelled my own sounds, kept
+      // the bleed" regression once per-track went live with a real IR.
+      mEchoTemplate->setReferenceShiftFrames(
+          static_cast<int64_t>(effectiveDelay) + frameCount);
       if (totalWritten >= frameCount + effectiveDelay) {
         framesRead = g_aecReferenceBuffer->readFramesAtPosition(
             mRefBuffer.data(), frameCount,

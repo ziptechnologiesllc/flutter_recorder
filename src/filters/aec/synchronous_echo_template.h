@@ -120,6 +120,20 @@ public:
    */
   void setSubGateTuning(float attackMs, float releaseMs, float floorDb);
 
+  /**
+   * OUTPUT-clock -> alignedRef time shift LAMBDA (frames): alignedRef(t) =
+   * out(t - LAMBDA), published per block by the AEC's reference read
+   * (effectiveDelay + frameCount). Registered track audio lives on the
+   * OUTPUT clock (sample 0 plays at loop phase 0), while the template —
+   * like the captured-alignedRef seed — is indexed by MIC phase where the
+   * echo actually appears. Contribution jobs rotate registered audio right
+   * by LAMBDA before convolving so exact edits land at the same phases the
+   * seed/learning produce. RT-safe relaxed store.
+   */
+  void setReferenceShiftFrames(int64_t frames) {
+    mReferenceShiftFrames.store(frames, std::memory_order_relaxed);
+  }
+
   /** Seed lifecycle counters (monotonic since construction) — release-visible
    * convergence diagnostics. A high aborts:arms ratio with few lands means
    * mix-change notifies keep killing the capture (seed livelock) and
@@ -288,6 +302,9 @@ private:
   // length) down to exactly one period before convolving; reading the
   // plain mActiveLoopFrames from that thread would be a data race.
   std::atomic<int64_t> mActiveLoopFramesAtomic{0};
+  // See setReferenceShiftFrames(). Read by the worker thread when computing
+  // per-track contributions.
+  std::atomic<int64_t> mReferenceShiftFrames{0};
 
   // E3 block-level double-talk freeze. A smoothed per-BLOCK residual floor; a
   // block whose residual spikes well above it is near-end -> skip learning that

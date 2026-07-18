@@ -1865,9 +1865,12 @@ extern "C" FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationAnaly
   *outCorrelation = result.correlation;
   *outCalibratedOffset = result.calibratedOffset;
 
-  // Store impulse response for later application
-  static std::vector<float> sLastImpulseResponse;
-  sLastImpulseResponse = result.impulseResponse;
+  // Store the trained IR in the ONE global that getImpulseResponse /
+  // applyImpulseResponse read. This used to write a function-local static
+  // that nothing ever read — so the getter returned empty, the Dart side
+  // logged "(no impulse response to persist)" on every single calibration,
+  // and cross-launch feed-forward seeding never engaged.
+  g_lastImpulseResponse = result.impulseResponse;
 
   aecLog("[AEC Aligned Calibration] Result: delay=%.1fms gain=%.3f corr=%.3f "
          "success=%d offset=%lld\n",
@@ -1910,6 +1913,10 @@ FFI_PLUGIN_EXPORT int flutter_recorder_aec_runAlignedCalibrationWithImpulse(
 
   // Store and apply impulse response
   if (result.success && !result.impulseResponse.empty()) {
+    // Bank in the read-back/persist global too (see the analysis-path note:
+    // this path applied the IR directly to the filter but never stored it,
+    // so getImpulseResponse returned empty right after a successful apply).
+    g_lastImpulseResponse = result.impulseResponse;
     mFilters->setAecImpulseResponse(
         result.impulseResponse.data(),
         static_cast<int>(result.impulseResponse.size()));
