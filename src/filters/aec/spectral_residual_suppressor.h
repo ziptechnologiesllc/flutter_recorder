@@ -1,6 +1,7 @@
 #ifndef AEC_SPECTRAL_RESIDUAL_SUPPRESSOR_H
 #define AEC_SPECTRAL_RESIDUAL_SUPPRESSOR_H
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -126,25 +127,33 @@ public:
       s.xPow[b] += kEnvRate * (xBand[b] * xBand[b] - s.xPow[b]);
       s.rPow[b] += kEnvRate * (rBand[b] * rBand[b] - s.rPow[b]);
 
+      // Minimum-statistics noise-floor tracking (see ChannelState doc).
+      if (s.rPow[b] < s.winMin[b])
+        s.winMin[b] = s.rPow[b];
+
+      // Everything above the ambient floor is what echo COULD explain.
+      const float aboveFloor =
+          s.rPow[b] > s.noiseFloor[b] ? s.rPow[b] - s.noiseFloor[b] : 0.0f;
+
       // Adapt the residual-echo coupling kappa_b ONLY in clean echo-only
-      // conditions: far-end present in this band (anchor above the floor) and
-      // the caller says near-end is absent. inst = fraction of expected echo
-      // power that leaked into the residual — clamped to 1 (can't leak MORE
-      // echo than exists; anything above 1 is near-end the gate should have
-      // caught).
+      // conditions: far-end present in this band (anchor above the floor)
+      // and the caller says near-end is absent. inst = fraction of expected
+      // echo power that leaked into the residual, measured ABOVE the noise
+      // floor (steady ambience is not echo) and clamped to 1.
       if (mAllowKappa && s.xPow[b] > kAnchorFloor) {
-        float inst = s.rPow[b] / (s.xPow[b] + kEps);
+        float inst = aboveFloor / (s.xPow[b] + kEps);
         if (inst > 1.0f)
           inst = 1.0f;
         s.kappa[b] += kKappaRate * (inst - s.kappa[b]);
       }
 
-      // Wiener-style gain: subtract the estimated residual-echo power
-      // (kappa_b * expected echo power) from the band's total, slightly
-      // over-subtracted (kBeta). When the band is pure residual echo,
-      // rPow ≈ kappa*xPow -> gain -> kGainMin. When the performer adds
-      // uncorrelated energy, rPow climbs above kappa*xPow -> gain -> 1.
-      const float echoPow = s.kappa[b] * s.xPow[b];
+      // Wiener-style gain: subtract the estimated residual-echo power, but
+      // never more than the above-floor energy — the suppressor must not
+      // duck the band below the room's own ambience (that's the "heavy
+      // low-pass in a noisy cafe" failure).
+      float echoPow = s.kappa[b] * s.xPow[b];
+      if (echoPow > aboveFloor)
+        echoPow = aboveFloor;
       float target = 1.0f;
       if (s.rPow[b] > kEps) {
         target = (s.rPow[b] - kBeta * echoPow) / (s.rPow[b] + kEps);
@@ -157,6 +166,21 @@ public:
       s.gain[b] += rate * (target - s.gain[b]);
 
       out += s.gain[b] * rBand[b];
+    }
+
+    // Window rollover for the floor estimate (once per kMinWindow samples,
+    // shared across bands; ch-local counters keep this RT-trivial).
+    if (++s.winCount >= kMinWindow) {
+      s.winCount = 0;
+      s.histIdx = (s.histIdx + 1) % kMinSlots;
+      for (int b = 0; b < kBands; ++b) {
+        s.minHist[b][s.histIdx] = s.winMin[b];
+        s.winMin[b] = s.rPow[b];
+        float floorMin = s.minHist[b][0];
+        for (int h = 1; h < kMinSlots; ++h)
+          floorMin = std::min(floorMin, s.minHist[b][h]);
+        s.noiseFloor[b] = kFloorScale * floorMin;
+      }
     }
     return out;
   }
@@ -193,6 +217,20 @@ private:
     std::array<float, kBands> rPow{{0, 0, 0}};
     std::array<float, kBands> kappa{{kKappaInit, kKappaInit, kKappaInit}};
     std::array<float, kBands> gain{{1.0f, 1.0f, 1.0f}};
+
+    // Minimum-statistics ambient noise floor per band (power). Echo can only
+    // explain band energy ABOVE this floor; without it, steady broadband
+    // background (a noisy cafe) inflated kappa and the Wiener law ducked the
+    // whole HF range whenever the loop played — heard as a heavy low-pass
+    // on the recording. Tracked as the minimum of rPow over a rolling
+    // ~1.4 s (kMinSlots windows of kMinWindow samples): in ambience the
+    // minimum IS the floor; in a quiet room it decays to ~0 and behavior is
+    // exactly the old one.
+    std::array<float, kBands> noiseFloor{{0, 0, 0}};
+    std::array<float, kBands> winMin{{1e9f, 1e9f, 1e9f}};
+    std::array<std::array<float, 8>, kBands> minHist{};
+    int histIdx = 0;
+    int winCount = 0;
   };
 
   void setCrossover(int i, float fc) {
@@ -228,6 +266,12 @@ private:
   static constexpr float kGainAttack = 0.06f;  // ~0.4 ms duck
   static constexpr float kGainRelease = 0.003f;// ~10 ms recover
   static constexpr float kEps = 1e-12f;
+
+  // Minimum-statistics noise floor: kMinSlots windows of kMinWindow samples
+  // (~8×170 ms ≈ 1.4 s @ 48 kHz) with a modest safety scale.
+  static constexpr int kMinWindow = 8192;
+  static constexpr int kMinSlots = 8;
+  static constexpr float kFloorScale = 1.5f;
 };
 
 #endif // AEC_SPECTRAL_RESIDUAL_SUPPRESSOR_H
