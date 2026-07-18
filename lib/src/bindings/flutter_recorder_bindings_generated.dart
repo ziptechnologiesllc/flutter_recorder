@@ -2025,6 +2025,35 @@ class FlutterRecorderBindings {
       _flutter_recorder_scheduler_isAutoStopEnabledPtr
           .asFunction<bool Function()>();
 
+  /// Set how many base-loop cycles an overdub records before the upfront STOP
+  /// (1 = one cycle, N = N cycles, 0 = manual stop — still quantized)
+  void flutter_recorder_scheduler_setRecordCycles(
+    int cycles,
+  ) {
+    return _flutter_recorder_scheduler_setRecordCycles(
+      cycles,
+    );
+  }
+
+  late final _flutter_recorder_scheduler_setRecordCyclesPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int32)>>(
+          'flutter_recorder_scheduler_setRecordCycles');
+  late final _flutter_recorder_scheduler_setRecordCycles =
+      _flutter_recorder_scheduler_setRecordCyclesPtr
+          .asFunction<void Function(int)>();
+
+  /// Get the configured record-cycles multiplier
+  int flutter_recorder_scheduler_getRecordCycles() {
+    return _flutter_recorder_scheduler_getRecordCycles();
+  }
+
+  late final _flutter_recorder_scheduler_getRecordCyclesPtr =
+      _lookup<ffi.NativeFunction<ffi.Int32 Function()>>(
+          'flutter_recorder_scheduler_getRecordCycles');
+  late final _flutter_recorder_scheduler_getRecordCycles =
+      _flutter_recorder_scheduler_getRecordCyclesPtr
+          .asFunction<int Function()>();
+
   /// Arm auto-record.
   /// wavPath        : where the take is written on stop
   /// barCount       : preset phrase length in bars; <= 0 = no preset length

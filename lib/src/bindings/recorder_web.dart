@@ -875,6 +875,16 @@ class RecorderWeb extends RecorderImpl {
     return true; // Default to true on web
   }
 
+  @override
+  void schedulerSetRecordCycles(int cycles) {
+    // No-op on web
+  }
+
+  @override
+  int schedulerGetRecordCycles() {
+    return 1; // Default: one cycle on web
+  }
+
   // ==================== AUTO-RECORD ====================
   // Stubs for web - hands-free first-loop capture not supported
 

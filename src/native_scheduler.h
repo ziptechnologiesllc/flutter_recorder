@@ -86,6 +86,19 @@ public:
         return mAutoStopEnabled.load(std::memory_order_acquire);
     }
 
+    /// How many base-loop cycles an overdub records before the upfront STOP.
+    /// 1 = one cycle (default), N = N cycles, 0 = no upfront stop — record
+    /// until the user taps stop (the manual stop still quantizes to a loop
+    /// boundary, so the on-grid length invariant holds either way).
+    void setRecordCycles(int32_t cycles) {
+        mRecordCycles.store(cycles, std::memory_order_release);
+    }
+
+    /// Get the configured record-cycles multiplier
+    int32_t getRecordCycles() const {
+        return mRecordCycles.load(std::memory_order_acquire);
+    }
+
     /// Reset all state (call on session end)
     void reset();
 
@@ -194,6 +207,7 @@ private:
     std::atomic<int64_t> mBaseLoopStartFrame{0};
     std::atomic<int64_t> mLatencyCompensationFrames{0};  // Frames to rewind at recording start
     std::atomic<bool> mAutoStopEnabled{false};  // When true, auto-schedule STOP with START
+    std::atomic<int32_t> mRecordCycles{1};      // Loop cycles per overdub take (0 = manual stop)
 
     // ===================== NOTIFICATION QUEUE (SPSC) =====================
     // Single-Producer (audio thread) / Single-Consumer (Dart poll)

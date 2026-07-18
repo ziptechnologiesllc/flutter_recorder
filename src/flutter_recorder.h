@@ -417,6 +417,13 @@ FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setAutoStop(bool enabled);
 // Get auto-stop enabled state
 FFI_PLUGIN_EXPORT bool flutter_recorder_scheduler_isAutoStopEnabled();
 
+// Set how many base-loop cycles an overdub records before the upfront STOP
+// (1 = one cycle, N = N cycles, 0 = manual stop — still quantized to the grid)
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setRecordCycles(int32_t cycles);
+
+// Get the configured record-cycles multiplier
+FFI_PLUGIN_EXPORT int32_t flutter_recorder_scheduler_getRecordCycles();
+
 /////////////////////////
 /// Auto-Record (hands-free first-loop capture)
 /// Long-press to arm; the first detected onset becomes the loop downbeat (the

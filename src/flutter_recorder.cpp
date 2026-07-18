@@ -2089,6 +2089,18 @@ FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setAutoStop(bool enabled) {
   fprintf(stderr, "[Recorder] Scheduler auto-stop %s\n", enabled ? "enabled" : "disabled");
 }
 
+// Set how many base-loop cycles an overdub records before the upfront STOP
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setRecordCycles(int32_t cycles) {
+  NativeScheduler::instance().setRecordCycles(cycles);
+  fprintf(stderr, "[Recorder] Scheduler record cycles set to %d%s\n", cycles,
+          cycles <= 0 ? " (manual stop)" : "");
+}
+
+// Get the configured record-cycles multiplier
+FFI_PLUGIN_EXPORT int32_t flutter_recorder_scheduler_getRecordCycles() {
+  return NativeScheduler::instance().getRecordCycles();
+}
+
 // Get auto-stop enabled state
 FFI_PLUGIN_EXPORT bool flutter_recorder_scheduler_isAutoStopEnabled() {
   return NativeScheduler::instance().isAutoStopEnabled();

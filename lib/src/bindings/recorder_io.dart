@@ -1539,6 +1539,16 @@ class RecorderFfi extends RecorderImpl {
     return _bindings.flutter_recorder_scheduler_isAutoStopEnabled();
   }
 
+  @override
+  void schedulerSetRecordCycles(int cycles) {
+    _bindings.flutter_recorder_scheduler_setRecordCycles(cycles);
+  }
+
+  @override
+  int schedulerGetRecordCycles() {
+    return _bindings.flutter_recorder_scheduler_getRecordCycles();
+  }
+
   // ==================== AUTO-RECORD ====================
 
   @override

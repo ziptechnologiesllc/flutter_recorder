@@ -1360,6 +1360,18 @@ interface class Recorder {
     return _impl.schedulerIsAutoStopEnabled();
   }
 
+  /// Set how many base-loop cycles an overdub records before the scheduler's
+  /// upfront STOP. 1 = one cycle (default), N = N cycles, 0 = no upfront stop
+  /// (record until a manual stop, which still quantizes to a loop boundary).
+  void schedulerSetRecordCycles(int cycles) {
+    _impl.schedulerSetRecordCycles(cycles);
+  }
+
+  /// Get the configured record-cycles multiplier.
+  int schedulerGetRecordCycles() {
+    return _impl.schedulerGetRecordCycles();
+  }
+
   // ==================== AUTO-RECORD ====================
   // Hands-free first-loop capture: long-press to arm, the first detected onset
   // becomes the loop downbeat (lead-in silence trimmed via the ring buffer).

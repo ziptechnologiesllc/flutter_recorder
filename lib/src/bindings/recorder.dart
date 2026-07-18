@@ -996,6 +996,15 @@ abstract class RecorderImpl {
   @mustBeOverridden
   bool schedulerIsAutoStopEnabled();
 
+  /// Set how many base-loop cycles an overdub records before the upfront STOP
+  /// (1 = one cycle, N = N cycles, 0 = manual stop — still quantized).
+  @mustBeOverridden
+  void schedulerSetRecordCycles(int cycles);
+
+  /// Get the configured record-cycles multiplier.
+  @mustBeOverridden
+  int schedulerGetRecordCycles();
+
   // ==================== AUTO-RECORD ====================
   // Hands-free first-loop capture: long-press to arm, the first detected onset
   // becomes the loop downbeat (lead-in silence trimmed via the ring buffer).

@@ -203,20 +203,45 @@ uint32_t NativeScheduler::scheduleQuantizedStart(const char* recordingPath) {
     // where the user hadn't explicitly opted in. Once a base loop exists,
     // always schedule the STOP; the setting is left in place for a future
     // free-record-mode use, just no longer consulted here.
-    if (startEventId != 0 && loopFrames > 0) {
-        // STOP is START + loopFrames. targetStartFrame already carries the
-        // latency-comp offset, so STOP inherits it — the take stays exactly
-        // loopFrames long, just phase-shifted off the grid by latencyComp.
-        int64_t targetStopFrame = targetStartFrame + loopFrames;
+    // mRecordCycles extends the take to N loop cycles (the length-multiplier
+    // control). 0 = no upfront stop: record until the user taps stop, which
+    // still quantizes to a boundary via scheduleQuantizedStop — the on-grid
+    // invariant holds for every path.
+    int32_t recordCycles = mRecordCycles.load(std::memory_order_acquire);
+    if (startEventId != 0 && loopFrames > 0 && recordCycles > 0) {
+        // STOP is START + loopFrames * cycles. targetStartFrame already
+        // carries the latency-comp offset, so STOP inherits it — the take
+        // stays exactly cycles*loopFrames long, just phase-shifted off the
+        // grid by latencyComp.
+        int64_t targetStopFrame = targetStartFrame + loopFrames * recordCycles;
         uint32_t stopEventId = scheduleEvent(SchedulerAction::StopRecording, targetStopFrame, recordingPath);
-        SCHED_LOG("scheduleQuantizedStart: auto-scheduled STOP at frame %lld (startEventId=%u, stopEventId=%u)",
-                  (long long)targetStopFrame, startEventId, stopEventId);
+        SCHED_LOG("scheduleQuantizedStart: auto-scheduled STOP at frame %lld (%d cycle(s), startEventId=%u, stopEventId=%u)",
+                  (long long)targetStopFrame, recordCycles, startEventId, stopEventId);
+    } else if (startEventId != 0 && loopFrames > 0) {
+        SCHED_LOG("scheduleQuantizedStart: no upfront STOP (recordCycles=0 — manual quantized stop)");
     }
 
     return startEventId;
 }
 
 uint32_t NativeScheduler::scheduleQuantizedStop(int64_t recordingStartFrame) {
+    // A tap-stop always overrides the upfront stop scheduled at start (one or
+    // N cycles): cancel any pending StopRecording so the take ends at the
+    // tapped boundary instead, and the stale stop can't fire later into a
+    // non-recording state. Targeted (not cancelAllEvents) so pending playback
+    // transport events survive. CAS: if the audio thread fires the upfront
+    // stop concurrently, the cancel no-ops and executeEvent's isRecording()
+    // guard absorbs the redundant tap-stop.
+    for (int i = 0; i < MAX_EVENTS; ++i) {
+        if (mEvents[i].action.load(std::memory_order_acquire) ==
+                SchedulerAction::StopRecording) {
+            EventState expected = EventState::Pending;
+            mEvents[i].state.compare_exchange_strong(
+                expected, EventState::Cancelled,
+                std::memory_order_acq_rel, std::memory_order_relaxed);
+        }
+    }
+
     int64_t loopFrames = mBaseLoopFrames.load(std::memory_order_acquire);
     int64_t currentFrame =
         flowstate::audio_engine::AudioEngine::instance().getCurrentFrame();
