@@ -699,30 +699,39 @@ void AudioEngine::firePendingThroughFrame(
       case PendingAction::Stop: {
         const bool active = (pe.action == PendingAction::Unmute ||
                              pe.action == PendingAction::Unpause);
-        bool handledExactly = false;
         if (mFilters && aecUpdatesThisCallback < kMaxAecUpdatesPerCallback) {
-          handledExactly = mFilters->setAecTrackActive(pe.trackIndex, active);
+          // Unmute carries the launch velocity in pe.value — record it as
+          // the track's gain so the exact edit applies the contribution at
+          // the amplitude that will actually be audible, not an implicit
+          // 1.0 (an over-subtraction that inverted the bleed and tripped
+          // the output safety clamp into ducking the performer).
+          if (pe.action == PendingAction::Unmute && pe.value > 0.0f) {
+            mFilters->setAecTrackGain(pe.trackIndex, pe.value);
+          }
+          mFilters->setAecTrackActive(pe.trackIndex, active);
           ++aecUpdatesThisCallback;
         }
-        // Reseed ONLY when the exact edit couldn't cover the change
-        // (unregistered/uncomputed track, size mismatch, per-callback cap).
-        // Notifying unconditionally was the seed livelock: every toggle
-        // aborted the in-flight one-period reference capture, so during
-        // active performance the seed never landed and convergence silently
-        // fell back to per-pass EMA (30-60 s of wall clock).
-        if (!handledExactly && mFilters) mFilters->notifyAecReferenceChanged();
+        // ALWAYS reseed, even when the exact edit applied. The exact edit
+        // gets the template close instantly; the reseed lands ~1 period
+        // later from a live capture and corrects any residual model error
+        // (gain mismatch, phase convention, IR drift). Suppressing it when
+        // the edit "succeeded" was field-tested as a REGRESSION: a small
+        // persistent model error with no reseed to clean it beat the mic
+        // energy, engaged the output clamp, and ducked the performer while
+        // leaving inverted bleed audible. Livelock economics also changed:
+        // with FFT contributions the reseed costs ~1 loop pass, not many,
+        // so correctness wins.
+        if (mFilters) mFilters->notifyAecReferenceChanged();
         break;
       }
       case PendingAction::SetGain: {
-        // Exact per-track gain edit: template += (g_new - g_old) * E_track.
-        // Falls back to a reseed only when the track has no computed
-        // contribution — same skip-the-reseed contract as the toggle case.
-        bool handledExactly = false;
+        // Exact per-track gain edit (instant), then the same corrective
+        // reseed as the toggle case above.
         if (mFilters && aecUpdatesThisCallback < kMaxAecUpdatesPerCallback) {
-          handledExactly = mFilters->setAecTrackGain(pe.trackIndex, pe.value);
+          mFilters->setAecTrackGain(pe.trackIndex, pe.value);
           ++aecUpdatesThisCallback;
         }
-        if (!handledExactly && mFilters) mFilters->notifyAecReferenceChanged();
+        if (mFilters) mFilters->notifyAecReferenceChanged();
         break;
       }
       default:
