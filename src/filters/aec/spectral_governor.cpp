@@ -7,6 +7,11 @@
 #include <cstdio>
 #include <cstring>
 
+// MSVC's <cmath> only provides M_PI with _USE_MATH_DEFINES
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 namespace {
 constexpr int kFftSize = 1024;      // FFT::fft1024 — 512 packed complex bins
 constexpr int kHop = 1024;          // non-overlapping windows (Welch handles it)

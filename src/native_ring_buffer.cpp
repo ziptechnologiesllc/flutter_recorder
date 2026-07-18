@@ -1,4 +1,5 @@
 #include "native_ring_buffer.h"
+#include <algorithm>
 #include <cstdio>
 
 // Global ring buffer instance
@@ -126,7 +127,18 @@ bool NativeRingBuffer::configure(size_t capacityFrames, unsigned int channels,
   mCapacityFrames = capacityFrames;
   mChannels = channels;
   mSampleRate = sampleRate;
-  mBuffer.resize(capacityFrames * channels, 0.0f);
+  // Never shrink below the pre-allocated recording region. Reconfigure used
+  // to resize down to ring capacity while mPreAllocated stayed true, so
+  // preAllocateForRecording() no-op'd and linear-mode recording writes were
+  // silently capped at ring capacity — the first take after a recorder
+  // re-init came back truncated to the pre-roll window (5s).
+  size_t requiredSamples = capacityFrames * channels;
+  if (mPreAllocated) {
+    requiredSamples = std::max(requiredSamples, mMaxRecordingFrames * mChannels);
+  }
+  if (mBuffer.size() != requiredSamples) {
+    mBuffer.resize(requiredSamples, 0.0f);
+  }
   reset();
   return true;
 }
@@ -357,8 +369,12 @@ void NativeRingBuffer::reset() {
   mRecordingActive.store(false, std::memory_order_release);
   mRecordingStartTotalFrame = 0;
 
-  // Clear the buffer
-  std::fill(mBuffer.begin(), mBuffer.end(), 0.0f);
+  // Clear only the ring window. The recording region beyond it (up to 600s
+  // pre-allocated) is always overwritten before it is read, and zero-filling
+  // all of it here is a multi-100ms stall on whatever thread reconfigures.
+  size_t ringSamples = mCapacityFrames * mChannels;
+  std::fill(mBuffer.begin(),
+            mBuffer.begin() + std::min(ringSamples, mBuffer.size()), 0.0f);
 }
 
 // AUDIO THREAD SAFE: No printf/fprintf calls, no allocations

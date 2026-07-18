@@ -181,7 +181,8 @@ private:
   // We use standard vectors but handle unaligned loads safely in the
   // implementation.
   std::vector<float> weights;
-  std::vector<float> x_history;
+  std::vector<float> x_history; // 2x filter_length; live window starts at hist_head
+  size_t hist_head = 0;         // offset of the newest sample (see updateHistory)
   size_t filter_length;
 
   // VSS Statistics

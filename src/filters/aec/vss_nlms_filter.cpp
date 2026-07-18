@@ -61,12 +61,14 @@ VssNlmsFilter::VssNlmsFilter(size_t taps) : filter_length(taps) {
   // so we use unaligned load/store intrinsics (loadu/storeu) which are fast on
   // modern CPUs.
   weights.resize(filter_length, 0.0f);
-  x_history.resize(filter_length, 0.0f);
+  x_history.resize(2 * filter_length, 0.0f); // slack window — see updateHistory
+  hist_head = filter_length;
 }
 
 void VssNlmsFilter::reset() {
   std::fill(weights.begin(), weights.end(), 0.0f);
   std::fill(x_history.begin(), x_history.end(), 0.0f);
+  hist_head = filter_length;
   p_est = 0.0f;
   var_x = 0.0f;
   var_e = 0.0f;
@@ -88,7 +90,7 @@ void VssNlmsFilter::resize(size_t newLength) {
 
   // Resize and reinitialize vectors
   weights.resize(filter_length);
-  x_history.resize(filter_length);
+  x_history.resize(2 * filter_length);
 
   // Reset all state
   reset();
@@ -131,15 +133,21 @@ float VssNlmsFilter::getCoeffEnergy() const {
 }
 
 void VssNlmsFilter::updateHistory(float new_sample) {
-  // Shift history: x[n] -> x[n+1]
-  // memmove is generally highly optimized.
-  // For a circular buffer approach, we'd need more logic, but for < 4096 taps,
-  // this is negligible.
-  if (filter_length > 1) {
-    std::memmove(&x_history[1], &x_history[0],
-                 (filter_length - 1) * sizeof(float));
+  // Slack window inside a 2x buffer: the live window is
+  // x_history[hist_head .. hist_head + filter_length), newest-first
+  // (window[i] == x[n-i]) — the exact layout the SIMD kernels below read.
+  // Pushing a sample just steps the window base back one slot (O(1));
+  // only when the base hits the front of the buffer do we recenter with a
+  // single memmove. The previous version memmove'd the full 16KB history on
+  // EVERY sample — ~1.6 GB/s of copy traffic on the real-time audio thread
+  // at 48kHz stereo; this does one 16KB move per filter_length samples.
+  if (hist_head == 0) {
+    std::memmove(&x_history[filter_length], &x_history[0],
+                 filter_length * sizeof(float));
+    hist_head = filter_length;
   }
-  x_history[0] = new_sample;
+  --hist_head;
+  x_history[hist_head] = new_sample;
 }
 
 float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
@@ -156,7 +164,7 @@ float VssNlmsFilter::processSample(float aligned_ref, float mic_input) {
   // and energy_x_inst = x_history * x_history
 
   // Raw pointers for speed
-  const float *p_x = x_history.data();
+  const float *p_x = x_history.data() + hist_head;
   float *p_w =
       weights.data(); // we will modify weights later, but for conv it reads
 
@@ -421,7 +429,7 @@ float VssNlmsFilter::scoreAgainstHistory(const float *w, float mic_input,
   // Pure FIR dot product of an EXTERNAL weight vector against this filter's
   // current reference history. No history shift, no adaptation, no stats —
   // this is the held-out evaluation of a candidate snapshot.
-  const float *p_x = x_history.data();
+  const float *p_x = x_history.data() + hist_head;
   float y_est = 0.0f;
 
 #ifdef USE_NEON

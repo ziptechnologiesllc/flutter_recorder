@@ -26,6 +26,10 @@
 #include <TargetConditionals.h>
 #endif
 
+#if defined(_IS_WIN_) && (defined(_M_X64) || defined(_M_IX86))
+#include <immintrin.h> // FTZ/DAZ control for the audio thread
+#endif
+
 // External logging function defined in calibration.cpp
 extern void aecLog(const char *fmt, ...);
 
@@ -550,6 +554,19 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
   Capture *userData = (Capture *)pDevice->pUserData;
   if (!userData)
     return;
+
+#if defined(_IS_WIN_) && (defined(_M_X64) || defined(_M_IX86))
+  // Flush denormals to zero on this WASAPI thread: the AEC's decaying IIR
+  // smoothers reach the denormal range during silence, where SSE denormal
+  // handling costs ~100x per op — enough to blow the 2.67ms period budget.
+  // (Clang on Apple/Android builds runs with FTZ via -ffast-math defaults.)
+  static thread_local bool sFtzApplied = false;
+  if (!sFtzApplied) {
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+    sFtzApplied = true;
+  }
+#endif
 
   // Profile the full callback (all return paths) — see notes above.
   CallbackTimer cbTimer_(frameCount,
@@ -1587,7 +1604,37 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   if (!g_caActive)
 #endif
   {
+#ifdef _IS_WIN_
+    // WASAPI: try exclusive mode first for the duplex (slave/AEC) device — it
+    // bypasses the Windows audio engine mixer for the lowest attainable
+    // latency. Exclusive access can be denied (endpoint busy, driver refuses
+    // the format), so fall back to low-latency shared mode (the previous
+    // behavior). While exclusive playback is held, other apps' audio is muted
+    // — same trade-off DAWs make in WASAPI-exclusive/ASIO mode.
+    if (!captureOnly) {
+      deviceConfig.capture.shareMode = ma_share_mode_exclusive;
+      deviceConfig.playback.shareMode = ma_share_mode_exclusive;
+      result = ma_device_init(&context, &deviceConfig, &device);
+      if (result == MA_SUCCESS) {
+        printf("[Capture::init] WASAPI EXCLUSIVE mode acquired "
+               "(capture period=%u frames, playback period=%u frames)\n",
+               device.capture.internalPeriodSizeInFrames,
+               device.playback.internalPeriodSizeInFrames);
+        fflush(stdout);
+      } else {
+        printf("[Capture::init] WASAPI exclusive mode unavailable (error %d), "
+               "falling back to low-latency shared mode\n", result);
+        fflush(stdout);
+        deviceConfig.capture.shareMode = ma_share_mode_shared;
+        deviceConfig.playback.shareMode = ma_share_mode_shared;
+        result = ma_device_init(&context, &deviceConfig, &device);
+      }
+    } else {
+      result = ma_device_init(&context, &deviceConfig, &device);
+    }
+#else
     result = ma_device_init(&context, &deviceConfig, &device);
+#endif
     if (result != MA_SUCCESS) {
       printf("Failed to initialize capture device. Error: %d\n", result);
       fflush(stdout);

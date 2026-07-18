@@ -56,6 +56,15 @@ if (WIN32)
   target_compile_definitions(flutter_recorder PRIVATE _IS_WIN_)
 endif()
 
+if (MSVC)
+  # The AEC hot loops (vss_nlms_filter.cpp) gate their AVX2 intrinsics path on
+  # __AVX2__, which MSVC only defines under /arch:AVX2 — without it the
+  # 4096-tap NLMS runs scalar and alone eats most of the 2.67ms WASAPI period.
+  # /fp:fast additionally lets MSVC vectorize float reductions elsewhere
+  # (clang does the equivalent by default on the Apple builds).
+  target_compile_options(flutter_recorder PRIVATE /arch:AVX2 /fp:fast)
+endif()
+
 if (ANDROID)
   # Support Android 15 16k page size.
   target_link_options(flutter_recorder PRIVATE "-Wl,-z,max-page-size=16384,-O2")

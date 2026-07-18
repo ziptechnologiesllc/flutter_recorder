@@ -2313,7 +2313,9 @@ FFI_PLUGIN_EXPORT size_t flutter_recorder_getRecordedWavSize() {
 // Free the recorded audio and WAV buffers
 FFI_PLUGIN_EXPORT void flutter_recorder_freeRecordedAudio() {
   if (g_lastRecordedAudio != nullptr) {
-    delete[] g_lastRecordedAudio;
+    // Do NOT delete[]: this points into NativeRingBuffer::mOutputBuffer
+    // (vector storage owned by the ring buffer and reused across takes) —
+    // delete[] on it corrupts the heap. Dropping the reference is enough.
     g_lastRecordedAudio = nullptr;
     g_lastRecordedFrameCount = 0;
   }
