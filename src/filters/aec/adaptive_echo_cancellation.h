@@ -116,9 +116,16 @@ public:
    * track hasn't finished registering yet (falls back to the composite
    * template's existing behavior for that track in the meantime).
    */
-  void setTrackActive(int trackIndex, bool active) {
-    if (mEchoTemplate)
-      mEchoTemplate->setTrackActive(trackIndex, active);
+  bool setTrackActive(int trackIndex, bool active) {
+    return mEchoTemplate ? mEchoTemplate->setTrackActive(trackIndex, active)
+                         : false;
+  }
+
+  /** Exact per-track gain edit; true = mix change fully accounted for (the
+   * caller can skip the reference-changed reseed). */
+  bool setTrackGain(int trackIndex, float gain) {
+    return mEchoTemplate ? mEchoTemplate->setTrackGain(trackIndex, gain)
+                         : false;
   }
 
   /**

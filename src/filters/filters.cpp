@@ -383,12 +383,22 @@ void Filters::registerAecTrackAudio(int trackIndex, const float *audioMono,
       ->registerTrackAudio(trackIndex, audioMono, frames);
 }
 
-void Filters::setAecTrackActive(int trackIndex, bool active) {
+bool Filters::setAecTrackActive(int trackIndex, bool active) {
   int idx = isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
-    return;
-  static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get())
+    return false;
+  return static_cast<AdaptiveEchoCancellation *>(
+             filters[idx].get()->filter.get())
       ->setTrackActive(trackIndex, active);
+}
+
+bool Filters::setAecTrackGain(int trackIndex, float gain) {
+  int idx = isFilterActive(adaptiveEchoCancellation);
+  if (idx < 0)
+    return false;
+  return static_cast<AdaptiveEchoCancellation *>(
+             filters[idx].get()->filter.get())
+      ->setTrackGain(trackIndex, gain);
 }
 
 void Filters::releaseAecTrackContribution(int trackIndex) {

@@ -699,21 +699,32 @@ void AudioEngine::firePendingThroughFrame(
       case PendingAction::Stop: {
         const bool active = (pe.action == PendingAction::Unmute ||
                              pe.action == PendingAction::Unpause);
+        bool handledExactly = false;
         if (mFilters && aecUpdatesThisCallback < kMaxAecUpdatesPerCallback) {
-          mFilters->setAecTrackActive(pe.trackIndex, active);
+          handledExactly = mFilters->setAecTrackActive(pe.trackIndex, active);
           ++aecUpdatesThisCallback;
         }
-        if (mFilters) mFilters->notifyAecReferenceChanged();
+        // Reseed ONLY when the exact edit couldn't cover the change
+        // (unregistered/uncomputed track, size mismatch, per-callback cap).
+        // Notifying unconditionally was the seed livelock: every toggle
+        // aborted the in-flight one-period reference capture, so during
+        // active performance the seed never landed and convergence silently
+        // fell back to per-pass EMA (30-60 s of wall clock).
+        if (!handledExactly && mFilters) mFilters->notifyAecReferenceChanged();
         break;
       }
-      case PendingAction::SetGain:
-        // Not yet reachable from Dart (no setTrackGain call site exists
-        // today), but a future per-track volume fader would move the audible
-        // mix without this — same "stale echo estimate" class of bug the
-        // per-track mechanism exists to eliminate. No exact-subtraction case
-        // (a gain change isn't a binary in/out toggle), so just reseed.
-        if (mFilters) mFilters->notifyAecReferenceChanged();
+      case PendingAction::SetGain: {
+        // Exact per-track gain edit: template += (g_new - g_old) * E_track.
+        // Falls back to a reseed only when the track has no computed
+        // contribution — same skip-the-reseed contract as the toggle case.
+        bool handledExactly = false;
+        if (mFilters && aecUpdatesThisCallback < kMaxAecUpdatesPerCallback) {
+          handledExactly = mFilters->setAecTrackGain(pe.trackIndex, pe.value);
+          ++aecUpdatesThisCallback;
+        }
+        if (!handledExactly && mFilters) mFilters->notifyAecReferenceChanged();
         break;
+      }
       default:
         break;
     }

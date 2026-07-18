@@ -1,5 +1,7 @@
 #include "synchronous_echo_template.h"
 
+#include "circular_convolution.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -284,18 +286,19 @@ void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
   // h ⊛ ref computed modulo P — not a linear-convolution approximation with
   // edge effects. seed[phi] predicts what per-pass learning would converge
   // to, using the SAME alignedRef delay convention the live filter already
-  // uses (see calibration.cpp analyzeAligned: h is trained on a delay-
-  // pre-aligned ref/mic pair).
+  // uses (see calibration.cpp analyzeAligned). FFT-based (worker thread):
+  // was a direct O(P·L) loop — ~4 s of compute for a 5 s loop, i.e. most of
+  // the audible convergence latency after a period change. Now ~50 ms.
+  std::vector<float> refPeriod(mRefCapture.begin(),
+                               mRefCapture.begin() + Pu);
+  std::vector<float> kernel(ir.begin(), ir.begin() + L);
+  std::vector<float> seed;
+  aec_conv::circularConvolve(refPeriod, kernel, seed);
+
   float seedPeak = 0.0f;
   for (size_t phi = 0; phi < Pu; ++phi) {
-    double acc = 0.0;
-    for (size_t k = 0; k < L; ++k) {
-      const size_t idx = (phi + Pu - k) % Pu; // k < L <= Pu: no wraparound aliasing
-      acc += static_cast<double>(ir[k]) * static_cast<double>(mRefCapture[idx]);
-    }
-    const float v = static_cast<float>(acc);
-    mSeedOutput[phi] = v;
-    seedPeak = std::max(seedPeak, std::fabs(v));
+    mSeedOutput[phi] = seed[phi];
+    seedPeak = std::max(seedPeak, std::fabs(seed[phi]));
   }
 
   if (seedPeak > kMaxSeedAbs) {
@@ -344,6 +347,8 @@ void SynchronousEchoTemplate::releaseTrackSlot(int trackIndex) {
   TrackContribution &tc = mTrackContributions[slot];
   tc.computed.store(false, std::memory_order_release);
   tc.active = false;
+  tc.targetGain = 1.0f;
+  tc.appliedGain = 0.0f;
   tc.E.clear();
   tc.slotIndex.store(-1, std::memory_order_release);
 }
@@ -481,18 +486,15 @@ void SynchronousEchoTemplate::computeTrackContribution(
   for (size_t phi = 0; phi < P; ++phi)
     audioPeak = std::max(audioPeak, std::fabs(folded[phi]));
 
-  std::vector<float> mono(P, 0.0f);
+  // FFT circular convolution (worker thread) — see computeSeedConvolution;
+  // the direct loop cost ~1 s per registered track, which was the gap
+  // between "overdub launches" and "its echo model is live".
+  std::vector<float> kernel(ir.begin(), ir.begin() + L);
+  std::vector<float> mono;
+  aec_conv::circularConvolve(folded, kernel, mono);
   float contribPeak = 0.0f;
-  for (size_t phi = 0; phi < P; ++phi) {
-    double acc = 0.0;
-    for (size_t k = 0; k < L; ++k) {
-      const size_t idx = (phi + P - k) % P;
-      acc += static_cast<double>(ir[k]) * static_cast<double>(folded[idx]);
-    }
-    const float v = static_cast<float>(acc);
-    mono[phi] = v;
-    contribPeak = std::max(contribPeak, std::fabs(v));
-  }
+  for (size_t phi = 0; phi < P; ++phi)
+    contribPeak = std::max(contribPeak, std::fabs(mono[phi]));
   // Do NOT normalize the contribution to the track's own amplitude. The
   // acoustic echo legitimately EXCEEDS the digital source when the mic gain
   // is hot (measured on real hardware: echoGain ~1.5, IR⊛audio peaking at
@@ -521,21 +523,21 @@ void SynchronousEchoTemplate::computeTrackContribution(
          trackIndex, rawLen, P, contribPeak, audioPeak);
 }
 
-void SynchronousEchoTemplate::setTrackActive(int trackIndex, bool active) {
+bool SynchronousEchoTemplate::setTrackActive(int trackIndex, bool active) {
   if (trackIndex < 0)
-    return;
+    return false;
   // Lock-free lookup only — audio thread, must never allocate or block.
   // registerTrackAudio() is what allocates a slot; a track with no slot
   // simply hasn't been registered yet (or registration failed, e.g. table
   // full) and falls back to the composite template, same as before.
   const int slot = findTrackSlot(trackIndex);
   if (slot < 0)
-    return;
+    return false;
   TrackContribution &tc = mTrackContributions[slot];
   if (!tc.computed.load(std::memory_order_acquire))
-    return; // not ready yet — composite template handles this track for now
+    return false; // not ready yet — composite template covers it for now
   if (tc.active == active)
-    return; // already in the target state
+    return true; // already in the target state: nothing stale to reseed
   // Defensive: the contribution's length must still match the CURRENT
   // composite template's active span, or this track's audio was
   // registered against a period that's since changed (a period change, or
@@ -548,11 +550,15 @@ void SynchronousEchoTemplate::setTrackActive(int trackIndex, bool active) {
     aecLog("[LSAEC] track %d toggle SKIPPED (size mismatch: have %zu, "
            "need %zu — period changed since registration)\n",
            trackIndex, tc.E.size(), expected);
-    return;
+    return false;
   }
-  const float sign = active ? 1.0f : -1.0f;
+  // Activate at the track's CURRENT mixer gain; deactivate removes exactly
+  // what was applied (which may differ from targetGain if a gain change
+  // arrived while the contribution was still computing).
+  const float gain = active ? tc.targetGain : -tc.appliedGain;
   for (size_t i = 0; i < tc.E.size(); ++i)
-    mTemplate[i] += sign * tc.E[i];
+    mTemplate[i] += gain * tc.E[i];
+  tc.appliedGain = active ? tc.targetGain : 0.0f;
   // NOTE: deliberately do NOT stamp mConfidence here. An earlier version
   // pinned every phase to kSeedConfidence on each toggle to "protect" the
   // exact edit — but that made the WHOLE template max-confidence, which (a)
@@ -566,8 +572,35 @@ void SynchronousEchoTemplate::setTrackActive(int trackIndex, bool active) {
   // rather than diluting it. Leaving confidence untouched keeps the
   // template adaptive.
   tc.active = active;
-  aecLog("[LSAEC] track %d exact-subtraction toggle: active=%d\n",
-         trackIndex, active ? 1 : 0);
+  aecLog("[LSAEC] track %d exact-subtraction toggle: active=%d gain=%.3f\n",
+         trackIndex, active ? 1 : 0, tc.appliedGain);
+  return true;
+}
+
+bool SynchronousEchoTemplate::setTrackGain(int trackIndex, float gain) {
+  if (trackIndex < 0)
+    return false;
+  const int slot = findTrackSlot(trackIndex);
+  if (slot < 0)
+    return false;
+  TrackContribution &tc = mTrackContributions[slot];
+  tc.targetGain = gain;
+  if (!tc.active)
+    return true; // nothing summed in — the recorded target covers activation
+  if (!tc.computed.load(std::memory_order_acquire))
+    return false;
+  const size_t expected =
+      static_cast<size_t>(mActiveLoopFrames) * mChannels;
+  if (tc.E.size() != expected)
+    return false;
+  const float delta = gain - tc.appliedGain;
+  if (delta != 0.0f) {
+    for (size_t i = 0; i < tc.E.size(); ++i)
+      mTemplate[i] += delta * tc.E[i];
+  }
+  tc.appliedGain = gain;
+  aecLog("[LSAEC] track %d exact gain edit: applied=%.3f\n", trackIndex, gain);
+  return true;
 }
 
 float SynchronousEchoTemplate::meanConfidence() const {

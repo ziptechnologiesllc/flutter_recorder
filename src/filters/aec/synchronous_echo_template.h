@@ -236,7 +236,22 @@ public:
    * this mechanism is additive, never a regression from today's behavior.
    */
   void registerTrackAudio(int trackIndex, const float *audioMono, int64_t frames);
-  void setTrackActive(int trackIndex, bool active);
+  /**
+   * Toggle a track's contribution in/out of the template at its CURRENT
+   * gain. Returns true when the exact edit was applied — the caller can
+   * then skip the reference-changed reseed entirely (the template is
+   * already correct; re-arming the one-period capture would only abort any
+   * in-flight seed for nothing: the seed-livelock this return kills).
+   */
+  bool setTrackActive(int trackIndex, bool active);
+  /**
+   * Exact gain edit: template += (gain - appliedGain) * E_track for an
+   * active track (instant, O(P)); for an inactive/unready track just
+   * records the target gain for the next activation. Returns true when the
+   * mix change is fully accounted for (same skip-the-reseed contract as
+   * setTrackActive). Audio thread only.
+   */
+  bool setTrackGain(int trackIndex, float gain);
   // Release trackIndex's slot (if any) back to the pool — call when a
   // track is deleted so a long session doesn't exhaust all 64 slots with
   // contributions for loops that no longer exist. Any thread; lock-free.
@@ -431,6 +446,12 @@ private:
     std::atomic<bool> computed{false}; // set (release) once E is fully populated
     bool active = false;              // audio-thread-only: mirrors what's
                                        // CURRENTLY summed into mTemplate
+    // Audio-thread-only gain pair: targetGain is the mixer's current gain
+    // for this track (settable any time); appliedGain is the gain actually
+    // summed into mTemplate right now (0 while inactive). setTrackGain on
+    // an active track applies the (target - applied) delta exactly.
+    float targetGain = 1.0f;
+    float appliedGain = 0.0f;
     // The track's own raw mono audio, RETAINED so the contribution can be
     // recomputed if the impulse response arrives/changes AFTER the track was
     // registered (a track recorded BEFORE a live calibration this session, or

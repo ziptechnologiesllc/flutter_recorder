@@ -106,7 +106,10 @@ public:
   // atomic. Both no-ops if LSAEC isn't active.
   void registerAecTrackAudio(int trackIndex, const float *audioMono,
                              int64_t frames);
-  void setAecTrackActive(int trackIndex, bool active);
+  // Both return true when the exact per-track edit was applied — the caller
+  // can then skip notifyAecReferenceChanged (no stale template to reseed).
+  bool setAecTrackActive(int trackIndex, bool active);
+  bool setAecTrackGain(int trackIndex, float gain);
   // Release a deleted track's per-track AEC slot back to the pool.
   void releaseAecTrackContribution(int trackIndex);
 
