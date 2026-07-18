@@ -1251,6 +1251,11 @@ class RecorderFfi extends RecorderImpl {
   }
 
   @override
+  void aecSetTrackActive(int trackIndex, bool active) {
+    _bindings.flutter_recorder_aec_setTrackActive(trackIndex, active ? 1 : 0);
+  }
+
+  @override
   void aecSetResidualSuppressor(bool enabled) {
     _bindings.flutter_recorder_aec_setResidualSuppressor(enabled);
   }

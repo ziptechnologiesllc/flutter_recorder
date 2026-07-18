@@ -1089,6 +1089,12 @@ interface class Recorder {
     _impl.aecRegisterTrackAudio(trackIndex, audioMono);
   }
 
+  /// Toggle a registered track's echo contribution in/out of the live LSAEC
+  /// template (exact edit; no-op until the contribution finishes computing).
+  void aecSetTrackActive(int trackIndex, bool active) {
+    _impl.aecSetTrackActive(trackIndex, active);
+  }
+
   /// Release a deleted track's per-track AEC slot back to the pool. Call
   /// whenever a loop is removed so a long session doesn't exhaust the
   /// fixed-size slot table with contributions for loops that no longer

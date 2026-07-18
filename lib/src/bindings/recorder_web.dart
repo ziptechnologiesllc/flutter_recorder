@@ -700,6 +700,9 @@ class RecorderWeb extends RecorderImpl {
   void aecReleaseTrackContribution(int trackIndex) {}
 
   @override
+  void aecSetTrackActive(int trackIndex, bool active) {}
+
+  @override
   void aecSetResidualSuppressor(bool enabled) {}
 
   @override

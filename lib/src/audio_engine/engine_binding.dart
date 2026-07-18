@@ -20,6 +20,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import 'native_structs.dart';
+import 'package:flutter_recorder/src/audio_engine/metronome_aec_track.dart';
 
 // ---------------------------------------------------------------------------
 // Public immutable Dart types
@@ -396,6 +397,11 @@ class EngineBinding {
   Timer? _pollTimer;
   Snapshot _lastSnapshot = Snapshot.empty;
 
+  // Feed-forward AEC pseudo-track for the metronome — collects beat events
+  // and registers one loop period of the click pattern as a per-track
+  // contribution (see metronome_aec_track.dart).
+  final MetronomeAecTrack _metronomeAec = MetronomeAecTrack();
+
   /// Broadcast stream of engine snapshots, ~120 Hz.
   Stream<Snapshot> get snapshots => _snapshotCtrl.stream;
 
@@ -447,12 +453,20 @@ class EngineBinding {
 
   void _ensurePolling() {
     if (_pollTimer != null) return;
-    if (!_snapshotCtrl.hasListener && !_eventCtrl.hasListener) return;
+    if (!_snapshotCtrl.hasListener &&
+        !_eventCtrl.hasListener &&
+        !_metronomeAec.wantsEvents) {
+      return;
+    }
     _pollTimer = Timer.periodic(_pollInterval, _onPoll);
   }
 
   void _maybeStopPolling() {
-    if (_snapshotCtrl.hasListener || _eventCtrl.hasListener) return;
+    if (_snapshotCtrl.hasListener ||
+        _eventCtrl.hasListener ||
+        _metronomeAec.wantsEvents) {
+      return;
+    }
     _pollTimer?.cancel();
     _pollTimer = null;
   }
@@ -460,12 +474,14 @@ class EngineBinding {
   void _onPoll(Timer _) {
     // Drain all queued events before reading the snapshot so subscribers see
     // events strictly before the snapshot that supersedes them.
-    if (_eventCtrl.hasListener) {
+    if (_eventCtrl.hasListener || _metronomeAec.wantsEvents) {
       // Bounded loop — outbox capacity is 256, so this terminates fast even
       // if native is bursting. The audio thread is the only producer.
       for (int i = 0; i < 256; ++i) {
         if (!_drainEventFn(_eventPtr)) break;
-        _eventCtrl.add(_readEvent(_eventPtr.ref));
+        final event = _readEvent(_eventPtr.ref);
+        if (_eventCtrl.hasListener) _eventCtrl.add(event);
+        _metronomeAec.onEvent(event, _lastSnapshot);
       }
     }
     if (_snapshotCtrl.hasListener) {
@@ -662,6 +678,16 @@ class EngineBinding {
     int flags = 0;
     if (enabled) flags |= 0x1;
     if (downbeatOnly) flags |= 0x2;
+    // Feed-forward AEC: arm the click pseudo-track collector so the
+    // metronome's echo joins the template as an exact contribution instead
+    // of a learned ghost; disable removes it from the live template.
+    if (enabled) {
+      _metronomeAec.arm();
+      _ensurePolling();
+    } else {
+      _metronomeAec.disable();
+      _maybeStopPolling();
+    }
     return postCommand(Command(
       type: CommandType.setMetronome,
       flags: flags,
