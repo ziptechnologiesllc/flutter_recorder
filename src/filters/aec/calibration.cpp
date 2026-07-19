@@ -1,4 +1,5 @@
 #include "calibration.h"
+#include "click_deconvolution.h"
 #include "delay_estimator.h"
 #include "vss_nlms_filter.h"
 #include "../../soloud_slave_bridge.h"
@@ -342,13 +343,24 @@ static CalibrationResult analyzeClickCalibration(
   if (validClicks >= minValidClicks) {
     // Average
     float scale = 1.0f / validClicks;
+    double rawEnergy = 0.0;
+    for (size_t i = 0; i < irLen; ++i) {
+      avgIR[i] *= scale;
+      rawEnergy += static_cast<double>(avgIR[i]) * avgIR[i];
+    }
+
+    // What the average holds is (room IR ⊛ probe click), NOT the room IR:
+    // hot by the click's own gain, smeared by its ~1ms width, and empty
+    // above ~2kHz where the probe has no energy. Divide the exactly-known
+    // click back out before this becomes the subtraction template.
+    aec_cal::deconvolveProbeClick(avgIR, AECCalibration::CLICK_SAMPLES,
+                                  AECCalibration::CLICK_AMPLITUDE);
+
     float energy = 0.0f;
     float maxAmp = 0.0f;
     size_t peakIdx = 0;
     float peakVal = 0.0f;
-
     for (size_t i = 0; i < irLen; ++i) {
-      avgIR[i] *= scale;
       energy += avgIR[i] * avgIR[i];
       if (std::abs(avgIR[i]) > maxAmp) {
         maxAmp = std::abs(avgIR[i]);
@@ -357,18 +369,16 @@ static CalibrationResult analyzeClickCalibration(
       }
     }
 
-    // CRITICAL: Check polarity of IR
-    // The IR should have a POSITIVE peak for proper echo cancellation.
-    // If peak is negative (inverted microphone or acoustic path), invert the IR.
-    // This ensures: y_est = IR * ref produces a positive echo estimate
-    // that can be subtracted from the mic signal.
-    if (peakVal < 0) {
-      aecLog("[AEC Click Calibration] Detected INVERTED IR (peak=%.4f) - correcting polarity\n", peakVal);
-      for (size_t i = 0; i < irLen; ++i) {
-        avgIR[i] = -avgIR[i];
-      }
-      peakVal = -peakVal;
-    }
+    // The IR's sign is stored AS MEASURED — never coerced. An AC-coupled
+    // speaker+mic chain answers a unipolar click with a bipolar response,
+    // so a negative dominant lobe IS the channel's polarity, not an error:
+    // forcing it positive on an inverted channel makes the stored sign a
+    // per-run coin flip and turns subtraction into addition. Subtraction
+    // downstream is mic − conv(ref, IR), verbatim.
+    aecLog("[AEC Click Calibration] Deconvolved IR: dominant peak %.4f "
+           "(sign %c) at tap %zu, L2 %.3f -> %.3f\n",
+           peakVal, peakVal < 0 ? '-' : '+', peakIdx,
+           std::sqrt(rawEnergy), std::sqrt(energy));
 
     // Peak-to-floor ratio: RMS of the IR EXCLUDING a window around the
     // peak (the "floor" — reverb tail + noise) vs. the peak itself. A real
@@ -377,6 +387,8 @@ static CalibrationResult analyzeClickCalibration(
     // nowhere in this function (always 0.0f, silently unreliable as a
     // diagnostic — this is the same field the production/click calibration
     // path actually uses, unlike the legacy chirp analyze() path).
+    // Computed BEFORE re-centering: the shift zero-fills one edge, which
+    // would deflate the floor and let a garbage IR pass the gate.
     constexpr size_t kPeakExclusionRadius = 8;
     double floorSumSq = 0.0;
     size_t floorCount = 0;
@@ -391,11 +403,38 @@ static CalibrationResult analyzeClickCalibration(
         : 0.0f;
     const float peakToFloor = maxAmp / (maxAmp + floorRms + 1e-9f); // 0..1
 
+    constexpr float kMinPeakToFloorRatio = 0.3f;
+    bool accepted = (energy > 1e-6f) && (peakToFloor >= kMinPeakToFloorRatio);
+
+    // Re-center the direct path on the causality-margin tap so that
+    // effectiveDelay (= matched peak delay − 32) keeps its meaning: the
+    // extraction anchored the dominant lobe of (IR ⊛ click) at tap 32, and
+    // deconvolution advances it by the click's group delay (~24 samples).
+    // A large disagreement means the delay estimate and the IR contradict
+    // each other — reject rather than "fix".
+    constexpr int kCausalityMarginTap = 32;
+    constexpr int kMaxRecenterShift = 256;
+    const int recenter = kCausalityMarginTap - static_cast<int>(peakIdx);
+    if (std::abs(recenter) > kMaxRecenterShift) {
+      aecLog("[AEC Click Calibration] Deconvolved peak at tap %zu is "
+             "implausibly far from the causality margin (shift %d) — "
+             "rejecting calibration\n", peakIdx, recenter);
+      accepted = false;
+    } else if (recenter != 0) {
+      std::vector<float> shifted(irLen, 0.0f);
+      for (size_t i = 0; i < irLen; ++i) {
+        const int j = static_cast<int>(i) + recenter;
+        if (j >= 0 && j < static_cast<int>(irLen))
+          shifted[j] = avgIR[i];
+      }
+      avgIR.swap(shifted);
+      peakIdx = static_cast<size_t>(kCausalityMarginTap);
+    }
+
     result.impulseResponse = avgIR;
     result.echoGain = std::sqrt(energy);
     result.correlation = peakToFloor;
-    constexpr float kMinPeakToFloorRatio = 0.3f;
-    result.success = (energy > 1e-6f) && (peakToFloor >= kMinPeakToFloorRatio);
+    result.success = accepted;
 
     aecLog("[AEC Click Calibration] Averaged IR from %d/%d clicks: energy=%.4f, "
            "peak=%.4f at idx %zu, floorRms=%.5f, peakToFloor=%.3f, success=%d\n",
