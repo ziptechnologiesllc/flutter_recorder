@@ -95,6 +95,17 @@ constexpr int64_t kSeedApplyChunk = 4096;
 // Worker poll interval (mirrors SpectralGovernor's cadence) — seeding is a
 // rare, one-shot event per loop-period change, not a steady-state load.
 constexpr int kSeedPollMs = 8;
+
+// MASTER KILL SWITCH for every feed-forward mechanism (convergence seed,
+// per-track exact edits, and their fit/scale machinery). Field verdict
+// 2026-07-18: the stack of feed-forward changes rated "terrible regression"
+// vs the plain per-pass-EMA template the user validated at milestone 2 —
+// and offline forensics show the calibrated IR itself is inverted/4x-hot,
+// poisoning everything built on it. OFF returns EXACTLY the validated
+// behavior (EMA learning + far-end gates + safety clamp); the mechanisms
+// stay compiled for offline vetting against captured takes, to be re-enabled
+// one at a time WITH evidence.
+constexpr bool kFeedForwardEnabled = false;
 } // namespace
 
 SynchronousEchoTemplate::SynchronousEchoTemplate(unsigned int sampleRate,
@@ -213,6 +224,8 @@ void SynchronousEchoTemplate::seedWorkerLoop() {
 }
 
 void SynchronousEchoTemplate::armSeedCaptureIfPossible(const float *alignedRef) {
+  if (!kFeedForwardEnabled)
+    return;
   if (mSeedBusy || !alignedRef)
     return; // already capturing/awaiting a job, or nothing to capture from
   bool haveSeed = false;
@@ -358,6 +371,8 @@ void SynchronousEchoTemplate::releaseTrackSlot(int trackIndex) {
 void SynchronousEchoTemplate::registerTrackAudio(int trackIndex,
                                                  const float *audioMono,
                                                  int64_t frames) {
+  if (!kFeedForwardEnabled)
+    return;
   if (trackIndex < 0 || !audioMono || frames <= 0)
     return;
   const int slot = findOrAllocTrackSlot(trackIndex);
@@ -546,6 +561,8 @@ void SynchronousEchoTemplate::computeTrackContribution(
 }
 
 bool SynchronousEchoTemplate::setTrackActive(int trackIndex, bool active) {
+  if (!kFeedForwardEnabled)
+    return false;
   if (trackIndex < 0)
     return false;
   // Lock-free lookup only — audio thread, must never allocate or block.
@@ -601,6 +618,8 @@ bool SynchronousEchoTemplate::setTrackActive(int trackIndex, bool active) {
 }
 
 bool SynchronousEchoTemplate::setTrackGain(int trackIndex, float gain) {
+  if (!kFeedForwardEnabled)
+    return false;
   if (trackIndex < 0)
     return false;
   const int slot = findTrackSlot(trackIndex);
