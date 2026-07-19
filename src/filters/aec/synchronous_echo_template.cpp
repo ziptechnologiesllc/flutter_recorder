@@ -174,6 +174,8 @@ void SynchronousEchoTemplate::reset() {
   mSeedBusy = false;
   mSeedCaptureRemaining = 0;
   mSeedApplyPos = 0;
+  mSeedFitActive = false;
+  mSeedFitFrames = 0;
 }
 
 void SynchronousEchoTemplate::seedWorkerLoop() {
@@ -572,13 +574,14 @@ bool SynchronousEchoTemplate::setTrackActive(int trackIndex, bool active) {
            trackIndex, tc.E.size(), expected);
     return false;
   }
-  // Activate at the track's CURRENT mixer gain; deactivate removes exactly
-  // what was applied (which may differ from targetGain if a gain change
-  // arrived while the contribution was still computing).
-  const float gain = active ? tc.targetGain : -tc.appliedGain;
+  // Activate at the track's CURRENT mixer gain scaled by the fitted IR
+  // trust (contributions come from the same IR as the seed and inherit its
+  // measured sign/scale error); deactivate removes exactly what was applied.
+  const float effective = tc.targetGain * mIrFitScale;
+  const float gain = active ? effective : -tc.appliedGain;
   for (size_t i = 0; i < tc.E.size(); ++i)
     mTemplate[i] += gain * tc.E[i];
-  tc.appliedGain = active ? tc.targetGain : 0.0f;
+  tc.appliedGain = active ? effective : 0.0f;
   // NOTE: deliberately do NOT stamp mConfidence here. An earlier version
   // pinned every phase to kSeedConfidence on each toggle to "protect" the
   // exact edit — but that made the WHOLE template max-confidence, which (a)
@@ -613,12 +616,13 @@ bool SynchronousEchoTemplate::setTrackGain(int trackIndex, float gain) {
       static_cast<size_t>(mActiveLoopFrames) * mChannels;
   if (tc.E.size() != expected)
     return false;
-  const float delta = gain - tc.appliedGain;
+  const float effective = gain * mIrFitScale;
+  const float delta = effective - tc.appliedGain;
   if (delta != 0.0f) {
     for (size_t i = 0; i < tc.E.size(); ++i)
       mTemplate[i] += delta * tc.E[i];
   }
-  tc.appliedGain = gain;
+  tc.appliedGain = effective;
   aecLog("[LSAEC] track %d exact gain edit: applied=%.3f\n", trackIndex, gain);
   return true;
 }
@@ -716,6 +720,8 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     if (mSeedBusy) {
       ++mSeedGeneration;
       mSeedBusy = false;
+      mSeedFitActive = false;
+      mSeedFitFrames = 0;
       mSeedAborts.fetch_add(1, std::memory_order_relaxed);
     }
     armSeedCaptureIfPossible(alignedRef);
@@ -740,6 +746,8 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     if (mSeedBusy) {
       ++mSeedGeneration;
       mSeedBusy = false;
+      mSeedFitActive = false;
+      mSeedFitFrames = 0;
       mSeedAborts.fetch_add(1, std::memory_order_relaxed);
     }
     armSeedCaptureIfPossible(alignedRef);
@@ -754,23 +762,39 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
   // the abandonment, not to this late-arriving job.
   if (mSeedOutputReady.load(std::memory_order_acquire)) {
     if (mSeedJobGeneration == mSeedGeneration) {
-      const int64_t end = std::min(mSeedApplyPos + kSeedApplyChunk, mActiveLoopFrames);
-      for (int64_t phi = mSeedApplyPos; phi < end; ++phi) {
-        const float v = mSeedOutput[static_cast<size_t>(phi)];
-        const size_t base = static_cast<size_t>(phi) * channels;
-        for (unsigned int ch = 0; ch < channels; ++ch)
-          mTemplate[base + ch] = v;
-        mConfidenceSum += kSeedConfidence - mConfidence[static_cast<size_t>(phi)];
-        mConfidence[static_cast<size_t>(phi)] = kSeedConfidence;
+      if (!mSeedFitActive && mSeedApplyPos == 0 && mSeedFitFrames == 0) {
+        // Fit-before-trust: spend one loop pass measuring how the computed
+        // seed actually fits the live mic before applying it (see the
+        // mSeedFitActive doc in the header — an unfitted seed with a
+        // wrong-sign/hot IR was measured ANTI-cancelling on device).
+        mSeedFitActive = true;
+        mSeedFitNum = 0.0;
+        mSeedFitDen = 0.0;
       }
-      mSeedApplyPos = end;
-      if (mSeedApplyPos >= mActiveLoopFrames) {
-        mSeedOutputReady.store(false, std::memory_order_relaxed);
-        mSeedBusy = false;
-        mSeedLands.fetch_add(1, std::memory_order_relaxed);
+      if (!mSeedFitActive) {
+        const int64_t end =
+            std::min(mSeedApplyPos + kSeedApplyChunk, mActiveLoopFrames);
+        for (int64_t phi = mSeedApplyPos; phi < end; ++phi) {
+          const float v =
+              mSeedFitAlpha * mSeedOutput[static_cast<size_t>(phi)];
+          const size_t base = static_cast<size_t>(phi) * channels;
+          for (unsigned int ch = 0; ch < channels; ++ch)
+            mTemplate[base + ch] = v;
+          mConfidenceSum += kSeedConfidence - mConfidence[static_cast<size_t>(phi)];
+          mConfidence[static_cast<size_t>(phi)] = kSeedConfidence;
+        }
+        mSeedApplyPos = end;
+        if (mSeedApplyPos >= mActiveLoopFrames) {
+          mSeedOutputReady.store(false, std::memory_order_relaxed);
+          mSeedBusy = false;
+          mSeedFitFrames = 0;
+          mSeedLands.fetch_add(1, std::memory_order_relaxed);
+        }
       }
     } else {
       mSeedOutputReady.store(false, std::memory_order_relaxed); // stale; drop only
+      mSeedFitActive = false;
+      mSeedFitFrames = 0;
     }
   }
 
@@ -867,6 +891,37 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
       // the suppressor is a final output polish, not part of that decision.
       blockResid += static_cast<double>(outR) * outR;
       blockMicEnergy += static_cast<double>(mic) * mic;
+    }
+
+    // Seed self-scaling fit: accumulate <mic, seed> and <seed, seed> at this
+    // frame's phase for one full pass, then derive the trust scale alpha.
+    if (mSeedFitActive) {
+      float micMono = 0.0f;
+      for (unsigned int ch = 0; ch < channels; ++ch)
+        micMono += mRawResidual[f * channels + ch] +
+                   mTemplate[base + (ch % channels)]; // mic = raw + est
+      micMono /= static_cast<float>(channels);
+      const float sv = mSeedOutput[static_cast<size_t>(phi)];
+      mSeedFitNum += static_cast<double>(micMono) * sv;
+      mSeedFitDen += static_cast<double>(sv) * sv;
+      if (++mSeedFitFrames >= mActiveLoopFrames) {
+        float alpha = (mSeedFitDen > 1e-9)
+                          ? static_cast<float>(mSeedFitNum / mSeedFitDen)
+                          : 0.0f;
+        alpha = std::max(-2.0f, std::min(2.0f, alpha));
+        mSeedFitActive = false;
+        mSeedFitFrames = 0;
+        if (std::fabs(alpha) < 0.05f) {
+          // Seed doesn't correlate with the mic (misaligned / no echo):
+          // discard rather than inject noise. Keep the prior track scale.
+          mSeedOutputReady.store(false, std::memory_order_relaxed);
+          mSeedBusy = false;
+        } else {
+          mSeedFitAlpha = alpha;
+          mIrFitScale = alpha; // per-track edits share the IR's fitted scale
+          mSeedApplyPos = 0;   // chunked apply starts next callback
+        }
+      }
     }
 
     // Convergence-seed capture: while armed, record one period of the ALIGNED

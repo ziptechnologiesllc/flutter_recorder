@@ -434,6 +434,29 @@ private:
   int64_t mSeedJobPeriod = 0;        // P the posted/ready job corresponds to
   int64_t mSeedApplyPos = 0;         // chunked-apply cursor
 
+  // ---- Seed self-scaling fit (audio-thread-only) -------------------------
+  // OFFLINE-MEASURED motivation: on real cafe recordings the calibrated
+  // IR's predicted echo fit the actual bleed with alpha = -0.26 — INVERTED
+  // POLARITY and ~4x too hot (the calibration's echoGain=3.43 is the same
+  // error seen from the other side). Applying that seed at face value made
+  // the canceller ADD ~1.3x the bleed (the observed -1..-3 dB gated ERLE).
+  // Rather than patch sign/gain conventions piecemeal, the seed is now
+  // FITTED before it is trusted: after the job lands, one loop pass
+  // accumulates num += mic·seed[phi], den += seed[phi]^2, then applies
+  // alpha = clamp(num/den) * seed. A correct seed fits alpha ~ 1; a
+  // wrong-sign/scale seed gets corrected; an uncorrelated (misaligned)
+  // seed fits alpha ~ 0 and is discarded — the seed is structurally no
+  // worse than no seed under ANY calibration bug.
+  bool mSeedFitActive = false;
+  double mSeedFitNum = 0.0;
+  double mSeedFitDen = 0.0;
+  int64_t mSeedFitFrames = 0;
+  float mSeedFitAlpha = 1.0f;
+  // Last fitted alpha — also applied to per-track exact edits, which are
+  // built from the SAME IR and inherit the same scale/sign error. 1.0
+  // until the first fit lands.
+  float mIrFitScale = 1.0f;
+
   std::atomic<bool> mSeedThreadRunning{false};
   std::thread mSeedWorker;
   void seedWorkerLoop();
