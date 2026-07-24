@@ -737,13 +737,21 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     }
   }
 
-  // SECOND STAGE: Neural Post-Filter
-  // This stage runs on the output of the linear stage to remove
-  // residual echo and non-linearities.
-  // (LSAEC isolates the template for now — neural runs only on the legacy path.)
-  if (!useTemplate &&
-      (mAecMode == aecModeNeural || mAecMode == aecModeHybrid ||
-       mAecMode == aecModeFrozenNeural)) {
+  // SECOND STAGE: Neural Post-Filter (residual echo + nonlinear cleanup).
+  // Now runs on the LSAEC path too, not just the legacy NLMS path: at this
+  // point mLinearOutputBuffer holds the linear/LSAEC RESIDUAL (the template
+  // cancelled in place above) and mRefBuffer holds the DELAY-ALIGNED reference
+  // (read at totalWritten - frameCount - effectiveDelay, so the far-end lines
+  // up with the mic echo — the alignment the model needs, and exactly what the
+  // old delay estimator got wrong). Safe by default: process() is a pure
+  // passthrough until a model is actually loaded (mIsLoaded=false → mic==output
+  // no-op), so the default hybrid mode with no model changes nothing.
+  // NOTE: inference runs on the audio thread here — fine for bring-up/testing;
+  // move to a worker before shipping (RT budget). Feed the subtraction-DTLN
+  // model its (mic,lpb) once its exported I/O signature is matched in
+  // NeuralPostFilter::process().
+  if (mAecMode == aecModeNeural || mAecMode == aecModeHybrid ||
+      mAecMode == aecModeFrozenNeural) {
     mNeuralFilter->process(mLinearOutputBuffer.data(), mRefBuffer.data(),
                            mLinearOutputBuffer.data(), frameCount);
   }

@@ -1232,7 +1232,7 @@ flutter_recorder_aec_createReferenceBuffer(unsigned int sampleRate,
   // Proves which native revision is actually running: identical symptoms
   // across a code change have previously meant CocoaPods reused a stale
   // plugin binary. Bump the tag whenever chasing a fix that "didn't take".
-  printf("[flutter_recorder] AEC build marker: seed-on-1\n");
+  printf("[flutter_recorder] AEC build marker: neural-wired-1\n");
   fflush(stdout);
   // Buffer size: 2 seconds of audio to support calibration
   // Calibration signal is 1.5 seconds white noise plus delay margin
