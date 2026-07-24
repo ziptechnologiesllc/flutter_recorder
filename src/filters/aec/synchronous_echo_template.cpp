@@ -96,15 +96,29 @@ constexpr int64_t kSeedApplyChunk = 4096;
 // rare, one-shot event per loop-period change, not a steady-state load.
 constexpr int kSeedPollMs = 8;
 
-// MASTER KILL SWITCH for every feed-forward mechanism (convergence seed,
-// per-track exact edits, and their fit/scale machinery). Field verdict
-// 2026-07-18: the stack of feed-forward changes rated "terrible regression"
-// vs the plain per-pass-EMA template the user validated at milestone 2 —
-// and offline forensics show the calibrated IR itself is inverted/4x-hot,
-// poisoning everything built on it. OFF returns EXACTLY the validated
-// behavior (EMA learning + far-end gates + safety clamp); the mechanisms
-// stay compiled for offline vetting against captured takes, to be re-enabled
-// one at a time WITH evidence.
+// Feed-forward is now split into two independently-gated mechanisms so they
+// can be re-enabled one at a time WITH evidence (the 2026-07-18 "terrible
+// regression" was the WHOLE stack enabled on a poisoned IR — inverted/8x-hot,
+// pre-P1/P2 calibration).
+//
+// kSeedEnabled — the COMPOSITE convergence seed (armSeedCaptureIfPossible):
+//   captures one loop period of aligned reference, convolves it with the
+//   calibrated IR off-thread, and stamps the template so a new loop converges
+//   in ~1 pass instead of ~20. Protected by the self-fit scalar
+//   (alpha = <mic,seed>/<seed,seed>, clamp +-2, discard |alpha|<0.05) which
+//   AUTO-corrects a wrong-sign/scale IR — it structurally cannot anti-cancel
+//   the way the day-1 unfitted seed did. Offline proof (Desktop aec_ref/mic,
+//   cross-validated): a correct IR seed gives ~19 dB / ~99% cancellation with
+//   NO learn-up. Requires a fresh P1/P2 calibration to reach that; degrades
+//   gracefully (small alpha, no benefit, no harm) on a stale IR.
+//
+// kFeedForwardEnabled — the PER-TRACK exact edits (registerTrackAudio /
+//   setTrackActive / setTrackGain): the truly-instant path (IR (x) each loop's
+//   OWN known audio, added/subtracted arithmetically on mute/unmute, zero
+//   learn-up even for 16-bar loops). STILL OFF: it writes the O(P) template
+//   from the Dart thread — a data race (task #54) that must be routed through
+//   the audio-thread pending queue before this can be enabled.
+constexpr bool kSeedEnabled = true;
 constexpr bool kFeedForwardEnabled = false;
 } // namespace
 
@@ -224,7 +238,7 @@ void SynchronousEchoTemplate::seedWorkerLoop() {
 }
 
 void SynchronousEchoTemplate::armSeedCaptureIfPossible(const float *alignedRef) {
-  if (!kFeedForwardEnabled)
+  if (!kSeedEnabled)
     return;
   if (mSeedBusy || !alignedRef)
     return; // already capturing/awaiting a job, or nothing to capture from
