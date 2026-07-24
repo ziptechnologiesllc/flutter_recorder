@@ -266,7 +266,11 @@ private:
   static constexpr float kKappaInit = 0.25f;   // moderate until it learns
   static constexpr float kAnchorFloor = 1e-7f; // far-end-present threshold (pow)
   static constexpr float kBeta = 1.3f;         // slight over-subtraction
-  static constexpr float kGainMin = 0.12f;     // ≈ -18 dB floor (no full holes)
+  static constexpr float kGainMin = 0.30f;     // Lever 3: ≈ -10.5 dB floor (was 0.12 = -18 dB). Gentler
+                                               // max duck so the HF tail is tamed without the "underwater"
+                                               // over-suppression that shelved this in the cafe. Still
+                                               // default-OFF (mEnabled=false); toggle on per-room via the
+                                               // AEC panel's HF Sup switch — ideal for a live hotel-room tail.
   static constexpr float kGainAttack = 0.06f;  // ~0.4 ms duck
   static constexpr float kGainRelease = 0.003f;// ~10 ms recover
   static constexpr float kEps = 1e-12f;

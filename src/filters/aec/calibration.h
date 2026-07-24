@@ -41,9 +41,23 @@ class AECCalibration {
 public:
     // Click-based calibration: 5 clicks averaged for noise reduction
     static constexpr int CLICK_COUNT = 5;              // Number of clicks to average
-    static constexpr int CLICK_SAMPLES = 48;           // Samples per click (~1ms @ 48kHz, audible pulse)
+    static constexpr int CLICK_SAMPLES = 32;           // Samples per click (~0.67ms @ 48kHz). Lever 2:
+                                                       // shorter than the old 48 (1ms) to broaden the
+                                                       // probe's spectrum toward HF, so the deconvolved
+                                                       // IR carries usable high-frequency taps (the old
+                                                       // click was blind >~2kHz). Deconvolution auto-syncs
+                                                       // (click_deconvolution reconstructs from this const).
+                                                       // NEEDS A FRESH CALIBRATION to take effect.
     static constexpr int CLICK_SPACING_MS = 600;       // 600ms between clicks for full IR capture
-    static constexpr int IR_LENGTH = 4096;             // Impulse response taps (~85ms @ 48kHz)
+    static constexpr int IR_LENGTH = 8192;             // Impulse response taps (~170ms @ 48kHz). Lever 1:
+                                                       // doubled from 4096 (85ms) to model more of the
+                                                       // reverb tail (hotel-room RT60 outruns 85ms). Cost
+                                                       // is ~nil: the IR⊛audio convolution is FFT-based on
+                                                       // the worker thread (dominated by loop length, not
+                                                       // taps) and the RT template subtraction is O(1)/sample
+                                                       // regardless of IR length. 170ms still fits inside the
+                                                       // 600ms click spacing + 400ms tail. NEEDS A FRESH
+                                                       // CALIBRATION to take effect.
     static constexpr float CLICK_AMPLITUDE = 1.0f;     // Full scale for max SNR
     static constexpr int TAIL_MS = 400;                // Silence after last click for full decay
     static constexpr float MIN_PEAK_THRESHOLD = 0.005f; // Lower threshold for detection
