@@ -115,11 +115,18 @@ constexpr int kSeedPollMs = 8;
 // kFeedForwardEnabled — the PER-TRACK exact edits (registerTrackAudio /
 //   setTrackActive / setTrackGain): the truly-instant path (IR (x) each loop's
 //   OWN known audio, added/subtracted arithmetically on mute/unmute, zero
-//   learn-up even for 16-bar loops). STILL OFF: it writes the O(P) template
-//   from the Dart thread — a data race (task #54) that must be routed through
-//   the audio-thread pending queue before this can be enabled.
+//   learn-up even for 16-bar loops). NOW ENABLED: the #54 Dart-thread template-
+//   write race is fixed (setTrackActive/setTrackGain validate-and-enqueue; the
+//   audio thread applies via drainPendingTrackEdits at the top of process()).
+//   Loop registration + mute/unmute wiring were already in place. This is the
+//   fix for muted-track bleed: without the exact edit, the composite template
+//   keeps subtracting a muted track's echo it can no longer hear, adding it
+//   back inverted (bleed) until the slow EMA un-learns it. The exact edit
+//   removes E_track from the template the instant the track mutes. Needs a
+//   fresh P1/P2 calibration for the IR to be right; self-fit + safety clamp
+//   guard a stale one; revert to false if it regresses.
 constexpr bool kSeedEnabled = true;
-constexpr bool kFeedForwardEnabled = false;
+constexpr bool kFeedForwardEnabled = true;
 } // namespace
 
 SynchronousEchoTemplate::SynchronousEchoTemplate(unsigned int sampleRate,
