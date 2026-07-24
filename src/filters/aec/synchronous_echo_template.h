@@ -504,6 +504,29 @@ private:
   static constexpr int kMaxTracks = 64; // matches AudioEngine::kMaxTrackHandles
   std::array<TrackContribution, kMaxTracks> mTrackContributions;
 
+  // ---- Deferred per-track template edits (#54 race fix) -----------------
+  // setTrackActive/setTrackGain run on the Dart thread, but mTemplate AND
+  // tc.active/appliedGain are audio-thread-only (see the fields above). So the
+  // setters now only VALIDATE with atomic reads (slot + computed) and ENQUEUE
+  // here; drainPendingTrackEdits(), called at the top of process(), applies the
+  // O(P) mTemplate edits and mutates tc.active/appliedGain in FIFO order on the
+  // audio thread. This restores the documented "audio-thread-only" invariant
+  // and removes the template-corruption data race that blocked re-enabling the
+  // per-track feed-forward. The drain try_locks (never blocks the RT thread);
+  // an uncontended push is a cheap vector append.
+  struct PendingTrackEdit {
+    int trackIndex;
+    bool isGain; // false = active toggle, true = gain edit
+    bool active; // active-toggle target
+    float gain;  // gain-edit target
+  };
+  std::vector<PendingTrackEdit> mPendingTrackEdits; // guarded by mPendingEditsMutex
+  std::mutex mPendingEditsMutex;
+  std::vector<PendingTrackEdit> mDrainScratch; // audio-thread reuse buffer
+  void drainPendingTrackEdits();               // audio thread only
+  void applyTrackActive(int trackIndex, bool active); // audio thread only
+  void applyTrackGain(int trackIndex, float gain);    // audio thread only
+
   // Find the slot already owned by trackIndex, or atomically claim a free
   // one. Callable from any thread; lock-free. Returns -1 if trackIndex is
   // invalid or the table is full (all 64 slots owned by OTHER tracks).

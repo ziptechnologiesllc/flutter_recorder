@@ -579,31 +579,45 @@ bool SynchronousEchoTemplate::setTrackActive(int trackIndex, bool active) {
     return false;
   if (trackIndex < 0)
     return false;
-  // Lock-free lookup only — audio thread, must never allocate or block.
-  // registerTrackAudio() is what allocates a slot; a track with no slot
-  // simply hasn't been registered yet (or registration failed, e.g. table
-  // full) and falls back to the composite template, same as before.
+  // DART THREAD: atomic-only validation, then enqueue. mTemplate and
+  // tc.active/appliedGain are audio-thread-only, so the O(P) edit is deferred
+  // to drainPendingTrackEdits() (top of process()). Returning true lets the
+  // caller skip the reference-changed reseed; a period change between here and
+  // the drain drops the edit (size re-check in applyTrackActive) and triggers
+  // its own reseed, so the skip is safe.
   const int slot = findTrackSlot(trackIndex);
   if (slot < 0)
-    return false;
+    return false; // never registered — composite template covers it
+  if (!mTrackContributions[slot].computed.load(std::memory_order_acquire))
+    return false; // not ready yet — composite template covers it for now
+  {
+    std::lock_guard<std::mutex> lk(mPendingEditsMutex);
+    mPendingTrackEdits.push_back({trackIndex, /*isGain=*/false, active, 0.0f});
+  }
+  return true;
+}
+
+// AUDIO THREAD ONLY (via drainPendingTrackEdits): the exact toggle edit.
+void SynchronousEchoTemplate::applyTrackActive(int trackIndex, bool active) {
+  const int slot = findTrackSlot(trackIndex);
+  if (slot < 0)
+    return;
   TrackContribution &tc = mTrackContributions[slot];
   if (!tc.computed.load(std::memory_order_acquire))
-    return false; // not ready yet — composite template covers it for now
+    return;
   if (tc.active == active)
-    return true; // already in the target state: nothing stale to reseed
+    return; // already in the target state
   // Defensive: the contribution's length must still match the CURRENT
-  // composite template's active span, or this track's audio was
-  // registered against a period that's since changed (a period change, or
-  // a stale job — see registerTrackAudio's comment). Applying a
-  // mismatched-length contribution would misalign phase and silently
-  // corrupt the template rather than simply not helping — skip instead.
+  // composite template's active span, or this track's audio was registered
+  // against a period that's since changed. Applying a mismatched-length
+  // contribution would misalign phase and silently corrupt the template.
   const size_t expected =
       static_cast<size_t>(mActiveLoopFrames) * mChannels;
   if (tc.E.size() != expected) {
     aecLog("[LSAEC] track %d toggle SKIPPED (size mismatch: have %zu, "
            "need %zu — period changed since registration)\n",
            trackIndex, tc.E.size(), expected);
-    return false;
+    return;
   }
   // Activate at the track's CURRENT mixer gain scaled by the fitted IR
   // trust (contributions come from the same IR as the seed and inherit its
@@ -628,7 +642,6 @@ bool SynchronousEchoTemplate::setTrackActive(int trackIndex, bool active) {
   tc.active = active;
   aecLog("[LSAEC] track %d exact-subtraction toggle: active=%d gain=%.3f\n",
          trackIndex, active ? 1 : 0, tc.appliedGain);
-  return true;
 }
 
 bool SynchronousEchoTemplate::setTrackGain(int trackIndex, float gain) {
@@ -636,19 +649,34 @@ bool SynchronousEchoTemplate::setTrackGain(int trackIndex, float gain) {
     return false;
   if (trackIndex < 0)
     return false;
+  // DART THREAD: validate (atomic-only) + enqueue; the audio thread records
+  // tc.targetGain and applies the exact gain delta in applyTrackGain.
   const int slot = findTrackSlot(trackIndex);
   if (slot < 0)
     return false;
+  {
+    std::lock_guard<std::mutex> lk(mPendingEditsMutex);
+    mPendingTrackEdits.push_back({trackIndex, /*isGain=*/true, false, gain});
+  }
+  return true;
+}
+
+// AUDIO THREAD ONLY (via drainPendingTrackEdits): record the target gain and,
+// if the track is live, apply the exact (target - applied) delta.
+void SynchronousEchoTemplate::applyTrackGain(int trackIndex, float gain) {
+  const int slot = findTrackSlot(trackIndex);
+  if (slot < 0)
+    return;
   TrackContribution &tc = mTrackContributions[slot];
   tc.targetGain = gain;
   if (!tc.active)
-    return true; // nothing summed in — the recorded target covers activation
+    return; // nothing summed in — the recorded target covers activation
   if (!tc.computed.load(std::memory_order_acquire))
-    return false;
+    return;
   const size_t expected =
       static_cast<size_t>(mActiveLoopFrames) * mChannels;
   if (tc.E.size() != expected)
-    return false;
+    return;
   const float effective = gain * mIrFitScale;
   const float delta = effective - tc.appliedGain;
   if (delta != 0.0f) {
@@ -657,7 +685,24 @@ bool SynchronousEchoTemplate::setTrackGain(int trackIndex, float gain) {
   }
   tc.appliedGain = effective;
   aecLog("[LSAEC] track %d exact gain edit: applied=%.3f\n", trackIndex, gain);
-  return true;
+}
+
+// AUDIO THREAD ONLY: drain the Dart-enqueued per-track edits and apply them to
+// mTemplate in FIFO order. try_lock so the render thread never blocks; a
+// contended block just drains next callback (edits aren't sample-critical).
+void SynchronousEchoTemplate::drainPendingTrackEdits() {
+  std::unique_lock<std::mutex> lk(mPendingEditsMutex, std::try_to_lock);
+  if (!lk.owns_lock() || mPendingTrackEdits.empty())
+    return;
+  mDrainScratch.swap(mPendingTrackEdits); // take ownership; leave pending empty
+  lk.unlock();
+  for (const auto &e : mDrainScratch) {
+    if (e.isGain)
+      applyTrackGain(e.trackIndex, e.gain);
+    else
+      applyTrackActive(e.trackIndex, e.active);
+  }
+  mDrainScratch.clear();
 }
 
 float SynchronousEchoTemplate::meanConfidence() const {
@@ -690,6 +735,12 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
                                       int64_t loopStartFrame, bool learn) {
   if (!micInOut || frameCount == 0)
     return;
+
+  // Apply any per-track template edits enqueued from the Dart thread (#54):
+  // mTemplate and tc.active/appliedGain are audio-thread-only, so
+  // setTrackActive/setTrackGain deferred their O(P) edits to here. Runs before
+  // any mTemplate read below so this block sees a consistent template.
+  drainPendingTrackEdits();
 
   // No loop yet, or period beyond capacity -> passthrough. A period beyond
   // kMaxSeconds (16s) is a SILENT, total cancellation outage — zero taps
