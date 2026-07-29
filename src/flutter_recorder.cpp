@@ -811,6 +811,88 @@ FFI_PLUGIN_EXPORT int flutter_recorder_isInited() {
   return capture.isInited() ? 1 : 0;
 }
 
+// Analyze an arbitrary WAV on disk and write a `<wavPath>.chords.json` sidecar
+// (same bpm / key / chord pipeline the record-stop path runs — PHASE 3a/3b/3c).
+// Purpose: DOWNLOADED (remote) loops never carry a sidecar — the analysis ran
+// on the creator's device — so the client regenerates it locally from the audio
+// to render the same chord overlay. Self-contained (decodes the WAV via
+// miniaudio, no engine/capture state), so it is safe to call off a background
+// isolate. Returns 1 if a sidecar was written, 0 otherwise (decode failed, no
+// tempo, or no tonal content). Does NOT overwrite an existing sidecar's caller
+// — the Dart side only calls this when no sidecar was found.
+FFI_PLUGIN_EXPORT int
+flutter_recorder_analyzeChordsForWav(const char *wavPath) {
+  if (wavPath == nullptr || wavPath[0] == '\0') return 0;
+
+  // Decode the whole file to interleaved float32 at its native rate/channels.
+  ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 0, 0);
+  ma_decoder decoder;
+  if (ma_decoder_init_file(wavPath, &cfg, &decoder) != MA_SUCCESS) {
+    return 0;
+  }
+  const std::uint32_t channels = decoder.outputChannels;
+  const std::uint32_t sampleRate = decoder.outputSampleRate;
+
+  ma_uint64 totalFrames = 0;
+  if (ma_decoder_get_length_in_pcm_frames(&decoder, &totalFrames) !=
+          MA_SUCCESS ||
+      totalFrames == 0 || channels == 0 || sampleRate == 0) {
+    ma_decoder_uninit(&decoder);
+    return 0;
+  }
+
+  std::vector<float> samples(static_cast<std::size_t>(totalFrames) * channels);
+  ma_uint64 framesRead = 0;
+  ma_decoder_read_pcm_frames(&decoder, samples.data(), totalFrames, &framesRead);
+  ma_decoder_uninit(&decoder);
+  if (framesRead == 0) return 0;
+
+  const std::int64_t frameCount = static_cast<std::int64_t>(framesRead);
+
+  // Same three-stage pipeline as the record-stop path.
+  const flowstate::audio_engine::TempoInference tempo =
+      flowstate::audio_engine::inferTempoFromAudio(
+          samples.data(), frameCount, channels, sampleRate);
+  if (!(tempo.bpm > 0.0 && tempo.quantum > 0)) return 0;
+
+  const flowstate::audio_engine::KeyInference key =
+      flowstate::audio_engine::inferKey(
+          samples.data(), frameCount, channels, sampleRate);
+
+  const std::uint8_t keyPcForBias =
+      (key.confidence >= 0.60f) ? key.pitchClass : 255;
+  const auto segs = flowstate::audio_engine::recognizeChords(
+      samples.data(), frameCount, channels, sampleRate, tempo.bpm,
+      tempo.quantum, keyPcForBias, key.isMinor);
+  if (segs.empty()) return 0;
+
+  // Sidecar format is identical to the record-stop writer so
+  // ChordProgression.fromJson parses either without branching.
+  char sidecarPath[640];
+  std::snprintf(sidecarPath, sizeof(sidecarPath), "%s.chords.json", wavPath);
+  FILE *f = std::fopen(sidecarPath, "wb");
+  if (f == nullptr) return 0;
+  std::fprintf(f,
+               "{\"version\":2,\"bpm\":%.2f,\"quantum\":%u,"
+               "\"totalSixteenths\":%u,\"keyPitchClass\":%u,"
+               "\"keyIsMinor\":%s,\"segments\":[",
+               tempo.bpm, tempo.quantum, tempo.quantum * 4u, key.pitchClass,
+               key.isMinor ? "true" : "false");
+  for (std::size_t i = 0; i < segs.size(); ++i) {
+    const auto &s = segs[i];
+    if (i > 0) std::fputc(',', f);
+    std::fprintf(f,
+                 "{\"startSixteenth\":%d,\"endSixteenth\":%d,"
+                 "\"pitchClass\":%u,\"quality\":%u,"
+                 "\"confidence\":%.3f}",
+                 s.startSixteenth, s.endSixteenth, s.pitchClass, s.quality,
+                 s.confidence);
+  }
+  std::fprintf(f, "]}\n");
+  std::fclose(f);
+  return 1;
+}
+
 FFI_PLUGIN_EXPORT int flutter_recorder_isDeviceStarted() {
   return capture.isDeviceStarted();
 }
@@ -1232,7 +1314,7 @@ flutter_recorder_aec_createReferenceBuffer(unsigned int sampleRate,
   // Proves which native revision is actually running: identical symptoms
   // across a code change have previously meant CocoaPods reused a stale
   // plugin binary. Bump the tag whenever chasing a fix that "didn't take".
-  printf("[flutter_recorder] AEC build marker: perTrack-on-1\n");
+  printf("[flutter_recorder] AEC build marker: chords-wav-analyze-1\n");
   fflush(stdout);
   // Buffer size: 2 seconds of audio to support calibration
   // Calibration signal is 1.5 seconds white noise plus delay margin

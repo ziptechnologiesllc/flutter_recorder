@@ -50,6 +50,12 @@ FFI_PLUGIN_EXPORT void flutter_recorder_deinit();
 
 FFI_PLUGIN_EXPORT int flutter_recorder_isInited();
 
+// Offline chord/key/tempo analysis of an arbitrary WAV → `<wavPath>.chords.json`
+// sidecar. Lets downloaded (remote) loops render the same chord overlay local
+// recordings get. Returns 1 on success, 0 on failure/no tonal content. Safe to
+// call from a background isolate (self-contained; no capture/engine state).
+FFI_PLUGIN_EXPORT int flutter_recorder_analyzeChordsForWav(const char *wavPath);
+
 FFI_PLUGIN_EXPORT int flutter_recorder_isDeviceStarted();
 
 FFI_PLUGIN_EXPORT enum CaptureErrors flutter_recorder_start();
