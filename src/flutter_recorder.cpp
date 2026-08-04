@@ -1767,6 +1767,9 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_getTelemetry(double *out) {
   out[16] = static_cast<double>(t.seedLands);
   out[17] = static_cast<double>(t.gateEnv);
   out[18] = static_cast<double>(t.gateOpen);
+  out[19] = static_cast<double>(t.seedPhase);
+  out[20] = static_cast<double>(t.seedDiscards);
+  out[21] = static_cast<double>(t.seedLastAlpha);
 }
 
 // Must be `extern "C"` so the symbols are emitted with C linkage (unmangled)
@@ -1809,6 +1812,16 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_registerTrackAudio(
 FFI_PLUGIN_EXPORT void flutter_recorder_aec_setTrackActive(int trackIndex,
                                                            int active) {
   if (mFilters) mFilters->setAecTrackActive(trackIndex, active != 0);
+}
+
+// Exact per-track GAIN edit: template += (gain - appliedGain) * E_track for
+// an active registered track — the instant (O(P) add) counterpart of
+// setTrackActive for volume changes. Without this, a gain change leaves the
+// template cancelling at the OLD amplitude and LSAEC spends 3-5 loop passes
+// EMA-relearning what is arithmetically a single multiply.
+FFI_PLUGIN_EXPORT void flutter_recorder_aec_setTrackGain(int trackIndex,
+                                                         float gain) {
+  if (mFilters) mFilters->setAecTrackGain(trackIndex, gain);
 }
 
 // Release a deleted track's per-track AEC slot. Call whenever a loop is

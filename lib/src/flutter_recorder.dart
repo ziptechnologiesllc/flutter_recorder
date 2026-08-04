@@ -1095,6 +1095,14 @@ interface class Recorder {
     _impl.aecSetTrackActive(trackIndex, active);
   }
 
+  /// Exact per-track gain edit on the live LSAEC template. Instant
+  /// (single O(P) add on the audio thread) — the volume-change counterpart
+  /// of [aecSetTrackActive]. No-op until the track's contribution is
+  /// computed; safe to call on every volume change.
+  void aecSetTrackGain(int trackIndex, double gain) {
+    _impl.aecSetTrackGain(trackIndex, gain);
+  }
+
   /// Release a deleted track's per-track AEC slot back to the pool. Call
   /// whenever a loop is removed so a long session doesn't exhaust the
   /// fixed-size slot table with contributions for loops that no longer

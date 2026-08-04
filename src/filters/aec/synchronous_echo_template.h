@@ -139,8 +139,21 @@ public:
    * mix-change notifies keep killing the capture (seed livelock) and
    * convergence is riding pure per-pass EMA. */
   uint32_t seedArms() const { return mSeedArms.load(std::memory_order_relaxed); }
+  uint32_t seedDiscards() const { return mSeedDiscards.load(std::memory_order_relaxed); }
+  float seedLastAlpha() const { return mSeedLastAlpha.load(std::memory_order_relaxed); }
   uint32_t seedAborts() const { return mSeedAborts.load(std::memory_order_relaxed); }
   uint32_t seedLands() const { return mSeedLands.load(std::memory_order_relaxed); }
+
+  /** Which phase the in-flight seed is stuck in (racy snapshot, telemetry
+   * only): 0 idle, 1 capturing reference, 2 job posted (worker pending),
+   * 3 output ready (fit/apply in progress), 4 busy-but-none (anomalous). */
+  uint32_t seedPhase() const {
+    if (!mSeedBusy) return 0;
+    if (mSeedCaptureRemaining > 0) return 1;
+    if (mSeedJobPosted.load(std::memory_order_relaxed)) return 2;
+    if (mSeedOutputReady.load(std::memory_order_relaxed)) return 3;
+    return 4;
+  }
 
   /** UI feed for the gate overlay on the scrolling monitor: the smoothed
    * far-end envelope the gate tracks (linear power) and the resulting gate
@@ -350,6 +363,13 @@ private:
 
   // Seed lifecycle counters (see seedArms()/seedAborts()/seedLands()).
   std::atomic<uint32_t> mSeedArms{0};
+  // Fit-discard diagnostics: a completed seed whose fitted alpha fell below
+  // the trust floor (|alpha|<0.05 => uncorrelated with the live mic --
+  // stale/misaligned calibration IR). Invisible before these: the discard
+  // cleared mSeedBusy without touching arms/aborts/lands, which read as
+  // "seed vanished".
+  std::atomic<uint32_t> mSeedDiscards{0};
+  std::atomic<float> mSeedLastAlpha{0.0f};
   std::atomic<uint32_t> mSeedAborts{0};
   std::atomic<uint32_t> mSeedLands{0};
 
@@ -448,6 +468,14 @@ private:
   // seed fits alpha ~ 0 and is discarded — the seed is structurally no
   // worse than no seed under ANY calibration bug.
   bool mSeedFitActive = false;
+  // Set when the fit pass completes with a usable alpha; cleared when the
+  // chunked apply finishes (or on any abort/reset/stale-drop). WITHOUT this
+  // flag the post-fit-success state (fitActive=false, applyPos=0,
+  // fitFrames=0) is indistinguishable from the fresh-drain state, so the
+  // drain re-entered the fit forever and the apply was unreachable --
+  // SEEDING stayed lit for entire sessions with arms=1/lands=0 while
+  // convergence limped along on pure EMA (the measured 3-5+ loop slowness).
+  bool mSeedFitDone = false;
   double mSeedFitNum = 0.0;
   double mSeedFitDen = 0.0;
   int64_t mSeedFitFrames = 0;

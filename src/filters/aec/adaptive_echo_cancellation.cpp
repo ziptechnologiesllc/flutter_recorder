@@ -804,6 +804,9 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
         snap.seedArms = mEchoTemplate->seedArms();
         snap.seedAborts = mEchoTemplate->seedAborts();
         snap.seedLands = mEchoTemplate->seedLands();
+        snap.seedPhase = mEchoTemplate->seedPhase();
+        snap.seedDiscards = mEchoTemplate->seedDiscards();
+        snap.seedLastAlpha = mEchoTemplate->seedLastAlpha();
         snap.gateEnv = mEchoTemplate->subGateEnv();
         snap.gateOpen = mEchoTemplate->refGateOpen();
       } else {
@@ -814,6 +817,9 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
         snap.seedArms = 0;
         snap.seedAborts = 0;
         snap.seedLands = 0;
+        snap.seedPhase = 0;
+        snap.seedDiscards = 0;
+        snap.seedLastAlpha = 0.0f;
         snap.gateEnv = 0.0f;
         snap.gateOpen = 1.0f;
       }

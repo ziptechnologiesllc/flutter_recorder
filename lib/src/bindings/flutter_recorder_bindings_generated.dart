@@ -1517,6 +1517,17 @@ class FlutterRecorderBindings {
       _flutter_recorder_aec_setTrackActivePtr
           .asFunction<void Function(int, int)>();
 
+  void flutter_recorder_aec_setTrackGain(int trackIndex, double gain) {
+    return _flutter_recorder_aec_setTrackGain(trackIndex, gain);
+  }
+
+  late final _flutter_recorder_aec_setTrackGainPtr = _lookup<
+          ffi.NativeFunction<ffi.Void Function(ffi.Int, ffi.Float)>>(
+      'flutter_recorder_aec_setTrackGain');
+  late final _flutter_recorder_aec_setTrackGain =
+      _flutter_recorder_aec_setTrackGainPtr
+          .asFunction<void Function(int, double)>();
+
   /// Release a deleted track's per-track AEC slot back to the pool. Hand-
   /// added, same regen-churn-free rationale as flutter_recorder_aec_getTelemetry.
   void flutter_recorder_aec_releaseTrackContribution(int trackIndex) {

@@ -96,6 +96,9 @@ struct AecTelemetrySnapshot {
   uint32_t seedArms;
   uint32_t seedAborts;
   uint32_t seedLands;
+  uint32_t seedPhase; // see SynchronousEchoTemplate::seedPhase()
+  uint32_t seedDiscards; // fit-stage rejections (|alpha|<0.05, stale IR)
+  float seedLastAlpha;   // last fitted alpha (0 until a fit completes)
 
   // Subtraction-gate state for the scrolling-monitor overlay (compressor-
   // threshold-style visual editor): the smoothed far-end power envelope the

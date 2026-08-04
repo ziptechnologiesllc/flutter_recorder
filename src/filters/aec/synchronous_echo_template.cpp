@@ -201,12 +201,15 @@ void SynchronousEchoTemplate::reset() {
   // worker completes for this now-stale epoch is dropped at drain time
   // without touching mSeedBusy — see mSeedGeneration comment in the header).
   ++mSeedGeneration;
-  if (mSeedBusy)
+  if (mSeedBusy) {
     mSeedAborts.fetch_add(1, std::memory_order_relaxed);
+    aecLog("[SEED] aborted (reset)\n");
+  }
   mSeedBusy = false;
   mSeedCaptureRemaining = 0;
   mSeedApplyPos = 0;
   mSeedFitActive = false;
+  mSeedFitDone = false;
   mSeedFitFrames = 0;
 }
 
@@ -218,6 +221,8 @@ void SynchronousEchoTemplate::seedWorkerLoop() {
       computeSeedConvolution(mSeedJobPeriod);
       mSeedJobPosted.store(false, std::memory_order_release);
       mSeedOutputReady.store(true, std::memory_order_release);
+      aecLog("[SEED] worker convolution done P=%lld\n",
+             (long long)mSeedJobPeriod);
       didWork = true;
     }
 
@@ -261,6 +266,8 @@ void SynchronousEchoTemplate::armSeedCaptureIfPossible(const float *alignedRef) 
   mSeedCaptureRemaining = mActiveLoopFrames;
   mSeedApplyPos = 0;
   mSeedArms.fetch_add(1, std::memory_order_relaxed);
+  aecLog("[SEED] armed gen=%lld P=%lld\n", (long long)mSeedGeneration,
+         (long long)mActiveLoopFrames);
 }
 
 void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
@@ -812,8 +819,10 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
       ++mSeedGeneration;
       mSeedBusy = false;
       mSeedFitActive = false;
+      mSeedFitDone = false;
       mSeedFitFrames = 0;
       mSeedAborts.fetch_add(1, std::memory_order_relaxed);
+      aecLog("[SEED] aborted (period change)\n");
     }
     armSeedCaptureIfPossible(alignedRef);
   } else if (mReferenceChangePending.exchange(false, std::memory_order_relaxed)) {
@@ -838,8 +847,10 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
       ++mSeedGeneration;
       mSeedBusy = false;
       mSeedFitActive = false;
+      mSeedFitDone = false;
       mSeedFitFrames = 0;
       mSeedAborts.fetch_add(1, std::memory_order_relaxed);
+      aecLog("[SEED] aborted (reference change)\n");
     }
     armSeedCaptureIfPossible(alignedRef);
   }
@@ -853,7 +864,8 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
   // the abandonment, not to this late-arriving job.
   if (mSeedOutputReady.load(std::memory_order_acquire)) {
     if (mSeedJobGeneration == mSeedGeneration) {
-      if (!mSeedFitActive && mSeedApplyPos == 0 && mSeedFitFrames == 0) {
+      if (!mSeedFitActive && !mSeedFitDone && mSeedApplyPos == 0 &&
+          mSeedFitFrames == 0) {
         // Fit-before-trust: spend one loop pass measuring how the computed
         // seed actually fits the live mic before applying it (see the
         // mSeedFitActive doc in the header — an unfitted seed with a
@@ -861,8 +873,9 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
         mSeedFitActive = true;
         mSeedFitNum = 0.0;
         mSeedFitDen = 0.0;
+        aecLog("[SEED] fit pass started\n");
       }
-      if (!mSeedFitActive) {
+      if (!mSeedFitActive && mSeedFitDone) {
         const int64_t end =
             std::min(mSeedApplyPos + kSeedApplyChunk, mActiveLoopFrames);
         for (int64_t phi = mSeedApplyPos; phi < end; ++phi) {
@@ -879,12 +892,15 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
           mSeedOutputReady.store(false, std::memory_order_relaxed);
           mSeedBusy = false;
           mSeedFitFrames = 0;
+          mSeedFitDone = false;
           mSeedLands.fetch_add(1, std::memory_order_relaxed);
+          aecLog("[SEED] LANDED (alpha=%.3f)\n", mSeedFitAlpha);
         }
       }
     } else {
       mSeedOutputReady.store(false, std::memory_order_relaxed); // stale; drop only
       mSeedFitActive = false;
+      mSeedFitDone = false;
       mSeedFitFrames = 0;
     }
   }
@@ -1002,14 +1018,19 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
         alpha = std::max(-2.0f, std::min(2.0f, alpha));
         mSeedFitActive = false;
         mSeedFitFrames = 0;
+        mSeedLastAlpha.store(alpha, std::memory_order_relaxed);
+        aecLog("[SEED] fit alpha=%.3f\n", alpha);
         if (std::fabs(alpha) < 0.05f) {
           // Seed doesn't correlate with the mic (misaligned / no echo):
           // discard rather than inject noise. Keep the prior track scale.
           mSeedOutputReady.store(false, std::memory_order_relaxed);
           mSeedBusy = false;
+          mSeedDiscards.fetch_add(1, std::memory_order_relaxed);
+          aecLog("[SEED] DISCARDED (alpha=%.3f)\n", alpha);
         } else {
           mSeedFitAlpha = alpha;
           mIrFitScale = alpha; // per-track edits share the IR's fitted scale
+          mSeedFitDone = true; // gate the apply open (and keep re-fit shut)
           mSeedApplyPos = 0;   // chunked apply starts next callback
         }
       }
@@ -1029,6 +1050,8 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
         mSeedJobPeriod = P;
         mSeedJobGeneration = mSeedGeneration; // stamp: which arm this job belongs to
         mSeedJobPosted.store(true, std::memory_order_release);
+        aecLog("[SEED] capture complete, job posted gen=%lld\n",
+               (long long)mSeedGeneration);
       }
     }
   }

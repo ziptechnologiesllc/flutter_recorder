@@ -109,6 +109,9 @@ class AecTelemetry {
     this.seedArms = 0,
     this.seedAborts = 0,
     this.seedLands = 0,
+    this.seedPhase = 0,
+    this.seedDiscards = 0,
+    this.seedLastAlpha = 0,
     this.gateEnv = 0,
     this.gateOpen = 1,
   });
@@ -165,6 +168,16 @@ class AecTelemetry {
   final int seedAborts;
   final int seedLands;
 
+  /// Which phase an in-flight convergence seed is in: 0 idle, 1 capturing,
+  /// 2 awaiting worker, 3 fit/apply, 4 anomalous (busy but no phase).
+  final int seedPhase;
+
+  /// Fit-stage seed rejections (|alpha| < 0.05 — IR uncorrelated with mic).
+  final int seedDiscards;
+
+  /// Last fitted seed alpha (~1 = IR correct; ~0 = stale/misaligned).
+  final double seedLastAlpha;
+
   /// Subtraction-gate state for the scrolling-monitor overlay: smoothed
   /// far-end power envelope and the resulting gate opening (0..1).
   final double gateEnv;
@@ -211,6 +224,7 @@ class AecTelemetry {
         '${isSeeding ? 'SEEDING ' : ''}'
         '${overCapacity ? 'OVER-CAPACITY ' : ''}'
         'gov(leak=${govLeak.toStringAsFixed(2)},boost=${govBoost.toStringAsFixed(2)}) '
+        'seed(arms=$seedArms,aborts=$seedAborts,lands=$seedLands,phase=$seedPhase,disc=$seedDiscards,a=${seedLastAlpha.toStringAsFixed(2)}) '
         'gen=$generation)';
   }
 }
@@ -797,6 +811,11 @@ abstract class RecorderImpl {
   /// template (exact edit; no-op until the contribution finishes computing).
   @mustBeOverridden
   void aecSetTrackActive(int trackIndex, bool active);
+
+  /// Exact per-track gain edit on the live LSAEC template (instant O(P)
+  /// add). Call whenever a playing track's volume changes so the canceller
+  /// does not spend loop passes relearning a scalar.
+  void aecSetTrackGain(int trackIndex, double gain);
 
   /// Release a deleted track's per-track AEC slot back to the pool. Call
   /// whenever a loop is removed so a long session doesn't exhaust the
