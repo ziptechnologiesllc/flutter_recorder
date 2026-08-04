@@ -42,6 +42,8 @@ static std::string getTempDir() {
   return "/tmp/";
 }
 
+#include "../../native_ring_buffer.h"
+
 extern void aecLog(const char *fmt, ...);
 
 AdaptiveEchoCancellation::AdaptiveEchoCancellation(unsigned int sampleRate,
@@ -602,9 +604,23 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   // When a loop period is known (slave mode), the linear stage above left the
   // RAW mic in mLinearOutputBuffer; the template cancels it in place by
   // subtracting the per-phase echo estimate E[phi] and learning it via a
-  // far-end-gated synchronous average. No weights -> cannot diverge. (E3's
-  // transient freeze will gate `learn` per block; for now we always learn.)
+  // far-end-gated synchronous average. No weights -> cannot diverge.
+  //
+  // LEARNING IS FROZEN WHILE A RECORDING IS IN PROGRESS. During a take the
+  // near end is DEFINITIONALLY present (the user is performing), and the
+  // template's "aperiodic performance averages toward zero" assumption is
+  // violated outright by takes that are small multiples of the base period:
+  // a 2x overdub visits each phase exactly twice, so period 1 of the
+  // PERFORMANCE leaks into E[phi] at kAlphaMin (0.06) and is re-applied,
+  // sample-aligned, into period 2 of the recording -- measured on a real
+  // take as a +0.065-amplitude copy of the first period embedded in the
+  // second. Subtraction continues while frozen (base-loop bleed keeps
+  // cancelling with the converged template); learning resumes the moment
+  // recording stops, when the mic is echo+room only. E3's per-block spike
+  // freeze stays as defense for non-recording double-talk.
   if (useTemplate) {
+    const bool recordingActive =
+        g_nativeRingBuffer != nullptr && g_nativeRingBuffer->isRecording();
     // Spectral governor closed loop: read the current learning boost (one
     // relaxed load), cancel, then feed the sensor with this block's aligned
     // reference + residual (wait-free ring write on the render thread; the
@@ -614,7 +630,8 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     mEchoTemplate->process(mLinearOutputBuffer.data(), mRefBuffer.data(),
                            frameCount, channels,
                            static_cast<int64_t>(mCaptureFrameCount),
-                           lsLoopFrames, lsLoopStart, /*learn=*/true);
+                           lsLoopFrames, lsLoopStart,
+                           /*learn=*/!recordingActive);
     gov.push(mRefBuffer.data(), mLinearOutputBuffer.data(), frameCount,
              channels);
     // Cheap E3 diagnostics (counter reads only): freeze climbing => near-end
