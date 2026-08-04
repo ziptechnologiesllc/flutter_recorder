@@ -1172,8 +1172,26 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
         learnBoost;
     if (alpha > kAlphaMax)
       alpha = kAlphaMax; // bounded authority: boost can re-heat, never exceed hot
-    for (unsigned int ch = 0; ch < channels; ++ch)
-      mTemplate[base + ch] += alpha * mRawResidual[f * channels + ch];
+    // Robust (clipped) update: bound each sample's learning contribution to
+    // a few x the running residual RMS. Impulsive NEAR-END transients --
+    // keystrokes, chair creaks, a cough -- are enormous outliers at one
+    // phase for one pass; unclipped they enter E[phi] at alpha and get
+    // SUBTRACTED on later passes (audible phase-inverted "typing ghosts",
+    // user-reported). Genuine echo drift is small and sign-consistent
+    // across passes and passes through the clip untouched. Classic
+    // Huber-style robustification of an averaging estimator.
+    float clipLim = 3.4e38f; // effectively no clip until a baseline exists
+    if (mResidBaseline > 0.0f && frameCount > 0) {
+      const float rms = std::sqrt(
+          mResidBaseline / (static_cast<float>(frameCount) * channels));
+      clipLim = 3.0f * rms;
+    }
+    for (unsigned int ch = 0; ch < channels; ++ch) {
+      float upd = mRawResidual[f * channels + ch];
+      if (upd > clipLim) upd = clipLim;
+      else if (upd < -clipLim) upd = -clipLim;
+      mTemplate[base + ch] += alpha * upd;
+    }
     if (c < kConfMax) {
       mConfidenceSum += 1.0;
       mConfidence[pphi] = c + 1.0f;
