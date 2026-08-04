@@ -56,6 +56,18 @@ public:
   /** Telemetry: last leakage estimate (residual-energy-weighted coherence). */
   float leakage() const { return mLeak.load(std::memory_order_relaxed); }
 
+  /** Correlation-based double-talk detector: TRUE while the residual carries
+   * substantial energy the reference CANNOT explain (low-coherence residual
+   * well above its quiet floor) — i.e. the performer is playing/jamming or
+   * the room is noisy. The template must freeze learning while this holds:
+   * without it, practice licks and room noise fold into E[phi] at alpha and
+   * get replayed inverted on later passes. Complements the leak signal
+   * (coherent residual => learn HARDER); this is its mirror (incoherent
+   * residual => STOP learning). */
+  bool nearEndHold() const { return mNearEndHold.load(std::memory_order_relaxed); }
+  /** Telemetry: incoherent-residual-to-quiet-floor ratio driving the hold. */
+  float nearEndRatio() const { return mNearEndRatio.load(std::memory_order_relaxed); }
+
 private:
   SpectralGovernor();
   ~SpectralGovernor();
@@ -76,6 +88,10 @@ private:
   // Controller outputs / telemetry
   std::atomic<float> mBoost{1.0f};
   std::atomic<float> mLeak{0.0f};
+  std::atomic<bool> mNearEndHold{false};
+  std::atomic<float> mNearEndRatio{0.0f};
+  double mIncoherentFloor = -1.0; // worker-thread-only quiet-floor tracker
+  double mIncoherentFast = 0.0;   // fast EMA (~85ms) driving hold onset
 
   // Worker-only spectral state (Welch EMA per band)
   static constexpr int kBands = 16;

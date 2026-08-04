@@ -1195,7 +1195,7 @@ class RecorderFfi extends RecorderImpl {
 
   @override
   AecTelemetry aecGetTelemetry() {
-    final out = calloc<ffi.Double>(22);
+    final out = calloc<ffi.Double>(24);
     try {
       _bindings.flutter_recorder_aec_getTelemetry(out);
       return AecTelemetry(
@@ -1219,6 +1219,8 @@ class RecorderFfi extends RecorderImpl {
         seedPhase: out[19].toInt(),
         seedDiscards: out[20].toInt(),
         seedLastAlpha: out[21],
+        nearEndHold: out[22] > 0.5,
+        nearEndRatio: out[23],
         gateEnv: out[17],
         gateOpen: out[18],
       );

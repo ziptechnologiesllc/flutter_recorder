@@ -112,6 +112,8 @@ class AecTelemetry {
     this.seedPhase = 0,
     this.seedDiscards = 0,
     this.seedLastAlpha = 0,
+    this.nearEndHold = false,
+    this.nearEndRatio = 0,
     this.gateEnv = 0,
     this.gateOpen = 1,
   });
@@ -178,6 +180,14 @@ class AecTelemetry {
   /// Last fitted seed alpha (~1 = IR correct; ~0 = stale/misaligned).
   final double seedLastAlpha;
 
+  /// Correlation double-talk detector: TRUE while learning is paused because
+  /// the residual carries energy the reference cannot explain (performer
+  /// jamming / room noise).
+  final bool nearEndHold;
+
+  /// Incoherent-residual-to-quiet-floor ratio driving [nearEndHold].
+  final double nearEndRatio;
+
   /// Subtraction-gate state for the scrolling-monitor overlay: smoothed
   /// far-end power envelope and the resulting gate opening (0..1).
   final double gateEnv;
@@ -219,12 +229,13 @@ class AecTelemetry {
     final erleStr = erle == null ? 'n/a' : '${erle.toStringAsFixed(1)}dB';
     return 'AecTelemetry(gatedERLE=$erleStr '
         'farActive=${(farActiveFraction * 100).toStringAsFixed(0)}% '
-        'conf=${(templateConfidence * 100).toStringAsFixed(0)}% '
+        'anneal=${(templateConfidence * 100).toStringAsFixed(0)}% '
         'freeze=$freezeCount '
         '${isSeeding ? 'SEEDING ' : ''}'
         '${overCapacity ? 'OVER-CAPACITY ' : ''}'
         'gov(leak=${govLeak.toStringAsFixed(2)},boost=${govBoost.toStringAsFixed(2)}) '
         'seed(arms=$seedArms,aborts=$seedAborts,lands=$seedLands,phase=$seedPhase,disc=$seedDiscards,a=${seedLastAlpha.toStringAsFixed(2)}) '
+        '${nearEndHold ? 'NEAR-END(x${nearEndRatio.toStringAsFixed(1)}) ' : ''}'
         'gen=$generation)';
   }
 }

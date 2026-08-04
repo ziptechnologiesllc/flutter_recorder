@@ -1770,6 +1770,8 @@ FFI_PLUGIN_EXPORT void flutter_recorder_aec_getTelemetry(double *out) {
   out[19] = static_cast<double>(t.seedPhase);
   out[20] = static_cast<double>(t.seedDiscards);
   out[21] = static_cast<double>(t.seedLastAlpha);
+  out[22] = static_cast<double>(t.nearEndHold);
+  out[23] = static_cast<double>(t.nearEndRatio);
 }
 
 // Must be `extern "C"` so the symbols are emitted with C linkage (unmangled)

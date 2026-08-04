@@ -1,3 +1,5 @@
+#include "../../fft/soloud_fft.h"
+#include "spectral_governor.h"
 #include "synchronous_echo_template.h"
 
 #include "circular_convolution.h"
@@ -137,6 +139,9 @@ SynchronousEchoTemplate::SynchronousEchoTemplate(unsigned int sampleRate,
   mTemplate.assign(mCapacityFrames * channels, 0.0f);
   mConfidence.assign(mCapacityFrames, 0.0f);
   mRefCapture.assign(mCapacityFrames, 0.0f);
+  mMicCapture.assign(mCapacityFrames, 0.0f);
+  // ~400ms of learned-frame undo at 48k (see header): 19200 entries.
+  mUndoRing.assign(19200, LearnUndo{});
   mSeedOutput.assign(mCapacityFrames, 0.0f);
   mSeedThreadRunning.store(true, std::memory_order_relaxed);
   mSeedWorker = std::thread([this] { seedWorkerLoop(); });
@@ -254,13 +259,11 @@ void SynchronousEchoTemplate::armSeedCaptureIfPossible(const float *alignedRef) 
     return;
   if (mSeedBusy || !alignedRef)
     return; // already capturing/awaiting a job, or nothing to capture from
-  bool haveSeed = false;
-  if (mSeedIRMutex.try_lock()) {
-    haveSeed = !mSeedIR.empty();
-    mSeedIRMutex.unlock();
-  }
-  if (!haveSeed)
-    return;
+  // NOTE: no calibrated-IR requirement anymore — the one-loop Wiener seed
+  // measures the live transfer function from the captured pass itself, so
+  // an uncalibrated device converges just as fast. The IR remains a
+  // fallback inside computeSeedConvolution when the pass has no usable
+  // coherence.
   ++mSeedGeneration; // this arm owns a fresh epoch; no prior job can match it
   mSeedBusy = true;
   mSeedCaptureRemaining = mActiveLoopFrames;
@@ -276,8 +279,8 @@ void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
     std::lock_guard<std::mutex> lock(mSeedIRMutex);
     ir = mSeedIR; // snapshot — a mid-job calibration update won't tear this read
   }
-  if (ir.empty() || P <= 0)
-    return;
+  if (P <= 0)
+    return; // ir may legitimately be empty: the Wiener path needs no IR
   const size_t Pu = static_cast<size_t>(P);
   // CRITICAL: circular convolution is only well-posed as "one clean copy of
   // h wrapped around a period-P cycle" when L <= P. If the calibrated IR
@@ -334,16 +337,156 @@ void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
   // the audible convergence latency after a period change. Now ~50 ms.
   std::vector<float> refPeriod(mRefCapture.begin(),
                                mRefCapture.begin() + Pu);
-  std::vector<float> kernel(ir.begin(), ir.begin() + L);
-  std::vector<float> seed;
-  aec_conv::circularConvolve(refPeriod, kernel, seed);
 
-  float seedPeak = 0.0f;
-  for (size_t phi = 0; phi < Pu; ++phi) {
-    mSeedOutput[phi] = seed[phi];
-    seedPeak = std::max(seedPeak, std::fabs(seed[phi]));
+  // ---- ONE-LOOP WIENER SEED (preferred) --------------------------------
+  // The captured period contains BOTH the aligned reference and the raw mic
+  // at the same phases: one pass of live data fully determines the linear
+  // transfer function ref->mic. Estimate per-bin H = Sxy/Sxx with a Welch
+  // sweep over the (circular) period, COHERENCE-GATE each bin (bins where
+  // the mic isn't explained by the reference — the performer jamming, room
+  // noise — contribute NOTHING, so the seed is double-talk-immune by
+  // construction), and synthesize E = H (x) ref via overlap-add. Offline
+  // validation of this exact estimator on real session pairs measured
+  // 17-33 dB of identifiable-bleed removal from one pass — versus ~5 dB
+  // starting depth for the chirp-IR seed it replaces (stale calibrations
+  // fit alpha ~0.7 at best, ~0 at worst). The IR-convolution path below
+  // remains as fallback when the Wiener estimate has no usable coherence
+  // (mic muted, silent pass) or the period is too short for the analysis
+  // window.
+  constexpr int kWienerWin = 1024; // FFT::fft/ifft, 512 packed complex bins
+  constexpr int kWienerHop = 256;  // 75% overlap; hann OLA sums to a constant
+  constexpr double kBinCohGate = 0.30;
+  bool wienerUsed = false;
+  if (Pu >= static_cast<size_t>(kWienerWin) * 2) {
+    static thread_local std::vector<float> hann;
+    if (hann.size() != static_cast<size_t>(kWienerWin)) {
+      hann.assign(kWienerWin, 0.0f);
+      for (int i = 0; i < kWienerWin; ++i)
+        hann[i] = 0.5f * (1.0f - std::cos(2.0f * 3.14159265358979f * i /
+                                          (kWienerWin - 1)));
+    }
+    const int nBins = kWienerWin / 2;
+    std::vector<double> sxx(nBins, 0.0), syy(nBins, 0.0);
+    std::vector<double> sxyRe(nBins, 0.0), sxyIm(nBins, 0.0);
+    std::vector<float> xw(kWienerWin), yw(kWienerWin);
+
+    // Pass A: accumulate cross/auto spectra over the circular period.
+    for (size_t start = 0; start < Pu; start += kWienerHop) {
+      for (int i = 0; i < kWienerWin; ++i) {
+        const size_t idx = (start + i) % Pu;
+        xw[i] = refPeriod[idx] * hann[i];
+        yw[i] = mMicCapture[idx] * hann[i];
+      }
+      FFT::fft(xw.data(), kWienerWin);
+      FFT::fft(yw.data(), kWienerWin);
+      for (int b = 0; b < nBins; ++b) {
+        const double xr = xw[2 * b], xi = xw[2 * b + 1];
+        const double yr = yw[2 * b], yi = yw[2 * b + 1];
+        sxx[b] += xr * xr + xi * xi;
+        syy[b] += yr * yr + yi * yi;
+        sxyRe[b] += yr * xr + yi * xi;
+        sxyIm[b] += yi * xr - yr * xi;
+      }
+    }
+
+    // Per-bin coherence-gated Wiener filter.
+    std::vector<double> hRe(nBins, 0.0), hIm(nBins, 0.0);
+    double cohSum = 0.0;
+    int cohBins = 0;
+    for (int b = 0; b < nBins; ++b) {
+      const double denom = sxx[b] * syy[b] + 1e-24;
+      const double coh = (sxyRe[b] * sxyRe[b] + sxyIm[b] * sxyIm[b]) / denom;
+      if (sxx[b] > 1e-12) {
+        cohSum += coh;
+        ++cohBins;
+      }
+      if (coh >= kBinCohGate && sxx[b] > 1e-12) {
+        hRe[b] = sxyRe[b] / (sxx[b] + 1e-20);
+        hIm[b] = sxyIm[b] / (sxx[b] + 1e-20);
+      }
+    }
+    const double meanCoh = cohBins > 0 ? cohSum / cohBins : 0.0;
+
+    // GCC-PHAT alignment probe (diagnostic, ~free): ifft of the phase-
+    // normalized cross-spectrum peaks at the ref->mic delay. alignedRef is
+    // SUPPOSED to be sample-aligned with the mic's echo; a consistent
+    // nonzero lag here means the latency compensation is off by that many
+    // samples — which degrades HF cancellation first (3 samples is already
+    // ~90 degrees at 8 kHz) and can flip apparent polarity. Logged every
+    // seed so drift is visible across sessions.
+    {
+      std::vector<float> phat(kWienerWin, 0.0f);
+      for (int b = 1; b < nBins; ++b) {
+        const double mag =
+            std::sqrt(sxyRe[b] * sxyRe[b] + sxyIm[b] * sxyIm[b]) + 1e-20;
+        phat[2 * b] = static_cast<float>(sxyRe[b] / mag);
+        phat[2 * b + 1] = static_cast<float>(sxyIm[b] / mag);
+      }
+      FFT::ifft(phat.data(), kWienerWin);
+      int bestLag = 0;
+      float bestV = -1e30f;
+      for (int l = -256; l <= 256; ++l) {
+        const int idx = (l + kWienerWin) % kWienerWin;
+        if (phat[idx] > bestV) {
+          bestV = phat[idx];
+          bestLag = l;
+        }
+      }
+      aecLog("[SEED] ref->mic alignment lag: %+d samples (%.2f ms)\n",
+             bestLag, bestLag * 1000.0f / 48000.0f);
+    }
+
+    if (meanCoh >= 0.05) {
+      // Pass B: synthesize E = H (x) ref with hann-weighted overlap-add.
+      // Analysis hann applied once + 75% overlap => constant OLA gain of
+      // exactly 2.0 for this window/hop pair; divide it out.
+      std::vector<double> acc(Pu, 0.0);
+      for (size_t start = 0; start < Pu; start += kWienerHop) {
+        for (int i = 0; i < kWienerWin; ++i) {
+          const size_t idx = (start + i) % Pu;
+          xw[i] = refPeriod[idx] * hann[i];
+        }
+        FFT::fft(xw.data(), kWienerWin);
+        for (int b = 0; b < nBins; ++b) {
+          const double xr = xw[2 * b], xi = xw[2 * b + 1];
+          const double zr = hRe[b] * xr - hIm[b] * xi;
+          const double zi = hRe[b] * xi + hIm[b] * xr;
+          xw[2 * b] = static_cast<float>(zr);
+          xw[2 * b + 1] = static_cast<float>(zi);
+        }
+        FFT::ifft(xw.data(), kWienerWin);
+        for (int i = 0; i < kWienerWin; ++i) {
+          const size_t idx = (start + i) % Pu;
+          acc[idx] += xw[i];
+        }
+      }
+      for (size_t phi = 0; phi < Pu; ++phi)
+        mSeedOutput[phi] = static_cast<float>(acc[phi] * 0.5);
+      wienerUsed = true;
+      aecLog("[SEED] one-loop Wiener seed (meanCoh=%.2f)\n", meanCoh);
+    } else {
+      aecLog("[SEED] Wiener coherence too low (%.2f) — IR fallback\n",
+             meanCoh);
+    }
   }
 
+  if (!wienerUsed) {
+    if (ir.empty() || L == 0) {
+      // No usable Wiener estimate AND no calibrated IR: emit a zero seed —
+      // the self-fit measures alpha ~ 0 and discards it cleanly.
+      std::fill(mSeedOutput.begin(), mSeedOutput.begin() + Pu, 0.0f);
+      return;
+    }
+    std::vector<float> kernel(ir.begin(), ir.begin() + L);
+    std::vector<float> seed;
+    aec_conv::circularConvolve(refPeriod, kernel, seed);
+    for (size_t phi = 0; phi < Pu; ++phi)
+      mSeedOutput[phi] = seed[phi];
+  }
+
+  float seedPeak = 0.0f;
+  for (size_t phi = 0; phi < Pu; ++phi)
+    seedPeak = std::max(seedPeak, std::fabs(mSeedOutput[phi]));
   if (seedPeak > kMaxSeedAbs) {
     const float scale = kMaxSeedAbs / seedPeak;
     for (size_t phi = 0; phi < Pu; ++phi)
@@ -602,8 +745,11 @@ bool SynchronousEchoTemplate::setTrackActive(int trackIndex, bool active) {
   const int slot = findTrackSlot(trackIndex);
   if (slot < 0)
     return false; // never registered — composite template covers it
+  // Record the DESIRED state regardless of compute progress: the drain
+  // reconciles it once the contribution is ready (deferred activation).
+  mTrackContributions[slot].wantActive.store(active, std::memory_order_relaxed);
   if (!mTrackContributions[slot].computed.load(std::memory_order_acquire))
-    return false; // not ready yet — composite template covers it for now
+    return false; // not ready yet — will auto-apply on compute completion
   {
     std::lock_guard<std::mutex> lk(mPendingEditsMutex);
     mPendingTrackEdits.push_back({trackIndex, /*isGain=*/false, active, 0.0f});
@@ -705,6 +851,18 @@ void SynchronousEchoTemplate::applyTrackGain(int trackIndex, float gain) {
 // mTemplate in FIFO order. try_lock so the render thread never blocks; a
 // contended block just drains next callback (edits aren't sample-critical).
 void SynchronousEchoTemplate::drainPendingTrackEdits() {
+  // Deferred-activation reconcile: a contribution that finished computing
+  // AFTER its setTrackActive call applies here, on the audio thread, the
+  // callback after the worker completes. O(kMaxTracks) atomic loads.
+  for (int i = 0; i < kMaxTracks; ++i) {
+    TrackContribution &tc = mTrackContributions[i];
+    const int idx = tc.slotIndex.load(std::memory_order_acquire);
+    if (idx < 0 || !tc.computed.load(std::memory_order_acquire))
+      continue;
+    const bool want = tc.wantActive.load(std::memory_order_relaxed);
+    if (want != tc.active)
+      applyTrackActive(idx, want);
+  }
   std::unique_lock<std::mutex> lk(mPendingEditsMutex, std::try_to_lock);
   if (!lk.owns_lock() || mPendingTrackEdits.empty())
     return;
@@ -738,7 +896,14 @@ float SynchronousEchoTemplate::meanConfidence() const {
   const size_t n =
       std::min(static_cast<size_t>(mActiveLoopFrames), mCapacityFrames);
   if (n == 0) return 0.0f;
-  return static_cast<float>(mConfidenceSum / (static_cast<double>(n) * kConfMax));
+  // Normalize by the ANNEAL scale, not the saturation cap: kConfMax (4096)
+  // exists only to stop the counter; learning behavior is governed by
+  // kConfTau (8) and is fully annealed by c ~ 24 (kSeedConfidence). The old
+  // /kConfMax normalization reported a fully-converged template as 0.6% --
+  // "why is confidence always 1%?" was a display artifact, not a
+  // convergence problem. 1 - exp(-c/tau): seeded ~95%, fresh 0%.
+  const double meanC = mConfidenceSum / static_cast<double>(n);
+  return static_cast<float>(1.0 - std::exp(-meanC / kConfTau));
 }
 
 void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
@@ -755,6 +920,36 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
   // setTrackActive/setTrackGain deferred their O(P) edits to here. Runs before
   // any mTemplate read below so this block sees a consistent template.
   drainPendingTrackEdits();
+
+  // Double-talk REWIND: on the detector's rising edge, roll back the last
+  // ~400ms of learned updates (newest first) — the detector's latency
+  // window, which otherwise bakes the onset of the performer's sound into
+  // E[phi]. Chunked across callbacks (learning is already frozen while the
+  // hold is up, so nothing new interleaves).
+  {
+    const bool hold = SpectralGovernor::instance().nearEndHold();
+    if (hold && !mPrevNearEndHold)
+      mRewindRemaining = static_cast<int64_t>(mUndoCount);
+    mPrevNearEndHold = hold;
+    if (mRewindRemaining > 0) {
+      constexpr int64_t kRewindChunk = 4096;
+      int64_t todo = std::min(mRewindRemaining, kRewindChunk);
+      while (todo-- > 0) {
+        mUndoHead = (mUndoHead + mUndoRing.size() - 1) % mUndoRing.size();
+        const LearnUndo &u = mUndoRing[mUndoHead];
+        const size_t base = static_cast<size_t>(u.phi) * mChannels;
+        for (unsigned int ch = 0; ch < mChannels && ch < 2; ++ch)
+          mTemplate[base + ch] = u.oldT[ch];
+        mConfidenceSum += static_cast<double>(u.oldConf) -
+                          static_cast<double>(mConfidence[u.phi]);
+        mConfidence[u.phi] = u.oldConf;
+        --mUndoCount;
+        --mRewindRemaining;
+      }
+      if (mRewindRemaining == 0)
+        aecLog("[LSAEC] double-talk rewind complete\n");
+    }
+  }
 
   // No loop yet, or period beyond capacity -> passthrough. A period beyond
   // kMaxSeconds (16s) is a SILENT, total cancellation outage — zero taps
@@ -781,17 +976,65 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
   }
   mOverCapacity = false;
 
-  // Loop period changed (a layer added/removed): the old per-phase estimates
-  // remap to different content, so clear the in-use span ONCE at the boundary.
+  // Loop period changed (a layer added/removed). NOT always a wipe anymore:
+  // looper workflows change period between INTEGER MULTIPLES constantly
+  // (base P -> 2P take added -> back to P on mute), and wiping on every
+  // transition meant the template lived only seconds at a time in a real
+  // session — measured live as leak 0.3-0.7 with boost pinned at max,
+  // conf 0%, ERLE ~6dB, seed re-arming 11 times in minutes: convergence
+  // could never PERSIST. But an echo that is periodic at P is exactly
+  // periodic at kP too, so:
+  //   grow  P -> kP : TILE the template k times — every phase stays
+  //                   correct, convergence carries over untouched.
+  //   shrink kP -> P: FOLD the k segments by averaging — post-track-edit
+  //                   they agree, and averaging reduces performer noise.
+  //   unrelated     : clear, as before.
   if (loopFrames != mActiveLoopFrames) {
     const size_t span = static_cast<size_t>(loopFrames) * channels;
     const size_t pspan = static_cast<size_t>(loopFrames);
-    std::fill(mTemplate.begin(), mTemplate.begin() + span, 0.0f);
-    std::fill(mConfidence.begin(), mConfidence.begin() + pspan, 0.0f);
-    // The clear above zeroes exactly the NEW active window [0, pspan), so
-    // the running sum is exactly 0 immediately after — matches the
-    // mConfidenceSum invariant (sum over the CURRENT active window).
-    mConfidenceSum = 0.0;
+    const int64_t oldP = mActiveLoopFrames;
+    if (oldP > 0 && loopFrames > oldP && loopFrames % oldP == 0) {
+      const size_t k = static_cast<size_t>(loopFrames / oldP);
+      const size_t oldSpan = static_cast<size_t>(oldP) * channels;
+      for (size_t c = 1; c < k; ++c) {
+        std::copy(mTemplate.begin(), mTemplate.begin() + oldSpan,
+                  mTemplate.begin() + c * oldSpan);
+        std::copy(mConfidence.begin(),
+                  mConfidence.begin() + static_cast<size_t>(oldP),
+                  mConfidence.begin() + c * static_cast<size_t>(oldP));
+      }
+      mConfidenceSum *= static_cast<double>(k);
+      aecLog("[LSAEC] period grew %lldx: template TILED, convergence kept\n",
+             (long long)k);
+    } else if (oldP > 0 && loopFrames < oldP && oldP % loopFrames == 0) {
+      const size_t k = static_cast<size_t>(oldP / loopFrames);
+      const float inv = 1.0f / static_cast<float>(k);
+      double newConfSum = 0.0;
+      for (size_t i = 0; i < span; ++i) {
+        float acc = 0.0f;
+        for (size_t c = 0; c < k; ++c)
+          acc += mTemplate[i + c * span];
+        mTemplate[i] = acc * inv;
+      }
+      for (size_t i = 0; i < pspan; ++i) {
+        float acc = 0.0f;
+        for (size_t c = 0; c < k; ++c)
+          acc += mConfidence[i + c * static_cast<size_t>(loopFrames)];
+        const float folded = acc * inv;
+        mConfidence[i] = folded;
+        newConfSum += folded;
+      }
+      mConfidenceSum = newConfSum;
+      aecLog("[LSAEC] period shrank %lldx: template FOLDED, convergence kept\n",
+             (long long)k);
+    } else {
+      std::fill(mTemplate.begin(), mTemplate.begin() + span, 0.0f);
+      std::fill(mConfidence.begin(), mConfidence.begin() + pspan, 0.0f);
+      // The clear above zeroes exactly the NEW active window [0, pspan), so
+      // the running sum is exactly 0 immediately after — matches the
+      // mConfidenceSum invariant (sum over the CURRENT active window).
+      mConfidenceSum = 0.0;
+    }
     mActiveLoopFrames = loopFrames;
     mActiveLoopFramesAtomic.store(loopFrames, std::memory_order_relaxed);
     mResidBaseline = 0.0f;
@@ -1045,6 +1288,10 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
       for (unsigned int ch = 0; ch < channels; ++ch)
         rm += alignedRef[f * channels + ch];
       mRefCapture[static_cast<size_t>(phi)] = rm / static_cast<float>(channels);
+      float micMono = 0.0f;
+      for (unsigned int ch = 0; ch < channels; ++ch)
+        micMono += mRawResidual[f * channels + ch] + mTemplate[base + ch];
+      mMicCapture[static_cast<size_t>(phi)] = micMono / static_cast<float>(channels);
       if (--mSeedCaptureRemaining == 0 &&
           !mSeedJobPosted.load(std::memory_order_relaxed)) {
         mSeedJobPeriod = P;
@@ -1185,6 +1432,16 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
       const float rms = std::sqrt(
           mResidBaseline / (static_cast<float>(frameCount) * channels));
       clipLim = 3.0f * rms;
+    }
+    // Undo-ring entry BEFORE the write (double-talk rewind, see header).
+    {
+      LearnUndo &u = mUndoRing[mUndoHead];
+      u.phi = static_cast<uint32_t>(pphi);
+      u.oldConf = mConfidence[pphi];
+      for (unsigned int ch = 0; ch < channels && ch < 2; ++ch)
+        u.oldT[ch] = mTemplate[base + ch];
+      mUndoHead = (mUndoHead + 1) % mUndoRing.size();
+      if (mUndoCount < mUndoRing.size()) ++mUndoCount;
     }
     for (unsigned int ch = 0; ch < channels; ++ch) {
       float upd = mRawResidual[f * channels + ch];

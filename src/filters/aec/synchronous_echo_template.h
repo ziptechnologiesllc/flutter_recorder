@@ -398,6 +398,25 @@ private:
   // how wrong E[phi] is, or a heavily-suppressed block would starve learning
   // of the very signal it needs to self-correct.
   std::vector<float> mRawResidual; // grow-only scratch; Pass 2's learning input
+
+  // ---- Learning undo-ring (double-talk rewind) --------------------------
+  // Every learned frame records its pre-update template values +
+  // confidence so the last ~400ms of learning can be ROLLED BACK when the
+  // double-talk detector engages: the detector has inherent latency
+  // (spectral EMAs), and the ONSET of the performer's sound — its loudest,
+  // most damaging part — always lands inside that blind window. Rewinding
+  // through it makes detection latency cost nothing. Fixed-size ring,
+  // preallocated; audio-thread only.
+  struct LearnUndo {
+    uint32_t phi;
+    float oldT[2]; // per-channel pre-update template values (<=2 channels)
+    float oldConf;
+  };
+  std::vector<LearnUndo> mUndoRing;
+  size_t mUndoHead = 0;   // next write slot
+  size_t mUndoCount = 0;  // valid entries (saturates at ring size)
+  bool mPrevNearEndHold = false;
+  int64_t mRewindRemaining = 0; // >0: chunked rewind in progress
   float mOutputSuppressGain = 1.0f; // smoothed 0..1; see process()'s Pass 1
   // Smoothed mic/raw energy RATIO (not the derived gain) — averaging THIS
   // first, over several blocks, is what lets the margin below be tight
@@ -441,6 +460,10 @@ private:
   int64_t mSeedJobGeneration = -1; // audio-thread-only; worker never reads this
   void armSeedCaptureIfPossible(const float *alignedRef); // audio-thread only
   std::vector<float> mRefCapture;    // mono, pre-sized to capacity — RT-safe
+  // Raw-mic capture parallel to mRefCapture (same phase indexing): the
+  // one-loop Wiener seed measures the LIVE transfer function ref->mic from
+  // a single loop pass instead of trusting a months-old chirp IR.
+  std::vector<float> mMicCapture;
 
   // Handoff to the worker thread. mSeedJobPosted: audio thread sets true when
   // capture completes (release); worker polls it (acquire), clears it after
@@ -512,6 +535,13 @@ private:
     std::vector<float> E;             // per-phase*channel contribution, same
                                        // layout as mTemplate; empty until computed
     std::atomic<bool> computed{false}; // set (release) once E is fully populated
+    // Desired activation state, settable from any thread BEFORE the
+    // contribution finishes computing. drainPendingTrackEdits() reconciles
+    // computed && (wantActive != active) on the audio thread, so a take
+    // that starts looping the moment it finalizes gets its exact edit the
+    // instant the worker finishes -- previously setTrackActive on an
+    // uncomputed track was a silent no-op and the edit NEVER landed.
+    std::atomic<bool> wantActive{false};
     bool active = false;              // audio-thread-only: mirrors what's
                                        // CURRENTLY summed into mTemplate
     // Audio-thread-only gain pair: targetGain is the mixer's current gain

@@ -99,6 +99,8 @@ struct AecTelemetrySnapshot {
   uint32_t seedPhase; // see SynchronousEchoTemplate::seedPhase()
   uint32_t seedDiscards; // fit-stage rejections (|alpha|<0.05, stale IR)
   float seedLastAlpha;   // last fitted alpha (0 until a fit completes)
+  uint32_t nearEndHold;  // 1 while the correlation DTD is pausing learning
+  float nearEndRatio;    // incoherent-residual / quiet-floor ratio
 
   // Subtraction-gate state for the scrolling-monitor overlay (compressor-
   // threshold-style visual editor): the smoothed far-end power envelope the

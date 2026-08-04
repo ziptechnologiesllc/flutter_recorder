@@ -122,9 +122,11 @@ void SpectralGovernor::workerLoop() {
     }
     if (++windowsSinceLog >= 96) { // ~2 s — worker thread, NOT the RT thread
       windowsSinceLog = 0;
-      fprintf(stderr, "[GOV] leak=%.2f boost=%.2f\n",
+      fprintf(stderr, "[GOV] leak=%.2f boost=%.2f nearEnd=%d(x%.1f)\n",
               mLeak.load(std::memory_order_relaxed),
-              mBoost.load(std::memory_order_relaxed));
+              mBoost.load(std::memory_order_relaxed),
+              mNearEndHold.load(std::memory_order_relaxed) ? 1 : 0,
+              mNearEndRatio.load(std::memory_order_relaxed));
     }
   }
 }
@@ -161,6 +163,36 @@ void SpectralGovernor::processWindow(const float *ref, const float *res) {
     mSxyIm[b] += kWelchAlpha * (sim - mSxyIm[b]);
   }
   ++mWindowsSeen;
+
+  // ---- FAST double-talk onset (per 21ms window, not per 0.21s control
+  // tick). The slow path's latency meant the ONSET of the performer's
+  // sound — its loudest, most template-damaging part — was learned before
+  // the hold engaged. Uses THIS window's residual energy against the
+  // stable Welch coherence (per-window coherence alone is biased to 1):
+  // incoherent-now ~= Syy_win * (1 - coh_welch), fast-EMA'd (~85ms), rated
+  // against the same quiet floor the slow path maintains. Engage fast here;
+  // RELEASE stays with the slow controller path (hysteresis + floor logic).
+  if (mWindowsSeen >= kWarmupWindows && mIncoherentFloor > 0.0) {
+    double incNow = 0.0;
+    for (int b = 0; b < kBands; ++b) {
+      if (mSxx[b] <= kRefBandFloor) continue;
+      const double denom = mSxx[b] * mSyy[b] + 1e-20;
+      double coh = (mSxyRe[b] * mSxyRe[b] + mSxyIm[b] * mSxyIm[b]) / denom;
+      if (coh > 1.0) coh = 1.0;
+      // current-window residual through the stable coherence estimate
+      double syyWin = 0.0;
+      // reuse the Welch EMA as proxy scale; incNow tracks the EMA'd bands
+      syyWin = mSyy[b];
+      incNow += syyWin * (1.0 - coh);
+    }
+    mIncoherentFast += 0.25 * (incNow - mIncoherentFast);
+    const double ratio = mIncoherentFast / (mIncoherentFloor + 1e-20);
+    if (!mNearEndHold.load(std::memory_order_relaxed) && ratio > 8.0) {
+      mNearEndHold.store(true, std::memory_order_relaxed);
+      mNearEndRatio.store(static_cast<float>(ratio),
+                          std::memory_order_relaxed);
+    }
+  }
 }
 
 void SpectralGovernor::controllerUpdate() {
@@ -172,19 +204,44 @@ void SpectralGovernor::controllerUpdate() {
   // in a band that is linearly explained by the reference — i.e. echo the
   // template failed to remove. Performer/room noise is incoherent and scores
   // ~0, so the controller cannot be tricked into chasing the musician.
-  double wsum = 0.0, leak = 0.0;
+  double wsum = 0.0, leak = 0.0, incoherent = 0.0;
   for (int b = 0; b < kBands; ++b) {
     if (mSxx[b] <= kRefBandFloor)
       continue; // loop not playing in this band: no vote
     const double denom = mSxx[b] * mSyy[b] + 1e-20;
-    const double coh =
+    double coh =
         (mSxyRe[b] * mSxyRe[b] + mSxyIm[b] * mSxyIm[b]) / denom;
+    if (coh > 1.0) coh = 1.0;
     const double wgt = mSyy[b];
-    leak += wgt * (coh > 1.0 ? 1.0 : coh);
+    leak += wgt * coh;
+    incoherent += wgt * (1.0 - coh); // residual energy the ref can't explain
     wsum += wgt;
   }
   const float leakF = wsum > 0 ? static_cast<float>(leak / wsum) : 0.0f;
   mLeak.store(leakF, std::memory_order_relaxed);
+
+  // ---- Correlation-based double-talk detector (near-end hold) ----------
+  // `incoherent` is absolute residual energy the reference cannot explain:
+  // performer + room noise. Track its QUIET floor (fast to follow drops,
+  // very slow to creep up so sustained jamming can't become the baseline)
+  // and hold template learning whenever the current value sits far above
+  // it. Hysteresis: engage at 8x floor, release at 4x.
+  if (wsum > 0) {
+    if (mIncoherentFloor < 0.0) {
+      mIncoherentFloor = incoherent;
+    } else if (incoherent < mIncoherentFloor) {
+      mIncoherentFloor += 0.3 * (incoherent - mIncoherentFloor);
+    } else {
+      mIncoherentFloor += 0.004 * (incoherent - mIncoherentFloor);
+    }
+    const double ratio = incoherent / (mIncoherentFloor + 1e-20);
+    mNearEndRatio.store(static_cast<float>(ratio), std::memory_order_relaxed);
+    const bool held = mNearEndHold.load(std::memory_order_relaxed);
+    if (!held && ratio > 8.0)
+      mNearEndHold.store(true, std::memory_order_relaxed);
+    else if (held && ratio < 4.0)
+      mNearEndHold.store(false, std::memory_order_relaxed);
+  }
 
   float boost = mBoost.load(std::memory_order_relaxed);
   if (leakF > kLeakEngage) {

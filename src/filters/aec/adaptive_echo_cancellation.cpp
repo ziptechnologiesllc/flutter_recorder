@@ -631,7 +631,11 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
                            frameCount, channels,
                            static_cast<int64_t>(mCaptureFrameCount),
                            lsLoopFrames, lsLoopStart,
-                           /*learn=*/!recordingActive);
+                           // Learn only when (a) not recording a take and
+                           // (b) the correlation DTD says the residual is
+                           // explained by the reference (no jamming /
+                           // sustained room noise folding into E[phi]).
+                           /*learn=*/!recordingActive && !gov.nearEndHold());
     gov.push(mRefBuffer.data(), mLinearOutputBuffer.data(), frameCount,
              channels);
     // Cheap E3 diagnostics (counter reads only): freeze climbing => near-end
@@ -842,6 +846,9 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       }
       snap.govLeak = SpectralGovernor::instance().leakage();
       snap.govBoost = SpectralGovernor::instance().learningBoost();
+      snap.nearEndHold =
+          SpectralGovernor::instance().nearEndHold() ? 1u : 0u;
+      snap.nearEndRatio = SpectralGovernor::instance().nearEndRatio();
       mTelemetry.store(snap);
       mTwMicFar = mTwOutFar = 0.0;
       mTwMicAll = mTwOutAll = mTwRefAll = 0.0;
