@@ -259,6 +259,16 @@ void SynchronousEchoTemplate::armSeedCaptureIfPossible(const float *alignedRef) 
     return;
   if (mSeedBusy || !alignedRef)
     return; // already capturing/awaiting a job, or nothing to capture from
+  // Don't arm until the reference is actually AUDIBLE: arming at anchor
+  // time, before playback rings out, captured a loop of silence — Wiener
+  // coherence 0.00, IR fit alpha 0.000, seed discarded, and (with arms=1
+  // and no retry) convergence then rode slow EMA for the whole session
+  // ("doesn't converge on an existing session", caught live by the
+  // [SEED] diagnostics the first minute they were enabled).
+  if (mRefEnvelope <= kFarEndFloorPow) {
+    mReferenceChangePending.store(true, std::memory_order_relaxed);
+    return; // keep the arm request pending until the far end is live
+  }
   // NOTE: no calibrated-IR requirement anymore — the one-loop Wiener seed
   // measures the live transfer function from the captured pass itself, so
   // an uncalibrated device converges just as fast. The IR remains a
@@ -1136,6 +1146,7 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
           mSeedBusy = false;
           mSeedFitFrames = 0;
           mSeedFitDone = false;
+          mSeedRetryCount = 0;
           mSeedLands.fetch_add(1, std::memory_order_relaxed);
           aecLog("[SEED] LANDED (alpha=%.3f)\n", mSeedFitAlpha);
         }
@@ -1270,6 +1281,13 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
           mSeedBusy = false;
           mSeedDiscards.fetch_add(1, std::memory_order_relaxed);
           aecLog("[SEED] DISCARDED (alpha=%.3f)\n", alpha);
+          // A discard means THIS capture was unusable (silent/contaminated
+          // pass), not that seeding is hopeless — retry up to 3 times
+          // before waiting for a real reference-change notify.
+          if (++mSeedRetryCount <= 3) {
+            mReferenceChangePending.store(true, std::memory_order_relaxed);
+            aecLog("[SEED] retry %d/3 armed\n", mSeedRetryCount);
+          }
         } else {
           mSeedFitAlpha = alpha;
           mIrFitScale = alpha; // per-track edits share the IR's fitted scale

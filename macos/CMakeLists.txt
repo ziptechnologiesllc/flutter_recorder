@@ -66,11 +66,13 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE
   MA_NO_RUNTIME_LINKING=1
   NDEBUG=1
   _REENTRANT=1
-  # AEC_DEBUG_LOGGING deliberately OFF: aecLog() on Apple does
-  # fprintf+fflush+syslog ON THE RENDER THREAD — occasional multi-ms stalls
-  # (measured 17-35 ms vs the 2.67 ms budget) = audible crackle. Re-enable
-  # locally for native diagnostics only; the Dart-side gated-ERLE telemetry
-  # (lock-free seqlock) and callback overrun stats remain available.
+  # AEC_DEBUG_LOGGING now safe to enable: aecLog() buffers with a try_lock
+  # (never blocks the render thread) and a detached drain thread flushes to
+  # stderr every 100ms — the old inline fprintf+fflush+syslog (17-35 ms
+  # render-thread stalls) is gone. Without this define every [SEED]/[LSAEC]
+  # lifecycle diagnostic silently compiles out, which hid the seed livelock
+  # and the join-session convergence failure for days.
+  AEC_DEBUG_LOGGING=1
 )
 
 target_include_directories(${PLUGIN_NAME} PRIVATE

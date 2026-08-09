@@ -417,6 +417,7 @@ private:
   size_t mUndoCount = 0;  // valid entries (saturates at ring size)
   bool mPrevNearEndHold = false;
   int64_t mRewindRemaining = 0; // >0: chunked rewind in progress
+  int mSeedRetryCount = 0; // audio-thread-only: bounded discard->retry loop
   float mOutputSuppressGain = 1.0f; // smoothed 0..1; see process()'s Pass 1
   // Smoothed mic/raw energy RATIO (not the derived gain) — averaging THIS
   // first, over several blocks, is what lets the margin below be tight

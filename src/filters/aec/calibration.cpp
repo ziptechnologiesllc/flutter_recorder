@@ -10,6 +10,8 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
+#include <thread>
+#include <chrono>
 
 // MSVC's <cmath> only provides M_PI with _USE_MATH_DEFINES
 #ifndef M_PI
@@ -56,16 +58,32 @@ void aecLog(const char *fmt, ...) {
 
 #ifdef __ANDROID__
   __android_log_print(ANDROID_LOG_INFO, AEC_LOG_TAG, "%s", buffer);
-#elif defined(__APPLE__)
-  // iOS does NOT bridge fprintf(stderr) to the device console, and macOS
-  // `flutter run` reads stderr — so emit to BOTH: syslog reaches
-  // idevicesyslog/Console on a physical iPhone (debug-only telemetry).
-  fprintf(stderr, "%s", buffer);
-  fflush(stderr);
-  syslog(LOG_NOTICE, "%s", buffer);
 #else
-  fprintf(stderr, "%s", buffer);
-  fflush(stderr);
+  // RT-SAFE emission: NO fprintf/fflush/syslog inline — those were measured
+  // at 17-35 ms stalls on the render thread (vs a 2.67 ms budget) and were
+  // the reason AEC_DEBUG_LOGGING had to stay off, which in turn made every
+  // [SEED]/[LSAEC] lifecycle diagnostic invisible for days. The message is
+  // already in sLogBuffer (try_lock append above); a lazily-started drain
+  // thread flushes it to stderr every 100 ms off the audio thread.
+  static std::once_flag sDrainOnce;
+  std::call_once(sDrainOnce, [] {
+    std::thread([] {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::string out;
+        {
+          std::lock_guard<std::mutex> lock(sLogBufferMutex);
+          if (!sLogBuffer.empty()) {
+            out.swap(sLogBuffer);
+          }
+        }
+        if (!out.empty()) {
+          fprintf(stderr, "%s", out.c_str());
+          fflush(stderr);
+        }
+      }
+    }).detach();
+  });
 #endif
 #endif
 }
