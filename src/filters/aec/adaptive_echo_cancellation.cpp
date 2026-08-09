@@ -774,7 +774,7 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   if (mAecMode == aecModeNeural || mAecMode == aecModeHybrid ||
       mAecMode == aecModeFrozenNeural) {
     mNeuralFilter->process(mLinearOutputBuffer.data(), mRefBuffer.data(),
-                           mLinearOutputBuffer.data(), frameCount);
+                           mLinearOutputBuffer.data(), frameCount, channels);
   }
 
   // Write final results back to the original input buffer, accumulating LSAEC

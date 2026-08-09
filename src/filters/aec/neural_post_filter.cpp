@@ -60,6 +60,32 @@ NeuralPostFilter::NeuralPostFilter(unsigned int sampleRate,
   mContextWritePos = 0;
   mContextFrameCount = 0;
 
+  // ERB_DF_V3: periodic Hann analysis (tf.signal.stft convention -- divisor
+  // N, not N-1) and OLA-normalized synthesis (inverse_stft_window_fn):
+  // synth[i] = w[i] / sum_m w^2[i mod HOP + m*HOP].
+  mWindowPeriodic.resize(N_FFT);
+  for (int i = 0; i < N_FFT; ++i) {
+    mWindowPeriodic[i] = 0.5f * (1.0f - std::cos(2.0f * M_PI * i / N_FFT));
+  }
+  mSynthWindow.resize(N_FFT);
+  for (int i = 0; i < N_FFT; ++i) {
+    float denom = 0.0f;
+    for (int j = i % HOP_SIZE; j < N_FFT; j += HOP_SIZE) {
+      denom += mWindowPeriodic[j] * mWindowPeriodic[j];
+    }
+    mSynthWindow[i] = denom > 1e-12f ? mWindowPeriodic[i] / denom : 0.0f;
+  }
+  mMicRe.assign(N_BINS, 0.0f);
+  mMicIm.assign(N_BINS, 0.0f);
+  mLpbRe.assign(N_BINS, 0.0f);
+  mLpbIm.assign(N_BINS, 0.0f);
+  mEnhRe.assign(N_BINS, 0.0f);
+  mEnhIm.assign(N_BINS, 0.0f);
+  mLpbRingRe.assign(DF_ORDER * N_BINS, 0.0f);
+  mLpbRingIm.assign(DF_ORDER * N_BINS, 0.0f);
+  mGru1State.assign(GRU_UNITS, 0.0f);
+  mGru2State.assign(GRU_UNITS, 0.0f);
+
 #ifdef USE_TFLITE
   // Initialize LiteRT Environment
   if (LiteRtCreateEnvironment(0, nullptr, &mEnv) != kLiteRtStatusOk) {
@@ -84,6 +110,13 @@ void NeuralPostFilter::reset() {
   mContextWritePos = 0;
   mContextFrameCount = 0;
 
+  // Reset ERB_DF_V3 streaming state
+  std::fill(mLpbRingRe.begin(), mLpbRingRe.end(), 0.0f);
+  std::fill(mLpbRingIm.begin(), mLpbRingIm.end(), 0.0f);
+  std::fill(mGru1State.begin(), mGru1State.end(), 0.0f);
+  std::fill(mGru2State.begin(), mGru2State.end(), 0.0f);
+  mLpbRingPos = 0;
+
 #ifdef USE_TFLITE
   // Destroy existing buffers and models
   for (auto &buffer : mInputBuffers) {
@@ -104,6 +137,11 @@ void NeuralPostFilter::reset() {
       free(mem);
   }
   mHostMemory.clear();
+
+  mInputElems.clear();
+  mOutputElems.clear();
+  mInputHostMem.clear();
+  mOutputHostMem.clear();
 
   if (mCompiledModel) {
     LiteRtDestroyCompiledModel(mCompiledModel);
@@ -143,8 +181,10 @@ bool NeuralPostFilter::loadModel(const std::string &modelPath) {
     aecLog("[NeuralPostFilter] Failed to create compilation options\n");
     return false;
   }
-  // Use GPU with CPU fallback
-  LiteRtSetOptionsHardwareAccelerators(options, kLiteRtHwAcceleratorGpu | kLiteRtHwAcceleratorCpu);
+  // CPU only. The GPU accelerator path crashed at model load on macOS
+  // (Metal-on-Intel), and these models are far below CPU real-time budget
+  // anyway (~0.24ms/frame vs 5.33ms for ERB_DF_V3).
+  LiteRtSetOptionsHardwareAccelerators(options, kLiteRtHwAcceleratorCpu);
 
   // Compile the model
   LiteRtStatus compileStatus = LiteRtCreateCompiledModel(mEnv, mModel, options, &mCompiledModel);
@@ -209,18 +249,26 @@ bool NeuralPostFilter::loadModel(const std::string &modelPath) {
            i, type.layout.rank, numElements, bufferSize);
 
     // Allocate aligned host memory for zero-copy
-    void* hostMem = aligned_alloc(LITERT_HOST_MEMORY_BUFFER_ALIGNMENT, bufferSize);
+    // aligned_alloc requires size to be a multiple of alignment (enforced on
+    // macOS -- returns NULL otherwise). Pad up; the tensor type still defines
+    // the logical size.
+    size_t alignedSize =
+        (bufferSize + LITERT_HOST_MEMORY_BUFFER_ALIGNMENT - 1) &
+        ~((size_t)LITERT_HOST_MEMORY_BUFFER_ALIGNMENT - 1);
+    void* hostMem = aligned_alloc(LITERT_HOST_MEMORY_BUFFER_ALIGNMENT, alignedSize);
     if (!hostMem) {
       aecLog("[NeuralPostFilter] Failed to allocate host memory for input %u\n", i);
       continue;
     }
-    memset(hostMem, 0, bufferSize);
+    memset(hostMem, 0, alignedSize);
     mHostMemory.push_back(hostMem);
 
     LiteRtTensorBuffer buffer;
-    if (LiteRtCreateTensorBufferFromHostMemory(&type, hostMem, bufferSize,
+    if (LiteRtCreateTensorBufferFromHostMemory(&type, hostMem, alignedSize,
                                                 nullptr, &buffer) == kLiteRtStatusOk) {
       mInputBuffers.push_back(buffer);
+      mInputElems.push_back(numElements);
+      mInputHostMem.push_back(hostMem);
     } else {
       aecLog("[NeuralPostFilter] Failed to create input buffer %u\n", i);
     }
@@ -262,18 +310,26 @@ bool NeuralPostFilter::loadModel(const std::string &modelPath) {
            i, type.layout.rank, numElements, bufferSize);
 
     // Allocate aligned host memory for zero-copy
-    void* hostMem = aligned_alloc(LITERT_HOST_MEMORY_BUFFER_ALIGNMENT, bufferSize);
+    // aligned_alloc requires size to be a multiple of alignment (enforced on
+    // macOS -- returns NULL otherwise). Pad up; the tensor type still defines
+    // the logical size.
+    size_t alignedSize =
+        (bufferSize + LITERT_HOST_MEMORY_BUFFER_ALIGNMENT - 1) &
+        ~((size_t)LITERT_HOST_MEMORY_BUFFER_ALIGNMENT - 1);
+    void* hostMem = aligned_alloc(LITERT_HOST_MEMORY_BUFFER_ALIGNMENT, alignedSize);
     if (!hostMem) {
       aecLog("[NeuralPostFilter] Failed to allocate host memory for output %u\n", i);
       continue;
     }
-    memset(hostMem, 0, bufferSize);
+    memset(hostMem, 0, alignedSize);
     mHostMemory.push_back(hostMem);
 
     LiteRtTensorBuffer buffer;
-    if (LiteRtCreateTensorBufferFromHostMemory(&type, hostMem, bufferSize,
+    if (LiteRtCreateTensorBufferFromHostMemory(&type, hostMem, alignedSize,
                                                 nullptr, &buffer) == kLiteRtStatusOk) {
       mOutputBuffers.push_back(buffer);
+      mOutputElems.push_back(numElements);
+      mOutputHostMem.push_back(hostMem);
     } else {
       aecLog("[NeuralPostFilter] Failed to create output buffer %u\n", i);
     }
@@ -306,8 +362,9 @@ bool NeuralPostFilter::loadModelByType(NeuralModelType modelType,
     return loadModel(assetBasePath);
   }
 
-  // v3 is the only supported model
-  std::string fileName = "aec_mask_v3.tflite";
+  std::string fileName = (modelType == NeuralModelType::ERB_DF_V3)
+                             ? "erb_df_v3.tflite"
+                             : "aec_mask_v3.tflite";
 
   std::string fullPath = assetBasePath;
   if (!fullPath.empty() && fullPath.back() != '/')
@@ -317,9 +374,52 @@ bool NeuralPostFilter::loadModelByType(NeuralModelType modelType,
   return loadModel(fullPath);
 }
 
+#ifdef USE_TFLITE
+float *NeuralPostFilter::inputByElems(size_t elems) const {
+  for (size_t i = 0; i < mInputElems.size(); ++i) {
+    if (mInputElems[i] == elems)
+      return (float *)mInputHostMem[i];
+  }
+  return nullptr;
+}
+
+float *NeuralPostFilter::outputByElems(size_t elems) const {
+  for (size_t i = 0; i < mOutputElems.size(); ++i) {
+    if (mOutputElems[i] == elems)
+      return (float *)mOutputHostMem[i];
+  }
+  return nullptr;
+}
+#endif // USE_TFLITE
+
 // STFT Processing Implementation
 void NeuralPostFilter::performSTFT(const float *micBlock,
                                    const float *refBlock) {
+  if (mCurrentModelType == NeuralModelType::ERB_DF_V3) {
+    // Full-length complex STFT with periodic Hann, matching the
+    // tf.signal.stft the model was trained against. NOTE: FFT::fft's length
+    // argument is the FLOAT count (2 floats per complex point).
+    for (int i = 0; i < N_FFT; ++i) {
+      mFFTWorkBuffer[2 * i] = micBlock[i] * mWindowPeriodic[i];
+      mFFTWorkBuffer[2 * i + 1] = 0.0f;
+    }
+    FFT::fft(mFFTWorkBuffer.data(), 2 * N_FFT);
+    for (int i = 0; i < N_BINS; ++i) {
+      mMicRe[i] = mFFTWorkBuffer[2 * i];
+      mMicIm[i] = mFFTWorkBuffer[2 * i + 1];
+    }
+    for (int i = 0; i < N_FFT; ++i) {
+      mFFTWorkBuffer[2 * i] = refBlock[i] * mWindowPeriodic[i];
+      mFFTWorkBuffer[2 * i + 1] = 0.0f;
+    }
+    FFT::fft(mFFTWorkBuffer.data(), 2 * N_FFT);
+    for (int i = 0; i < N_BINS; ++i) {
+      mLpbRe[i] = mFFTWorkBuffer[2 * i];
+      mLpbIm[i] = mFFTWorkBuffer[2 * i + 1];
+    }
+    return;
+  }
+
   // 1. Mic Stage
   for (int i = 0; i < N_FFT; ++i) {
     mFFTWorkBuffer[2 * i] = micBlock[i] * mWindow[i];
@@ -346,6 +446,23 @@ void NeuralPostFilter::performSTFT(const float *micBlock,
   }
 }
 
+void NeuralPostFilter::performIFFTComplex(float *outputBlock) {
+  // Enhanced complex spectrum -> time block, OLA-normalized synthesis window.
+  for (int i = 0; i < N_BINS; ++i) {
+    mFFTWorkBuffer[2 * i] = mEnhRe[i];
+    mFFTWorkBuffer[2 * i + 1] = mEnhIm[i];
+  }
+  for (int i = N_BINS; i < N_FFT; ++i) {
+    int mirrorIdx = N_FFT - i;
+    mFFTWorkBuffer[2 * i] = mFFTWorkBuffer[2 * mirrorIdx];
+    mFFTWorkBuffer[2 * i + 1] = -mFFTWorkBuffer[2 * mirrorIdx + 1];
+  }
+  FFT::ifft(mFFTWorkBuffer.data(), 2 * N_FFT);
+  for (int i = 0; i < N_FFT; ++i) {
+    outputBlock[i] = mFFTWorkBuffer[2 * i] * mSynthWindow[i];
+  }
+}
+
 void NeuralPostFilter::performIFFT(float *outputBlock) {
   for (int i = 0; i < N_BINS; ++i) {
     mFFTWorkBuffer[2 * i] = mMagMic[i] * std::cos(mPhaseMic[i]);
@@ -363,11 +480,14 @@ void NeuralPostFilter::performIFFT(float *outputBlock) {
 }
 
 void NeuralPostFilter::process(const float *micSignal, const float *refSignal,
-                               float *output, unsigned int frameCount) {
+                               float *output, unsigned int frameCount,
+                               unsigned int channels) {
+  if (channels == 0)
+    channels = 1;
   if (!mEnabled || !mIsLoaded) {
     // Only copy if buffers are different; memcpy with overlapping buffers is UB
     if (output != micSignal) {
-      std::memcpy(output, micSignal, frameCount * sizeof(float));
+      std::memcpy(output, micSignal, frameCount * channels * sizeof(float));
     }
     return;
   }
@@ -375,26 +495,98 @@ void NeuralPostFilter::process(const float *micSignal, const float *refSignal,
   for (unsigned int f = 0; f < frameCount; ++f) {
     std::memmove(mInputBufferMic.data(), mInputBufferMic.data() + 1,
                  (N_FFT - 1) * sizeof(float));
-    mInputBufferMic[N_FFT - 1] = micSignal[f];
+    mInputBufferMic[N_FFT - 1] = micSignal[f * channels];
     std::memmove(mInputBufferLpb.data(), mInputBufferLpb.data() + 1,
                  (N_FFT - 1) * sizeof(float));
-    mInputBufferLpb[N_FFT - 1] = refSignal[f];
+    mInputBufferLpb[N_FFT - 1] = refSignal[f * channels];
 
     mWindowPos++;
     if (mWindowPos >= HOP_SIZE) {
       mWindowPos = 0;
       performSTFT(mInputBufferMic.data(), mInputBufferLpb.data());
-      processSingleStage(nullptr, nullptr, nullptr, 0);
       std::vector<float> synth(N_FFT);
-      performIFFT(synth.data());
+      if (mCurrentModelType == NeuralModelType::ERB_DF_V3) {
+        processErbDeepFilter();
+        performIFFTComplex(synth.data());
+      } else {
+        processSingleStage(nullptr, nullptr, nullptr, 0);
+        performIFFT(synth.data());
+      }
       for (int i = 0; i < N_FFT; ++i)
         mOutputAccumulator[i] += synth[i];
     }
-    output[f] = mOutputAccumulator[0];
+    for (unsigned int c = 0; c < channels; ++c)
+      output[f * channels + c] = mOutputAccumulator[0];
     std::memmove(mOutputAccumulator.data(), mOutputAccumulator.data() + 1,
                  (N_FFT - 1) * sizeof(float));
     mOutputAccumulator[N_FFT - 1] = 0.0f;
   }
+}
+
+void NeuralPostFilter::processErbDeepFilter() {
+  // Default to passthrough; overwritten on successful inference.
+  std::memcpy(mEnhRe.data(), mMicRe.data(), N_BINS * sizeof(float));
+  std::memcpy(mEnhIm.data(), mMicIm.data(), N_BINS * sizeof(float));
+
+#ifdef USE_TFLITE
+  if (!mCompiledModel)
+    return;
+
+  // Push current lpb frame into the DF_ORDER-deep ring (slot = current).
+  mLpbRingPos = (mLpbRingPos + 1) % DF_ORDER;
+  std::memcpy(mLpbRingRe.data() + mLpbRingPos * N_BINS, mLpbRe.data(),
+              N_BINS * sizeof(float));
+  std::memcpy(mLpbRingIm.data() + mLpbRingPos * N_BINS, mLpbIm.data(),
+              N_BINS * sizeof(float));
+
+  // Inputs are shape-unique: spec (1,4,513) and states (1,512).
+  float *spec = inputByElems(4 * N_BINS);
+  float *statesIn = inputByElems(2 * GRU_UNITS);
+  if (!spec || !statesIn)
+    return;
+  std::memcpy(spec + 0 * N_BINS, mMicRe.data(), N_BINS * sizeof(float));
+  std::memcpy(spec + 1 * N_BINS, mMicIm.data(), N_BINS * sizeof(float));
+  std::memcpy(spec + 2 * N_BINS, mLpbRe.data(), N_BINS * sizeof(float));
+  std::memcpy(spec + 3 * N_BINS, mLpbIm.data(), N_BINS * sizeof(float));
+  std::memcpy(statesIn, mGru1State.data(), GRU_UNITS * sizeof(float));
+  std::memcpy(statesIn + GRU_UNITS, mGru2State.data(),
+              GRU_UNITS * sizeof(float));
+
+  if (LiteRtRunCompiledModel(mCompiledModel, 0, (uint32_t)mInputBuffers.size(),
+                             mInputBuffers.data(),
+                             (uint32_t)mOutputBuffers.size(),
+                             mOutputBuffers.data()) != kLiteRtStatusOk) {
+    return;  // passthrough; state untouched so the stream can recover
+  }
+
+  // Outputs: taps (1,1,513,10) = [taps_r(5) || taps_i(5)] per bin,
+  // states (1,512) = [gru1 || gru2].
+  const float *taps = outputByElems((size_t)N_BINS * 2 * DF_ORDER);
+  const float *statesOut = outputByElems(2 * GRU_UNITS);
+  if (!taps || !statesOut)
+    return;
+  std::memcpy(mGru1State.data(), statesOut, GRU_UNITS * sizeof(float));
+  std::memcpy(mGru2State.data(), statesOut + GRU_UNITS,
+              GRU_UNITS * sizeof(float));
+
+  // bleed[bin] = sum_k taps[bin][k] * lpb[frame-k][bin]  (complex MAC);
+  // enhanced = mic - bleed.
+  for (int i = 0; i < N_BINS; ++i) {
+    const float *t = taps + (size_t)i * 2 * DF_ORDER;
+    float br = 0.0f, bi = 0.0f;
+    for (int k = 0; k < DF_ORDER; ++k) {
+      size_t slot = (mLpbRingPos + DF_ORDER - k) % DF_ORDER;
+      float lr = mLpbRingRe[slot * N_BINS + i];
+      float li = mLpbRingIm[slot * N_BINS + i];
+      float tr = t[k];
+      float ti = t[DF_ORDER + k];
+      br += tr * lr - ti * li;
+      bi += tr * li + ti * lr;
+    }
+    mEnhRe[i] = mMicRe[i] - br;
+    mEnhIm[i] = mMicIm[i] - bi;
+  }
+#endif
 }
 
 void NeuralPostFilter::processSingleStage(const float *micSignal,

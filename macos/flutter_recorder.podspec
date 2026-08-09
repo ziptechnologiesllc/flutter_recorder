@@ -49,8 +49,10 @@ A new Flutter FFI plugin project.
   }
 
   s.user_target_xcconfig = {
-    'OTHER_LDFLAGS' => "$(inherited) -force_load #{plugin_root}/cmake_build/macosx/libflutter_recorder_plugin.a -lc++",
-    'LIBRARY_SEARCH_PATHS' => "$(inherited) \"#{plugin_root}/cmake_build/macosx\"",
+    # LiteRT: link the prebuilt x86_64 dylib and rpath its directory so the
+    # dev app resolves it at launch (install name is @rpath/libLiteRt.dylib).
+    'OTHER_LDFLAGS' => "$(inherited) -force_load #{plugin_root}/cmake_build/macosx/libflutter_recorder_plugin.a -lc++ -L#{plugin_root}/../prebuilt/macos -lLiteRt -Wl,-rpath,#{plugin_root}/../prebuilt/macos",
+    'LIBRARY_SEARCH_PATHS' => "$(inherited) \"#{plugin_root}/cmake_build/macosx\" \"#{plugin_root}/../prebuilt/macos\"",
     'STRIP_STYLE' => 'debugging',
     'DEBUG_INFORMATION_FORMAT' => 'dwarf-with-dsym',
     'EXCLUDED_ARCHS[sdk=macosx*]' => ''

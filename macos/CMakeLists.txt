@@ -60,8 +60,16 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE
   "ma_ios_notification_handler=fr_ma_ios_notification_handler"
 )
 
-# LiteRT disabled on macOS (no prebuilt Intel/ARM binary yet)
-# Neural post-filter code compiles but is guarded by #ifdef USE_TFLITE
+# LiteRT enabled: prebuilt x86_64 dylib at ../prebuilt/macos/libLiteRt.dylib
+# (the app target links it -- see user_target_xcconfig in the podspec).
+# This static lib only needs the headers + USE_TFLITE. The dylib is
+# x86_64-only, so USE_TFLITE goes into the x86_64 slice ONLY -- the arm64
+# slice of a universal build must not reference LiteRT symbols.
+target_include_directories(${PLUGIN_NAME} SYSTEM PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../prebuilt/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/LiteRT"
+)
+target_compile_options(${PLUGIN_NAME} PRIVATE -Xarch_x86_64 -DUSE_TFLITE)
 target_compile_definitions(${PLUGIN_NAME} PRIVATE
   MA_NO_RUNTIME_LINKING=1
   NDEBUG=1

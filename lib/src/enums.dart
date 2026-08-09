@@ -317,7 +317,11 @@ enum NeuralModelType {
 
   /// AEC mask v3 - BROKEN, do not use (kept for backwards compatibility)
   @Deprecated('v3 model is broken, use aecMaskV2 or aecMaskV2Fp16')
-  aecMaskV3(3);
+  aecMaskV3(3),
+
+  /// ERB deep-filter v3 distill2 (700K params, stateful GRU, 5-tap complex
+  /// deep filter, distilled from the 21M DTLN teacher) - erb_df_v3.tflite
+  erbDfV3(4);
 
   final int value;
   const NeuralModelType(this.value);
@@ -327,6 +331,7 @@ enum NeuralModelType {
         1 => aecMaskV2,
         2 => aecMaskV2Fp16,
         3 => aecMaskV3,
+        4 => erbDfV3,
         _ => throw ArgumentError('Unknown value for NeuralModelType: $value'),
       };
 }
