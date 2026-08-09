@@ -147,6 +147,10 @@ public:
   /** Which phase the in-flight seed is stuck in (racy snapshot, telemetry
    * only): 0 idle, 1 capturing reference, 2 job posted (worker pending),
    * 3 output ready (fit/apply in progress), 4 busy-but-none (anomalous). */
+  int64_t alignLagCorrection() const {
+    return mAlignLagCorrection.load(std::memory_order_relaxed);
+  }
+
   uint32_t seedPhase() const {
     if (!mSeedBusy) return 0;
     if (mSeedCaptureRemaining > 0) return 1;
@@ -418,6 +422,14 @@ private:
   bool mPrevNearEndHold = false;
   int64_t mRewindRemaining = 0; // >0: chunked rewind in progress
   int mSeedRetryCount = 0; // audio-thread-only: bounded discard->retry loop
+
+  /** Closed-loop alignment auto-correction, samples (signed). The seed's
+   * GCC-PHAT measures the RESIDUAL ref->mic misalignment of the reference
+   * the template actually consumed; the AEC's reference read adds this
+   * correction to its acoustic delay, so successive seeds drive the
+   * measurement toward zero. Written by the seed worker (only when the
+   * pass had usable coherence), read on the audio thread each block. */
+  std::atomic<int64_t> mAlignLagCorrection{0};
   float mOutputSuppressGain = 1.0f; // smoothed 0..1; see process()'s Pass 1
   // Smoothed mic/raw energy RATIO (not the derived gain) — averaging THIS
   // first, over several blocks, is what lets the margin below be tight

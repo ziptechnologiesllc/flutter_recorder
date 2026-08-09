@@ -329,6 +329,21 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       // contribution landed ~LAMBDA (~60 ms) EARLY — a wrong-phase
       // subtraction that ADDS energy: the "cancelled my own sounds, kept
       // the bleed" regression once per-track went live with a real IR.
+      // Closed-loop alignment auto-correction measured by the seed's
+      // GCC-PHAT (template worker). Applied HERE, before both the LAMBDA
+      // publication and the read below, so they stay consistent. Template
+      // branch only — calibration and legacy-NLMS reads are untouched, and
+      // the neural post-filter (which consumes this same mRefBuffer in
+      // template mode) inherits the corrected alignment. Kill switch for
+      // the concurrent neural-AEC bring-up: set false to freeze the read
+      // at the raw calibrated delay.
+      static constexpr bool kAlignAutoCorrect = true;
+      if (kAlignAutoCorrect) {
+        const int64_t corr = mEchoTemplate->alignLagCorrection();
+        int64_t d = static_cast<int64_t>(effectiveDelay) + corr;
+        if (d < 0) d = 0;
+        effectiveDelay = static_cast<size_t>(d);
+      }
       mEchoTemplate->setReferenceShiftFrames(
           static_cast<int64_t>(effectiveDelay) + frameCount);
       if (totalWritten >= frameCount + effectiveDelay) {
@@ -799,7 +814,15 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       mTwMicAll += micE;
       mTwOutAll += outE;
       mTwRefAll += static_cast<double>(refS) * refS;
-      if (mRefPowerEma > kFarEndFloor) {
+      // Gate the ERLE accumulators on BOTH far-end presence AND near-end
+      // quiet: while the performer plays, mic ~= out regardless of how
+      // perfect echo cancellation is, so counting those samples pins
+      // measured ERLE to ~0dB (a whole jam session read median 0.3dB with
+      // five landed seeds and zero residual misalignment — the metric was
+      // measuring "was the user playing", not cancellation depth). The
+      // correlation DTD already knows when the near end is active.
+      if (mRefPowerEma > kFarEndFloor &&
+          !SpectralGovernor::instance().nearEndHold()) {
         mTwMicFar += micE;
         mTwOutFar += outE;
         ++mTwFar;

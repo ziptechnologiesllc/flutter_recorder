@@ -444,6 +444,24 @@ void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
       }
       aecLog("[SEED] ref->mic alignment lag: %+d samples (%.2f ms)\n",
              bestLag, bestLag * 1000.0f / 48000.0f);
+      // Closed-loop auto-correction: fold the measured residual into the
+      // running correction the AEC's reference read applies. Negative lag
+      // (mic leads ref => reference read too late) reduces the effective
+      // delay. Gated on usable coherence and a sane magnitude; clamped so
+      // one garbage pass can never run the read out of range. Each landed
+      // seed re-measures AGAINST the corrected reference, so the reading
+      // trends to zero when the sign/loop is right — and would visibly
+      // diverge in this very log if it were wrong (self-validating).
+      if (meanCoh >= 0.2 && bestLag != 0 && std::abs(bestLag) <= 250) {
+        const int64_t prev =
+            mAlignLagCorrection.load(std::memory_order_relaxed);
+        int64_t next = prev + bestLag;
+        if (next > 480) next = 480;
+        if (next < -480) next = -480;
+        mAlignLagCorrection.store(next, std::memory_order_relaxed);
+        aecLog("[SEED] align auto-correct: %+lld -> %+lld samples\n",
+               (long long)prev, (long long)next);
+      }
     }
 
     if (meanCoh >= 0.05) {
