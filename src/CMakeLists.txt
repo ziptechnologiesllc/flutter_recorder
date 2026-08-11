@@ -75,7 +75,15 @@ if (ANDROID)
   set(LITERT_OUTPUT_LIB "${LITERT_BUILD_DIR}/c/libLiteRtRuntimeCApi.so")
   set(HOST_FLATC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/LiteRT/host_flatc_build")
 
-  if (EXISTS "${LITERT_PREBUILT_DIR}/libLiteRt.so")
+  if (NOT ANDROID_ABI STREQUAL "arm64-v8a")
+    # LiteRT only targets arm64: emulator ABIs (x86_64) build WITHOUT the
+    # neural stage (USE_TFLITE off) instead of attempting a doomed
+    # from-source LiteRT build — the linear LSAEC stack is ABI-agnostic
+    # and that is what an emulator can meaningfully exercise anyway.
+    message(STATUS "[flutter_recorder] LiteRT skipped for ${ANDROID_ABI} (arm64-only)")
+    set(LITERT_FOUND FALSE)
+
+  elseif (EXISTS "${LITERT_PREBUILT_DIR}/libLiteRt.so")
     # Use prebuilt LiteRT
     message(STATUS "[flutter_recorder] Using prebuilt LiteRT for Android ${ANDROID_ABI}")
     set(LITERT_LIB "${LITERT_PREBUILT_DIR}/libLiteRt.so")
@@ -196,6 +204,11 @@ if (ANDROID)
           "${LITERT_PREBUILT_DIR}/libQnnHtp.so"
           $<TARGET_FILE_DIR:flutter_recorder>)
     endif()
+  else()
+    # Non-LiteRT Android ABIs (x86_64 emulator) still need the platform
+    # libs -- __android_log_print lives in liblog and was previously only
+    # linked via the LiteRT branch, so the x86_64 link failed on it.
+    target_link_libraries(flutter_recorder log android)
   endif()
 endif()
 

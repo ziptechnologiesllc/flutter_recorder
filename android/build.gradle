@@ -62,9 +62,13 @@ android {
     defaultConfig {
         minSdk = 21
 
-        // Only build for arm64 (LiteRT prebuilt available for arm64-v8a only)
+        // arm64 = real devices (with LiteRT neural stage); x86_64 = emulator
+        // (linear LSAEC only — CMake skips LiteRT off-arm64). Without the
+        // x86_64 ABI the emulator APK shipped NO native lib and dlopen of
+        // libflutter_recorder.so failed at engine construction -> gray
+        // screen of nothing.
         ndk {
-            abiFilters 'arm64-v8a'
+            abiFilters 'arm64-v8a', 'x86_64'
         }
     }
 
