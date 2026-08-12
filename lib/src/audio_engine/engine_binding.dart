@@ -484,19 +484,16 @@ class EngineBinding {
         _metronomeAec.onEvent(event, _lastSnapshot);
       }
     }
-    if (_snapshotCtrl.hasListener) {
-      _loadSnapshotFn(_snapshotPtr);
-      final s = _readSnapshot(_snapshotPtr.ref);
-      // Suppress duplicate emissions when the audio thread hasn't moved.
-      // (Cheap identity check on currentFrame; if engine state changed in
-      // other fields without frame advancing, we'd miss it — but the audio
-      // thread bumps currentFrame every buffer, so this is safe.)
-      if (s.currentFrame != _lastSnapshot.currentFrame ||
-          !identical(s, _lastSnapshot)) {
-        _lastSnapshot = s;
-        _snapshotCtrl.add(s);
-      }
-    }
+    // Refresh the cached snapshot on EVERY poll, not only when the snapshot
+    // stream has listeners: `lastSnapshot` is read passively all over the UI
+    // (unified timing source, loop playheads, the cycle/beat HUD), and gating
+    // the refresh on stream listeners left it frozen at Snapshot.empty on
+    // phones, where only event listeners exist — every lastSnapshot consumer
+    // saw currentFrame=0 / no tempo forever.
+    _loadSnapshotFn(_snapshotPtr);
+    final s = _readSnapshot(_snapshotPtr.ref);
+    _lastSnapshot = s;
+    if (_snapshotCtrl.hasListener) _snapshotCtrl.add(s);
   }
 
   Snapshot _readSnapshot(NativeSnapshot s) => Snapshot(

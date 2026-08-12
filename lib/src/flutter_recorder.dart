@@ -1308,6 +1308,15 @@ interface class Recorder {
     return _impl.schedulerScheduleStop(startFrame);
   }
 
+  /// Schedule a scheduler event at a specific global frame (no base-loop
+  /// quantization — the caller picks the frame, e.g. the next downbeat of a
+  /// count-in tempo grid).
+  /// [action]: 1 = StartRecording (requires [path]), 2 = StopRecording.
+  /// Returns event ID (0 if failed to schedule).
+  int schedulerScheduleEvent(int action, int targetFrame, {String? path}) {
+    return _impl.schedulerScheduleEvent(action, targetFrame, path: path);
+  }
+
   /// Cancel a scheduled event by ID.
   /// Returns true if event was found and cancelled.
   bool schedulerCancelEvent(int eventId) {

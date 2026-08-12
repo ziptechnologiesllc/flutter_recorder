@@ -1474,6 +1474,21 @@ class RecorderFfi extends RecorderImpl {
   }
 
   @override
+  int schedulerScheduleEvent(int action, int targetFrame, {String? path}) {
+    if (path == null) {
+      return _bindings.flutter_recorder_scheduler_scheduleEvent(
+          action, targetFrame, ffi.nullptr);
+    }
+    final pathPtr = path.toNativeUtf8();
+    try {
+      return _bindings.flutter_recorder_scheduler_scheduleEvent(
+          action, targetFrame, pathPtr.cast());
+    } finally {
+      malloc.free(pathPtr);
+    }
+  }
+
+  @override
   bool schedulerCancelEvent(int eventId) {
     return _bindings.flutter_recorder_scheduler_cancelEvent(eventId) == 1;
   }

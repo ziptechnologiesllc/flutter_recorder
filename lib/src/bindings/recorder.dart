@@ -985,6 +985,14 @@ abstract class RecorderImpl {
   @mustBeOverridden
   int schedulerScheduleStop(int startFrame);
 
+  /// Schedule a scheduler event at a specific global frame (no base-loop
+  /// quantization — the caller picks the frame, e.g. the next downbeat of a
+  /// count-in tempo grid).
+  /// [action]: 1 = StartRecording (requires [path]), 2 = StopRecording.
+  /// Returns event ID (0 if failed to schedule).
+  @mustBeOverridden
+  int schedulerScheduleEvent(int action, int targetFrame, {String? path});
+
   /// Cancel a scheduled event by ID.
   /// Returns true if event was cancelled.
   @mustBeOverridden

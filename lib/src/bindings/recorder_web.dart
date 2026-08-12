@@ -821,6 +821,12 @@ class RecorderWeb extends RecorderImpl {
   }
 
   @override
+  int schedulerScheduleEvent(int action, int targetFrame, {String? path}) {
+    // Not supported on web - return 0 (failed)
+    return 0;
+  }
+
+  @override
   int schedulerScheduleStop(int startFrame) {
     // Not supported on web - return 0 (failed)
     return 0;
