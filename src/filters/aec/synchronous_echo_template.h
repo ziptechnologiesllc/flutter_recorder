@@ -212,6 +212,9 @@ public:
 
   /** E3 diagnostics (monotonic counters since reset). */
   uint32_t freezeCount() const { return mFreezeCount; }
+  /** Double-talk rewinds actually performed (rate-limited; see
+   * mLastRewindFrame doc). Audio-thread-owned; snapshot read is safe. */
+  uint32_t rewindCount() const { return mRewindCount; }
   uint32_t reopenCount() const { return mReopenCount; }
 
   /** True while a convergence-seed capture/compute/apply is in flight — for
@@ -319,6 +322,12 @@ private:
   // length) down to exactly one period before convolving; reading the
   // plain mActiveLoopFrames from that thread would be a data race.
   std::atomic<int64_t> mActiveLoopFramesAtomic{0};
+  // Engine BASE loop period as passed to process() (pre-multiplier), for
+  // any-thread reads (registerTrackAudio measures a track's length multiple
+  // against it). The EFFECTIVE period the template runs at is base x
+  // mDesiredMultiplier (audio-thread-only, from drainPendingTrackEdits).
+  std::atomic<int64_t> mEngineLoopFrames{0};
+  int mDesiredMultiplier = 1;
   // See setReferenceShiftFrames(). Read by the worker thread when computing
   // per-track contributions.
   std::atomic<int64_t> mReferenceShiftFrames{0};
@@ -421,6 +430,19 @@ private:
   size_t mUndoCount = 0;  // valid entries (saturates at ring size)
   bool mPrevNearEndHold = false;
   int64_t mRewindRemaining = 0; // >0: chunked rewind in progress
+  // Rewind rate limit (the 3.5 Hz warble fix): the hold's rising edge used to
+  // roll back the FULL 400 ms undo ring unconditionally. With the governor's
+  // hold chattering, that turned boolean chatter into a ~10 dB template-state
+  // square wave at ~3.5 Hz (measured on a real overdub: 3.56 Hz, 9.5 dB
+  // depth) — the audible "flutter". One full rollback per cooldown window;
+  // edges inside the cooldown only freeze (the hold already gates learning),
+  // which is cheap and safe. Audio-thread-only.
+  int64_t mLastRewindFrame = INT64_MIN / 2; // engine frame of last rollback
+  uint32_t mRewindCount = 0;                // rollbacks since reset — telemetry
+  // Schmitt trigger for the governor freeze-interlock: the raw
+  // `learnBoost < 2.0` compare chattered as boost seesawed ±0.19/tick across
+  // 2.0, toggling spike-freeze protection at up to the 4.76 Hz governor tick.
+  bool mBoostInterlockHot = false;
   int mSeedRetryCount = 0; // audio-thread-only: bounded discard->retry loop
 
   /** Closed-loop alignment auto-correction, samples (signed). The seed's
@@ -514,6 +536,19 @@ private:
   bool mSeedFitDone = false;
   double mSeedFitNum = 0.0;
   double mSeedFitDen = 0.0;
+  // Beats-current landing gate (the converge-then-DIVERGE fix): the scalar
+  // alpha alone cannot reject a coherence-starved seed — a seed built FROM
+  // the mic capture always correlates with the mic (alpha ~ 1) even when it
+  // is mostly near-end garbage. Measured offline on a real overdub pair:
+  // a meanCoh=0.06 seed with alpha=1.059 stamp-replaced an honestly-EMA-
+  // converged 15 dB template and collapsed it to ~2 dB (seed-off control
+  // kept climbing to 21 dB). So the fit pass also accumulates Sum(mic^2)
+  // and the CURRENT template's residual Sum((mic-E)^2); the seed lands only
+  // if its predicted residual Sum(mic^2) - <mic,seed>^2/<seed,seed> beats
+  // what the template already achieves. Cold start: E ~ 0 -> current ==
+  // mic^2 -> any usable seed still lands instantly.
+  double mSeedFitMicSq = 0.0; // Sum mic^2 over the fit pass (mono)
+  double mSeedFitCurSq = 0.0; // Sum (mic - E)^2 — current template residual
   int64_t mSeedFitFrames = 0;
   float mSeedFitAlpha = 1.0f;
   // Last fitted alpha — also applied to per-track exact edits, which are
@@ -555,6 +590,15 @@ private:
     // instant the worker finishes -- previously setTrackActive on an
     // uncomputed track was a silent no-op and the edit NEVER landed.
     std::atomic<bool> wantActive{false};
+    // Track length as a multiple of the ENGINE base loop period at
+    // registration time (x1/x2/x4/x8 length picker). The composite echo's
+    // true period is the LCM of the ACTIVE tracks' periods = max multiple
+    // (powers of two) x base — drainPendingTrackEdits() maintains that max
+    // and process() runs the template at the EFFECTIVE period. Without
+    // this, a 2x overdub's echo alternated between two halves each base
+    // pass and the per-phase average could never cancel it ("second loop
+    // doesn't cancel at all").
+    std::atomic<int> lengthMultiple{1};
     bool active = false;              // audio-thread-only: mirrors what's
                                        // CURRENTLY summed into mTemplate
     // Audio-thread-only gain pair: targetGain is the mixer's current gain

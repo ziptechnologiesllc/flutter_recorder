@@ -251,11 +251,16 @@ private:
 
   unsigned int mSampleRate;
   unsigned int mChannels;
-  // SAFE MODE default: OFF until the underwater/low-pass reports are fully
-  // resolved — the user's field tests implicate Stage-2 coloration in noisy
-  // rooms even with the minimum-statistics floor. The AEC panel's 'HF Sup'
-  // toggle turns it on for A/B; flip the default back once field-verified.
-  bool mEnabled = false;
+  // Default ON (flipped Aug 2026): the "underwater" reports that shelved
+  // this belonged to the poisoned-IR / hot-governor era, all since fixed
+  // (calibration P1/P2, seed landing gate, governor damping) — and with it
+  // OFF the transient/HF residual click had NO stage at all responsible for
+  // it: full-volume percussive peaks drive the speaker into non-repeatable
+  // distortion the per-phase template structurally cannot average away
+  // (measured: mouth-percussion clicks at near-full residual level while
+  // sustained content cancels 15-20 dB). kGainMin 0.30 keeps the duck
+  // gentle; the AEC panel's 'HF Sup' toggle still allows per-room A/B off.
+  bool mEnabled = true;
   bool mAllowKappa = false;
   std::array<std::array<float, 5>, kBands> mCoef;
   std::array<ChannelState, kMaxChannels> mState;

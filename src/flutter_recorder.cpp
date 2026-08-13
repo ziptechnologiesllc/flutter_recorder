@@ -20,6 +20,7 @@
 #include "native_scheduler.h"
 #include "soloud_slave_bridge.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
@@ -1013,9 +1014,154 @@ FFI_PLUGIN_EXPORT void flutter_recorder_setPauseRecording(bool pause) {
   capture.setPauseRecording(pause);
 }
 
+// ---- Streaming (hours-long) take writer -----------------------------------
+// The normal take path is RAM-resident end to end (ring linear region +
+// output copy + one-shot fwrite at stop), capped at min(10% RAM, 10 min) and
+// silently truncating past it. A streaming take instead trails the ROLLING
+// ring with a drain thread that appends to a miniaudio WAV encoder as audio
+// arrives: bounded RAM (just the existing ring), take length bounded only by
+// disk and the RIFF 4 GB header (~3.1 h stereo f32 @48 kHz). Used for the
+// LENGTH ∞ "performance capture" mode (premium); short/loop takes keep the
+// existing sample-accurate path untouched.
+namespace {
+struct StreamingTake {
+  std::thread worker;
+  std::atomic<bool> running{false};
+  std::atomic<bool> stopRequested{false};
+  std::atomic<int64_t> stopAtTotalFrame{-1};
+  size_t startTotalFrame = 0;
+  int64_t framesWritten = 0;
+  char path[512] = {0};
+  WriteAudio::Wav wav; // miniaudio streaming encoder (wav.h); finalizes header on close
+};
+StreamingTake* g_streamingTake = nullptr;
+
+void streamingTakeWorker(StreamingTake* st) {
+  // ~1 s of stereo per chunk; drain every 100 ms so the rolling ring (>=5 s)
+  // never laps the reader even under UI stalls.
+  const unsigned int ch = g_nativeRingBuffer->channels();
+  const size_t chunkFrames = 48000;
+  std::vector<float> buf(chunkFrames * ch);
+  size_t drained = st->startTotalFrame;
+  bool dropped = false;
+  while (true) {
+    const bool stopping = st->stopRequested.load(std::memory_order_acquire);
+    size_t target = g_nativeRingBuffer->getTotalFramesWritten();
+    if (stopping) {
+      const int64_t stopAt = st->stopAtTotalFrame.load(std::memory_order_acquire);
+      if (stopAt >= 0 && static_cast<size_t>(stopAt) < target)
+        target = static_cast<size_t>(stopAt);
+    }
+    while (drained < target) {
+      const size_t want =
+          std::min(chunkFrames, static_cast<size_t>(target - drained));
+      const size_t got =
+          g_nativeRingBuffer->readRange(buf.data(), drained, drained + want);
+      if (got == 0) {
+        // Reader was lapped (should not happen at this cadence): resync to
+        // the oldest still-valid frame and note the gap once.
+        const size_t total = g_nativeRingBuffer->getTotalFramesWritten();
+        const size_t cap = g_nativeRingBuffer->capacityInFrames();
+        const size_t oldest = total > cap ? total - cap : 0;
+        if (!dropped) {
+          printf("[StreamingTake] WARNING: drain lapped, dropped %lld frames\n",
+                 (long long)(oldest > drained ? oldest - drained : 0));
+          dropped = true;
+        }
+        drained = oldest > drained ? oldest : drained + want;
+        continue;
+      }
+      st->wav.write(buf.data(), got);
+      drained += got;
+      st->framesWritten += static_cast<int64_t>(got);
+    }
+    if (stopping && drained >= target)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  st->wav.close(); // ma_encoder_uninit patches the RIFF sizes
+  // Same delivery contract as the normal path: the stopped event is queued
+  // only once the WAV is complete on disk; the looper worker's poll
+  // dispatches it to Dart.
+  queueRecordingStoppedEvent(st->framesWritten, st->path);
+  st->running.store(false, std::memory_order_release);
+}
+} // namespace
+
+FFI_PLUGIN_EXPORT enum CaptureErrors
+flutter_recorder_startStreamingRecording(const char *path) {
+  if (!capture.isInited())
+    return captureNotInited;
+  if (g_recordingScheduledOrActive.load(std::memory_order_acquire))
+    return captureNoError; // idempotent, same as startRecording
+  if (!g_nativeRingBuffer || !path || !path[0])
+    return captureInitFailed;
+
+  if (g_streamingTake && g_streamingTake->running.load(std::memory_order_acquire))
+    return captureNoError;
+  delete g_streamingTake;
+  g_streamingTake = new StreamingTake();
+  StreamingTake* st = g_streamingTake;
+  strncpy(st->path, path, sizeof(st->path) - 1);
+
+  ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
+  cfg.sampleRate = g_nativeRingBuffer->sampleRate();
+  cfg.capture.format = ma_format_f32;
+  cfg.capture.channels = g_nativeRingBuffer->channels();
+  if (st->wav.init(path, cfg) != captureNoError) {
+    printf("[StreamingTake] encoder init FAILED for %s\n", path);
+    delete g_streamingTake;
+    g_streamingTake = nullptr;
+    return captureInitFailed;
+  }
+
+  // Latency compensation: start in the ring's recent past, same as the
+  // normal free-mode path.
+  const int64_t latency =
+      NativeScheduler::instance().getLatencyCompensationFrames();
+  const size_t total = g_nativeRingBuffer->getTotalFramesWritten();
+  st->startTotalFrame =
+      (latency > 0 && static_cast<size_t>(latency) < total)
+          ? total - static_cast<size_t>(latency)
+          : total;
+  st->running.store(true, std::memory_order_release);
+  st->worker = std::thread(streamingTakeWorker, st);
+  g_recordingScheduledOrActive.store(true, std::memory_order_release);
+  queueRecordingStartedEvent(static_cast<int64_t>(st->startTotalFrame), path);
+  printf("[StreamingTake] started -> %s (startFrame=%zu, latencyComp=%lld)\n",
+         path, st->startTotalFrame, (long long)latency);
+  return captureNoError;
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_isStreamingRecording() {
+  return (g_streamingTake &&
+          g_streamingTake->running.load(std::memory_order_acquire))
+             ? 1
+             : 0;
+}
+
 FFI_PLUGIN_EXPORT void flutter_recorder_stopRecording() {
   if (!capture.isInited())
     return;
+
+  // Streaming take active? Finalize it — the drain thread flushes up to the
+  // current frame, closes the encoder, and queues the stopped event. join()
+  // here typically blocks <200 ms (one chunk + header patch), keeping the
+  // Dart contract "file exists when the stop event lands".
+  if (g_streamingTake &&
+      g_streamingTake->running.load(std::memory_order_acquire)) {
+    StreamingTake* st = g_streamingTake;
+    st->stopAtTotalFrame.store(
+        static_cast<int64_t>(g_nativeRingBuffer->getTotalFramesWritten()),
+        std::memory_order_release);
+    st->stopRequested.store(true, std::memory_order_release);
+    if (st->worker.joinable())
+      st->worker.join();
+    g_recordingScheduledOrActive.store(false, std::memory_order_release);
+    printf("[StreamingTake] stopped (%lld frames written)\n",
+           (long long)st->framesWritten);
+    return;
+  }
 
   // Check if ring buffer is recording
   if (g_nativeRingBuffer && g_nativeRingBuffer->isRecording()) {
@@ -1314,7 +1460,7 @@ flutter_recorder_aec_createReferenceBuffer(unsigned int sampleRate,
   // Proves which native revision is actually running: identical symptoms
   // across a code change have previously meant CocoaPods reused a stale
   // plugin binary. Bump the tag whenever chasing a fix that "didn't take".
-  printf("[flutter_recorder] AEC build marker: chords-wav-analyze-1\n");
+  printf("[flutter_recorder] AEC build marker: race-free-join-aec-batch-1\n");
   fflush(stdout);
   // Buffer size: 2 seconds of audio to support calibration
   // Calibration signal is 1.5 seconds white noise plus delay margin

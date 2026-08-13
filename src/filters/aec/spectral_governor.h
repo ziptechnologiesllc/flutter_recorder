@@ -92,6 +92,13 @@ private:
   std::atomic<float> mNearEndRatio{0.0f};
   double mIncoherentFloor = -1.0; // worker-thread-only quiet-floor tracker
   double mIncoherentFast = 0.0;   // fast EMA (~85ms) driving hold onset
+  // Hold-loop damping state (worker-thread-only; the 3.5 Hz warble fix —
+  // see the constants block in the .cpp for the full mechanism):
+  int mEngageStreak = 0; // consecutive fast-path windows over the 8x ratio
+  int mTicksHeld = 0;    // controller ticks since the hold engaged
+  // Reference-onset tracker (transient-bleed fix — see processWindow):
+  double mRefPowPrev = 0.0;  // smoothed broadband ref power, prev windows
+  int mRefOnsetCooldown = 0; // windows of onset-aware engage skepticism
 
   // Worker-only spectral state (Welch EMA per band)
   static constexpr int kBands = 16;

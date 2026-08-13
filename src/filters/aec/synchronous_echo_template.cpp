@@ -78,9 +78,22 @@ constexpr float kEnergyRatioTauMs = 25.0f;
 // against.
 constexpr float kOutputGateMargin = 1.3f;
 
-// Maximum supported loop period: 16 s. Sized once at construction so process()
-// never allocates on the audio thread.
-constexpr unsigned int kMaxSeconds = 16;
+// Maximum supported loop period. Sized once at construction so process()
+// never allocates on the audio thread. Overridable at compile time
+// (-DLSAEC_MAX_SECONDS=N). Raised 16 -> 64 for multi-length loops: the
+// composite echo's true period is the LCM of the active loop lengths
+// (x1/x2/x4/x8 picker -> max multiple x base), so even a 2x overdub over an
+// 8.6 s base (17.2 s) blew the old cap — which silently disabled ALL
+// cancellation (the "second loop doesn't cancel at all" report) — and an
+// x8 phrase loop needs far more. Memory scales ~1.15 MB per second @48 kHz
+// across template+confidence+capture+seed buffers: 128 s ~ 148 MB (pro app, desktop-class). Fine on
+// desktop; on phones consider a platform -DLSAEC_MAX_SECONDS if memory
+// pressure shows up. Stage 1 (IR-domain canceller, no length cap) removes
+// this constant entirely.
+#ifndef LSAEC_MAX_SECONDS
+#define LSAEC_MAX_SECONDS 128
+#endif
+constexpr unsigned int kMaxSeconds = LSAEC_MAX_SECONDS;
 
 // ---- Convergence seed tuning (see class comment) --------------------------
 // Confidence assigned to every phase immediately after seeding: high enough
@@ -127,7 +140,12 @@ constexpr int kSeedPollMs = 8;
 //   removes E_track from the template the instant the track mutes. Needs a
 //   fresh P1/P2 calibration for the IR to be right; self-fit + safety clamp
 //   guard a stale one; revert to false if it regresses.
-constexpr bool kSeedEnabled = true;
+// Overridable for the offline harness (A/B the seed's contribution to
+// convergence/divergence on replayed captures); production default unchanged.
+#ifndef LSAEC_SEED_ENABLED
+#define LSAEC_SEED_ENABLED 1
+#endif
+constexpr bool kSeedEnabled = LSAEC_SEED_ENABLED != 0;
 constexpr bool kFeedForwardEnabled = true;
 } // namespace
 
@@ -464,7 +482,11 @@ void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
       }
     }
 
-    if (meanCoh >= 0.05) {
+    // Floor raised 0.05 -> 0.15: a meanCoh=0.06 seed (near-end-dominated
+    // capture at ~0 dB SER) synthesized mostly-garbage output yet fit
+    // alpha~1 downstream — the beats-current landing gate now catches that
+    // too, but a seed this incoherent is never worth the fit pass.
+    if (meanCoh >= 0.15) {
       // Pass B: synthesize E = H (x) ref with hann-weighted overlap-add.
       // Analysis hann applied once + 75% overlap => constant OLA gain of
       // exactly 2.0 for this window/hop pair; divide it out.
@@ -594,6 +616,26 @@ void SynchronousEchoTemplate::registerTrackAudio(int trackIndex,
   // requeueAllTrackContributions). Written on the Dart thread only.
   mTrackContributions[slot].audio.assign(audioMono, audioMono + frames);
 
+  // Measure this track's length as a multiple of the engine BASE period
+  // (safe any-thread read of the dedicated atomic). Rounded: overdub
+  // lengths can land a few frames off an exact multiple.
+  {
+    const int64_t baseP = mEngineLoopFrames.load(std::memory_order_relaxed);
+    int mult = 1;
+    if (baseP > 0) {
+      const double m = static_cast<double>(frames) / static_cast<double>(baseP);
+      mult = static_cast<int>(m + 0.5);
+      if (mult < 1) mult = 1;
+      if (mult > 8) mult = 8;
+    }
+    mTrackContributions[slot].lengthMultiple.store(mult,
+                                                   std::memory_order_relaxed);
+    if (mult > 1)
+      aecLog("[LSAEC] track %d is a %dx-length loop (%lld frames vs base "
+             "%lld)\n",
+             trackIndex, mult, (long long)frames, (long long)baseP);
+  }
+
   TrackRegJob job;
   job.trackIndex = trackIndex;
   job.audio.assign(audioMono, audioMono + frames);
@@ -690,6 +732,20 @@ void SynchronousEchoTemplate::computeTrackContribution(
                         ? std::min(static_cast<size_t>(periodSigned), rawLen)
                         : rawLen;
 
+  // A track spanning >= 2 fold periods would have its DISTINCT periods
+  // averaged by the fold below — subtracting that average is wrong half
+  // the time (worse than nothing). Leave it uncomputed: the composite
+  // period multiplier grows the template to this track's true period and
+  // EMA/reseed cancel it there; the exact edit returns on the next
+  // recompute once the active period matches (P == rawLen -> identity).
+  if (rawLen >= 2 * P) {
+    tc.E.clear();
+    aecLog("[LSAEC] track %d contribution deferred: %zu frames spans "
+           "multiple %zu-frame periods (composite path covers it)\n",
+           trackIndex, rawLen, P);
+    return;
+  }
+
   std::vector<float> folded(P, 0.0f);
   for (size_t i = 0; i < rawLen; ++i)
     folded[i % P] += audio[i];
@@ -746,12 +802,31 @@ void SynchronousEchoTemplate::computeTrackContribution(
       mono[phi] *= scale;
   }
 
-  // Expand mono -> interleaved, matching mTemplate's layout (E[phi*channels+ch]).
-  tc.E.assign(P * mChannels, 0.0f);
-  for (size_t phi = 0; phi < P; ++phi) {
+  // Expand mono -> interleaved, matching mTemplate's layout
+  // (E[phi*channels+ch]) at the CURRENT active (effective) period. A 1x
+  // track under a grown composite period (a 2x/4x overdub is playing)
+  // repeats within it — TILE the P-length contribution up to activeP so
+  // setTrackActive's length check matches and the exact edit still lands.
+  // A MULTI-period track (rawLen > activeP, i.e. registered before the
+  // period grew, or clamped by capacity) cannot be represented at activeP:
+  // leave it uncomputed — the composite EMA/reseed path covers it
+  // (harmless, just not instant), instead of applying a folded average
+  // whose subtraction is wrong half the time.
+  const size_t activeP = static_cast<size_t>(
+      std::max<int64_t>(mActiveLoopFramesAtomic.load(std::memory_order_relaxed),
+                        static_cast<int64_t>(P)));
+  if (activeP % P != 0) {
+    tc.E.clear();
+    aecLog("[LSAEC] track %d contribution NOT applied: length %zu doesn't "
+           "divide active period %zu\n",
+           trackIndex, P, activeP);
+    return;
+  }
+  tc.E.assign(activeP * mChannels, 0.0f);
+  for (size_t phi = 0; phi < activeP; ++phi) {
     const size_t base = phi * mChannels;
     for (unsigned int ch = 0; ch < mChannels; ++ch)
-      tc.E[base + ch] = mono[phi];
+      tc.E[base + ch] = mono[phi % P];
   }
   tc.computed.store(true, std::memory_order_release);
   aecLog("[LSAEC] track %d contribution computed: raw=%zu folded-to-P=%zu "
@@ -830,6 +905,27 @@ void SynchronousEchoTemplate::applyTrackActive(int trackIndex, bool active) {
   tc.active = active;
   aecLog("[LSAEC] track %d exact-subtraction toggle: active=%d gain=%.3f\n",
          trackIndex, active ? 1 : 0, tc.appliedGain);
+  // The exact edit removes only the IR-PREDICTED (linear) part of this
+  // track's echo — measured on real full-volume captures, that's only ~1/4
+  // of the bleed; the composite template has LEARNED the rest (nonlinear,
+  // speaker-distorted) and keeps subtracting it after a mute: the audible
+  // "muted track still in the template" ghost. Two-part cleanup, both made
+  // safe by the beats-current seed gate:
+  //  1. Trim confidence so per-pass EMA unlearns the nonlinear remainder
+  //     at a re-heated alpha (~0.2 vs the converged 0.06) for the next
+  //     couple passes, then anneals back.
+  //  2. Self-arm a reseed of the NEW mix — callers still skip their own
+  //     notify (the old livelock reason), but one recapture per applied
+  //     toggle is cheap and the landing gate guarantees it only replaces
+  //     the template if it actually beats the ghost-y current state.
+  {
+    const size_t n =
+        std::min(static_cast<size_t>(mActiveLoopFrames), mCapacityFrames);
+    for (size_t phi = 0; phi < n; ++phi)
+      mConfidence[phi] *= 0.35f;
+    mConfidenceSum *= 0.35;
+    notifyReferenceChanged();
+  }
 }
 
 bool SynchronousEchoTemplate::setTrackGain(int trackIndex, float gain) {
@@ -882,15 +978,27 @@ void SynchronousEchoTemplate::drainPendingTrackEdits() {
   // Deferred-activation reconcile: a contribution that finished computing
   // AFTER its setTrackActive call applies here, on the audio thread, the
   // callback after the worker completes. O(kMaxTracks) atomic loads.
+  int maxMult = 1;
   for (int i = 0; i < kMaxTracks; ++i) {
     TrackContribution &tc = mTrackContributions[i];
     const int idx = tc.slotIndex.load(std::memory_order_acquire);
-    if (idx < 0 || !tc.computed.load(std::memory_order_acquire))
+    if (idx < 0)
+      continue;
+    // Composite-period multiplier: the LCM of ACTIVE (playing) tracks'
+    // periods. Multiples are powers of two (x1/2/4/8 picker), so LCM ==
+    // max. Tracked regardless of `computed` — the AUDIO is periodic at the
+    // track's length whether or not its exact-edit contribution is ready.
+    if (tc.wantActive.load(std::memory_order_relaxed)) {
+      const int m = tc.lengthMultiple.load(std::memory_order_relaxed);
+      if (m > maxMult) maxMult = m;
+    }
+    if (!tc.computed.load(std::memory_order_acquire))
       continue;
     const bool want = tc.wantActive.load(std::memory_order_relaxed);
     if (want != tc.active)
       applyTrackActive(idx, want);
   }
+  mDesiredMultiplier = maxMult;
   std::unique_lock<std::mutex> lk(mPendingEditsMutex, std::try_to_lock);
   if (!lk.owns_lock() || mPendingTrackEdits.empty())
     return;
@@ -956,8 +1064,39 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
   // hold is up, so nothing new interleaves).
   {
     const bool hold = SpectralGovernor::instance().nearEndHold();
-    if (hold && !mPrevNearEndHold)
-      mRewindRemaining = static_cast<int64_t>(mUndoCount);
+    if (hold && !mPrevNearEndHold) {
+      // Rate limit (3.5 Hz warble fix): one full rollback per cooldown.
+      // A hold edge inside the cooldown still freezes learning (the hold
+      // gates `learn` upstream) but does NOT roll back state — it was the
+      // unconditional per-edge rollback that turned governor chatter into
+      // a ~10 dB cancellation square wave. The genuine use (undo the
+      // detector-latency window of a real performer onset) fires at most
+      // once per cooldown, and the E3 per-block spike freeze still guards
+      // the blocks in between.
+      const int64_t kRewindCooldownFrames =
+          static_cast<int64_t>(mSampleRate) * 2; // 2 s
+      // PARTIAL rewind (transient-bleed fix): the rewind exists to undo the
+      // DETECTOR-LATENCY window — the ~50-110 ms of performer onset learned
+      // before the (debounced) hold engaged. Rolling back the full 400 ms
+      // ring on every hold was measured live undoing the freshest learning
+      // ~every cooldown during busy playing — exactly the transient-phase
+      // refinements — so hits never stayed converged ("bleed on
+      // transients"). 150 ms covers the worst engage latency with margin
+      // while preserving the rest of the recently-learned template.
+      const int64_t kRewindMaxEntries =
+          (static_cast<int64_t>(mSampleRate) * 150) / 1000;
+      if (blockStartFrame - mLastRewindFrame >= kRewindCooldownFrames) {
+        mRewindRemaining =
+            std::min(static_cast<int64_t>(mUndoCount), kRewindMaxEntries);
+        mLastRewindFrame = blockStartFrame;
+        ++mRewindCount;
+        aecLog("[LSAEC] double-talk rewind #%u armed (%lld of %lld entries)\n",
+               mRewindCount, (long long)mRewindRemaining,
+               (long long)mUndoCount);
+      } else {
+        aecLog("[LSAEC] rewind SUPPRESSED (cooldown) — freeze only\n");
+      }
+    }
     mPrevNearEndHold = hold;
     if (mRewindRemaining > 0) {
       constexpr int64_t kRewindChunk = 4096;
@@ -977,6 +1116,25 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
       if (mRewindRemaining == 0)
         aecLog("[LSAEC] double-talk rewind complete\n");
     }
+  }
+
+  // Composite-period multiplier: the engine reports the BASE loop period,
+  // but the composite echo repeats at the LCM of the ACTIVE tracks'
+  // lengths (max power-of-two multiple x base — see lengthMultiple).
+  // Running at the base period made a 2x overdub's echo alternate halves
+  // every pass: the per-phase average cancelled neither ("second loop
+  // doesn't cancel at all"). Halving under capacity pressure keeps the
+  // effective period an exact multiple of every SHORTER track's period, so
+  // those still cancel; only the over-long track degrades.
+  mEngineLoopFrames.store(loopFrames, std::memory_order_relaxed);
+  if (loopFrames > 0 && mDesiredMultiplier > 1) {
+    int mult = mDesiredMultiplier;
+    while (mult > 1 &&
+           static_cast<size_t>(loopFrames) * static_cast<size_t>(mult) >
+               mCapacityFrames)
+      mult >>= 1;
+    if (mult > 1)
+      loopFrames *= mult;
   }
 
   // No loop yet, or period beyond capacity -> passthrough. A period beyond
@@ -1144,6 +1302,8 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
         mSeedFitActive = true;
         mSeedFitNum = 0.0;
         mSeedFitDen = 0.0;
+        mSeedFitMicSq = 0.0;
+        mSeedFitCurSq = 0.0;
         aecLog("[SEED] fit pass started\n");
       }
       if (!mSeedFitActive && mSeedFitDone) {
@@ -1275,14 +1435,20 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
     // Seed self-scaling fit: accumulate <mic, seed> and <seed, seed> at this
     // frame's phase for one full pass, then derive the trust scale alpha.
     if (mSeedFitActive) {
-      float micMono = 0.0f;
-      for (unsigned int ch = 0; ch < channels; ++ch)
-        micMono += mRawResidual[f * channels + ch] +
-                   mTemplate[base + (ch % channels)]; // mic = raw + est
-      micMono /= static_cast<float>(channels);
+      float residMono = 0.0f; // current template's residual (mic - E), mono
+      float estMono = 0.0f;
+      for (unsigned int ch = 0; ch < channels; ++ch) {
+        residMono += mRawResidual[f * channels + ch];
+        estMono += mTemplate[base + (ch % channels)];
+      }
+      residMono /= static_cast<float>(channels);
+      estMono /= static_cast<float>(channels);
+      const float micMono = residMono + estMono; // mic = raw + est
       const float sv = mSeedOutput[static_cast<size_t>(phi)];
       mSeedFitNum += static_cast<double>(micMono) * sv;
       mSeedFitDen += static_cast<double>(sv) * sv;
+      mSeedFitMicSq += static_cast<double>(micMono) * micMono;
+      mSeedFitCurSq += static_cast<double>(residMono) * residMono;
       if (++mSeedFitFrames >= mActiveLoopFrames) {
         float alpha = (mSeedFitDen > 1e-9)
                           ? static_cast<float>(mSeedFitNum / mSeedFitDen)
@@ -1291,7 +1457,21 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
         mSeedFitActive = false;
         mSeedFitFrames = 0;
         mSeedLastAlpha.store(alpha, std::memory_order_relaxed);
-        aecLog("[SEED] fit alpha=%.3f\n", alpha);
+        // Beats-current gate (see mSeedFitMicSq doc in the header): the
+        // seed's predicted residual after applying alpha*seed, in closed
+        // form from the fit sums, vs what the CURRENT template already
+        // achieves over the same pass. Landing stamp-REPLACES E[phi] at
+        // kSeedConfidence, so a seed that doesn't clearly beat the present
+        // state is a pure downgrade — measured collapsing a 15 dB converged
+        // template to ~2 dB on a real overdub before this gate existed.
+        const double predicted =
+            mSeedFitMicSq -
+            (mSeedFitNum * mSeedFitNum) / std::max(mSeedFitDen, 1e-9);
+        const double current = mSeedFitCurSq;
+        const bool beatsCurrent = predicted < current * 0.8; // >= ~1 dB better
+        aecLog("[SEED] fit alpha=%.3f predResid=%.3g curResid=%.3g%s\n",
+               alpha, predicted, current,
+               beatsCurrent ? "" : " (does NOT beat current)");
         if (std::fabs(alpha) < 0.05f) {
           // Seed doesn't correlate with the mic (misaligned / no echo):
           // discard rather than inject noise. Keep the prior track scale.
@@ -1306,6 +1486,16 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
             mReferenceChangePending.store(true, std::memory_order_relaxed);
             aecLog("[SEED] retry %d/3 armed\n", mSeedRetryCount);
           }
+        } else if (!beatsCurrent) {
+          // The template we already have outperforms this seed. Discard
+          // WITHOUT retrying: the capture wasn't unusable — the state is
+          // simply already better than what a reseed can offer (a converged
+          // EMA template on a coherence-starved mix). Retrying would churn
+          // the same losing comparison every pass.
+          mSeedOutputReady.store(false, std::memory_order_relaxed);
+          mSeedBusy = false;
+          mSeedDiscards.fetch_add(1, std::memory_order_relaxed);
+          aecLog("[SEED] DISCARDED (worse than current template)\n");
         } else {
           mSeedFitAlpha = alpha;
           mIrFitScale = alpha; // per-track edits share the IR's fitted scale
@@ -1418,10 +1608,18 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
   // slow decay-to-uncancelled death spiral). Real double-talk is INcoherent:
   // boost decays and full freeze protection returns.
   {
+    // Schmitt trigger on the interlock threshold: the raw `< 2.0f` compare
+    // chattered as the governor's boost seesawed ±0.19/tick across 2.0,
+    // toggling freeze protection at up to the 4.76 Hz governor tick (one
+    // leg of the 3.5 Hz warble). Hot at >= 2.25, cold again at <= 1.75.
+    if (learnBoost >= 2.25f)
+      mBoostInterlockHot = true;
+    else if (learnBoost <= 1.75f)
+      mBoostInterlockHot = false;
     const int64_t phi0 =
         ((blockStartFrame - loopStartFrame) % P + P) % P;
     const float blockConf = mConfidence[static_cast<size_t>(phi0)];
-    if (learnBoost < 2.0f && mLearnedBlocks >= kSettleBlocks &&
+    if (!mBoostInterlockHot && mLearnedBlocks >= kSettleBlocks &&
         blockConf >= kFreezeMinConf &&
         blockResid >
             kSpikeRatio * (static_cast<double>(mResidBaseline) + kEps)) {

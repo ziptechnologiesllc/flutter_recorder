@@ -35,6 +35,24 @@ constexpr float kControllerDt = 0.21f; // update cadence (10 windows)
 
 // Minimum windows before the controller trusts the spectra.
 constexpr int kWarmupWindows = 16;
+
+// ---- Hold-loop damping (the 3.5 Hz warble fix) -----------------------------
+// The nearEndHold path was a self-exciting relaxation oscillator: hold edge ->
+// template rewind -> residual Syy surge -> incoherent metric over a floor
+// pinned at the converged minimum -> re-trip 8x -> hold edge again, period
+// ~0.28-0.42 s phase-locked to the controller tick (measured on a real
+// overdub: 3.56 Hz, 9.5 dB warble). Three legs are broken here (the fourth,
+// the per-edge template rewind, is rate-limited template-side):
+//   - engage debounce: one 21 ms transient window can no longer trip the hold
+//   - minimum hold time: no more single-tick (~0.21 s) hold pulses
+//   - free-state floor tracking: the quiet-floor must follow the AMBIENT
+//     incoherent level (at full speaker volume most bleed is nonlinear ->
+//     genuinely ref-incoherent -> a floor pinned at a converged minimum makes
+//     ordinary musical dynamics read as an 8x "performer onset")
+constexpr int kEngageDebounceWindows = 2; // consecutive 21 ms windows over 8x
+constexpr int kMinHoldTicks = 2;          // >= ~0.42 s held before release
+constexpr double kFloorRiseFree = 0.05;   // floor tracks ambient when free
+constexpr double kFloorRiseHeld = 0.004;  // barely creeps while held
 } // namespace
 
 SpectralGovernor &SpectralGovernor::instance() {
@@ -120,13 +138,21 @@ void SpectralGovernor::workerLoop() {
       windowsSinceControl = 0;
       controllerUpdate();
     }
-    if (++windowsSinceLog >= 96) { // ~2 s — worker thread, NOT the RT thread
+    if (++windowsSinceLog >= 10) { // ~0.21 s = every controller tick.
+      // Per-tick flutter trace (worker thread, NOT the RT thread): dense
+      // enough (~4.8 lines/s) to see a hold/boost oscillation directly —
+      // the Dart telemetry poll (0.5 s of a 0.25 s snapshot) aliases a
+      // multi-Hz toggle into apparent stability. Drop back to the 2 s
+      // heartbeat (>= 96) once the warble fix is field-confirmed.
       windowsSinceLog = 0;
-      fprintf(stderr, "[GOV] leak=%.2f boost=%.2f nearEnd=%d(x%.1f)\n",
+      fprintf(stderr,
+              "[GOV-T] leak=%.2f boost=%.2f hold=%d ratio=%.1f floor=%.3g "
+              "held=%d\n",
               mLeak.load(std::memory_order_relaxed),
               mBoost.load(std::memory_order_relaxed),
               mNearEndHold.load(std::memory_order_relaxed) ? 1 : 0,
-              mNearEndRatio.load(std::memory_order_relaxed));
+              mNearEndRatio.load(std::memory_order_relaxed),
+              mIncoherentFloor, mTicksHeld);
     }
   }
 }
@@ -140,6 +166,7 @@ void SpectralGovernor::processWindow(const float *ref, const float *res) {
   FFT::fft1024(fs);
 
   // Accumulate per log-band Welch EMAs.
+  double rawRefPow = 0.0; // this window's broadband ref power (pre-EMA)
   for (int b = 0; b < kBands; ++b) {
     const double t0 = static_cast<double>(b) / kBands;
     const double t1 = static_cast<double>(b + 1) / kBands;
@@ -157,12 +184,27 @@ void SpectralGovernor::processWindow(const float *ref, const float *res) {
       sre += yr * xr + yi * xi;
       sim += yi * xr - yr * xi;
     }
+    rawRefPow += sxx;
     mSxx[b] += kWelchAlpha * (sxx - mSxx[b]);
     mSyy[b] += kWelchAlpha * (syy - mSyy[b]);
     mSxyRe[b] += kWelchAlpha * (sre - mSxyRe[b]);
     mSxyIm[b] += kWelchAlpha * (sim - mSxyIm[b]);
   }
   ++mWindowsSeen;
+
+  // Reference-onset tracker (transient-bleed fix): when the LOOP's own
+  // content has a transient, the residual is EXPECTED to spike (the
+  // template's imperfectly-cancelled hit + the Welch coherence estimate
+  // lagging the onset) — that is not a performer. Holding/rewinding on the
+  // loop's own hits was measured live undoing transient-phase learning
+  // every cooldown, so hits never stayed converged. A performer's onset
+  // does NOT appear in the reference, so genuine double-talk still engages
+  // at the normal debounce.
+  if (mRefPowPrev > 0.0 && rawRefPow > 2.0 * mRefPowPrev)
+    mRefOnsetCooldown = 6; // ~128 ms of onset-aware skepticism
+  else if (mRefOnsetCooldown > 0)
+    --mRefOnsetCooldown;
+  mRefPowPrev += 0.5 * (rawRefPow - mRefPowPrev);
 
   // ---- FAST double-talk onset (per 21ms window, not per 0.21s control
   // tick). The slow path's latency meant the ONSET of the performer's
@@ -187,10 +229,27 @@ void SpectralGovernor::processWindow(const float *ref, const float *res) {
     }
     mIncoherentFast += 0.25 * (incNow - mIncoherentFast);
     const double ratio = mIncoherentFast / (mIncoherentFloor + 1e-20);
-    if (!mNearEndHold.load(std::memory_order_relaxed) && ratio > 8.0) {
-      mNearEndHold.store(true, std::memory_order_relaxed);
-      mNearEndRatio.store(static_cast<float>(ratio),
-                          std::memory_order_relaxed);
+    if (!mNearEndHold.load(std::memory_order_relaxed)) {
+      // Debounce: require the ratio to hold for kEngageDebounceWindows
+      // consecutive windows (~43 ms) so a single 21 ms transient — or the
+      // Welch estimator's own lag after a template edit — can't trip the
+      // hold. Genuine onsets still engage well inside the 400 ms undo
+      // window that provides the retroactive protection.
+      // During a reference onset (the loop's own hit), demand a much longer
+      // sustained ratio before engaging — see the onset tracker above.
+      const int needed =
+          mRefOnsetCooldown > 0 ? 5 : kEngageDebounceWindows;
+      if (ratio > 8.0) {
+        if (++mEngageStreak >= needed) {
+          mNearEndHold.store(true, std::memory_order_relaxed);
+          mNearEndRatio.store(static_cast<float>(ratio),
+                              std::memory_order_relaxed);
+          mTicksHeld = 0;
+          mEngageStreak = 0;
+        }
+      } else {
+        mEngageStreak = 0;
+      }
     }
   }
 }
@@ -227,20 +286,34 @@ void SpectralGovernor::controllerUpdate() {
   // and hold template learning whenever the current value sits far above
   // it. Hysteresis: engage at 8x floor, release at 4x.
   if (wsum > 0) {
+    const bool heldNow = mNearEndHold.load(std::memory_order_relaxed);
     if (mIncoherentFloor < 0.0) {
       mIncoherentFloor = incoherent;
     } else if (incoherent < mIncoherentFloor) {
       mIncoherentFloor += 0.3 * (incoherent - mIncoherentFloor);
     } else {
-      mIncoherentFloor += 0.004 * (incoherent - mIncoherentFloor);
+      // Rise rate depends on hold state: while FREE the floor must track the
+      // ambient incoherent level (full-volume nonlinear echo is genuinely
+      // ref-incoherent — a floor pinned at a converged minimum turned normal
+      // musical dynamics into fake 8x "onsets"); while HELD it barely creeps
+      // so sustained jamming can't become the baseline.
+      mIncoherentFloor += (heldNow ? kFloorRiseHeld : kFloorRiseFree) *
+                          (incoherent - mIncoherentFloor);
     }
     const double ratio = incoherent / (mIncoherentFloor + 1e-20);
     mNearEndRatio.store(static_cast<float>(ratio), std::memory_order_relaxed);
-    const bool held = mNearEndHold.load(std::memory_order_relaxed);
-    if (!held && ratio > 8.0)
+    if (heldNow)
+      ++mTicksHeld;
+    if (!heldNow && ratio > 8.0) {
       mNearEndHold.store(true, std::memory_order_relaxed);
-    else if (held && ratio < 4.0)
+      mTicksHeld = 0;
+    } else if (heldNow && ratio < 4.0 && mTicksHeld >= kMinHoldTicks) {
+      // Minimum hold time: releases were quantized to a single controller
+      // tick (~0.21 s), which set the warble's period. Two ticks minimum
+      // caps the toggle rate at ~1.2 Hz worst-case; a genuine short stab
+      // just holds learning a beat longer — harmless.
       mNearEndHold.store(false, std::memory_order_relaxed);
+    }
   }
 
   float boost = mBoost.load(std::memory_order_relaxed);
