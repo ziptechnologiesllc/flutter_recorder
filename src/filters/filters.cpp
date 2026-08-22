@@ -283,6 +283,16 @@ int Filters::getAecFilterLength() const {
 
 // Sample-accurate AEC synchronization
 void Filters::setAecCaptureFrameCount(size_t captureFrameCount) {
+  // RT-called from data_callback every buffer: same try-lock discipline as
+  // processAllFilters. The previous UNLOCKED vector walk raced the filter
+  // swap during calibration-apply and dereferenced a dying entry (SIGSEGV
+  // in AdaptiveEchoCancellation::setCaptureFrameCount on the AudioTrack
+  // thread, first seen the moment a completed calibration was applied on
+  // the TB330FU). Skip on contention — the counter is re-published on the
+  // very next callback.
+  std::unique_lock<std::mutex> lock(mFiltersMutex, std::try_to_lock);
+  if (!lock.owns_lock())
+    return;
   int idx = isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
     return;
@@ -366,12 +376,21 @@ const std::vector<float> &Filters::getAecAlignedMic() const {
   return aec->getAlignedMic();
 }
 
-void Filters::notifyAecReferenceChanged() {
+bool Filters::notifyAecReferenceChanged() {
+  // Called from API threads AND from the RT callback (duplex xrun watch),
+  // so it takes the same try-lock as the other RT paths instead of walking
+  // `filters` unlocked. Returns false on lock contention so an RT caller
+  // can retry next callback (the API-side FFI caller ignores the result —
+  // a lost API-side notify is recovered by ordinary template relearning).
+  std::unique_lock<std::mutex> lock(mFiltersMutex, std::try_to_lock);
+  if (!lock.owns_lock())
+    return false;
   int idx = isFilterActive(adaptiveEchoCancellation);
   if (idx < 0)
-    return;
+    return true; // no AEC filter — nothing to reseed, don't retry
   static_cast<AdaptiveEchoCancellation *>(filters[idx].get()->filter.get())
       ->notifyReferenceChanged();
+  return true;
 }
 
 void Filters::registerAecTrackAudio(int trackIndex, const float *audioMono,

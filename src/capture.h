@@ -68,6 +68,13 @@ public:
   /// when this is true.
   bool wasDuplexDenied() const { return mDuplexDenied; }
 
+  /// True when the duplex device runs in SHARED sharing mode (no MMAP /
+  /// exclusive on this device) but was kept because the HAL granted
+  /// fast-path-sized bursts. Slave mode + AEC remain active; the duplex
+  /// ring's xrun counters (getDuplexXruns) should be watched for AEC
+  /// re-seed triggers.
+  bool isSharedDuplex() const { return mSharedDuplex; }
+
   CaptureErrors start();
 
   void stop();
@@ -142,6 +149,11 @@ public:
 
   Filters *mFilters = nullptr; // Initialize to null for thread-safety
 
+  /// Last duplex-ring xrun total seen by the capture callback (public: the
+  /// free-function data_callback reads/writes it, like mFilters); a change
+  /// re-arms the LSAEC convergence seed because the alignment shifted.
+  uint64_t mLastSeenDuplexXruns = 0;
+
   /// @brief Start capturing samples for AEC calibration
   /// @param maxSamples Maximum number of mono samples to capture
   void startCalibrationCapture(size_t maxSamples);
@@ -213,6 +225,10 @@ private:
 
   /// true when the capture device is initialized.
   bool mInited;
+
+  /// true when the duplex device is running in SHARED mode with acceptable
+  /// (fast-path) burst sizes — exclusive unavailable, duplex kept anyway.
+  bool mSharedDuplex = false;
 
   /// true when duplex was requested but capture fell to shared mode
   /// (exclusive denied by HAL). Dart should use standard SoLoud instead of

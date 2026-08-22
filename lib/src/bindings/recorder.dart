@@ -588,6 +588,14 @@ abstract class RecorderImpl {
 
   bool wasDuplexDenied();
 
+  /// True when duplex runs in SHARED mode (no MMAP/exclusive on the device)
+  /// but was kept because the HAL granted fast-path-sized bursts.
+  bool isSharedDuplex();
+
+  /// Cumulative duplex-ring xrun count; each event shifts AEC reference
+  /// alignment, so watchers should re-seed the echo template when it moves.
+  int getDuplexXruns();
+
   // ///////////////////////
   //   Phase 2e: Ableton Link
   // ///////////////////////

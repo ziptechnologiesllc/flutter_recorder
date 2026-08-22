@@ -2383,6 +2383,26 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_wasDuplexDenied =
       _flutter_recorder_wasDuplexDeniedPtr.asFunction<int Function()>();
 
+  int flutter_recorder_isSharedDuplex() {
+    return _flutter_recorder_isSharedDuplex();
+  }
+
+  late final _flutter_recorder_isSharedDuplexPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+          'flutter_recorder_isSharedDuplex');
+  late final _flutter_recorder_isSharedDuplex =
+      _flutter_recorder_isSharedDuplexPtr.asFunction<int Function()>();
+
+  int flutter_recorder_getDuplexXruns() {
+    return _flutter_recorder_getDuplexXruns();
+  }
+
+  late final _flutter_recorder_getDuplexXrunsPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint64 Function()>>(
+          'flutter_recorder_getDuplexXruns');
+  late final _flutter_recorder_getDuplexXruns =
+      _flutter_recorder_getDuplexXrunsPtr.asFunction<int Function()>();
+
   /// Enable / disable Ableton Link participation. NOT realtime-safe.
   void flutter_recorder_link_setEnabled(
     int enabled,

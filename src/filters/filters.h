@@ -95,7 +95,9 @@ public:
   // reference, reconvolve with the calibrated room IR) so cancellation
   // catches up in ~1 pass instead of several. Cheap/safe to call often —
   // internally gated so it's a no-op while a seed job is already in flight.
-  void notifyAecReferenceChanged();
+  // Returns false when the filters lock was contended (RT callers retry
+  // next callback); true when delivered or when no AEC filter is active.
+  bool notifyAecReferenceChanged();
 
   // LSAEC per-track exact subtraction — see SynchronousEchoTemplate's doc
   // comment for the full rationale. registerAecTrackAudio: call once a

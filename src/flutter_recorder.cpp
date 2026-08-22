@@ -793,6 +793,30 @@ flutter_recorder_init(int deviceID, int pcmFormat, unsigned int sampleRate,
                                    (PCMFormat)pcmFormat, sampleRate, channels,
                                    androidInputPreset, captureOnly != 0);
 
+  // Rebuild Filters from the NEGOTIATED device config when it differs from
+  // the requested one. Android's single-init requests sampleRate=0 /
+  // channels=auto ("let AAudio choose"), and the block above dutifully built
+  // Filters with sampleRate 0 — which sized the LSAEC echo template's
+  // capacity at 0*kMaxSeconds = 0 frames, so EVERY loop tripped
+  // isOverCapacity() and cancellation sat in passthrough on Android forever
+  // (the settings panel's "loop period > 16s" hint was this, not a real
+  // over-long loop). Safe to swap here: start() hasn't been called yet, so
+  // no audio callback holds the old pointer.
+  if (res == captureNoError) {
+    const unsigned int actualRate = capture.getSampleRate();
+    const unsigned int actualCh = capture.getCaptureChannels();
+    if (actualRate > 0 && actualCh > 0 &&
+        (mFilters.get()->mSamplerate != actualRate ||
+         mFilters.get()->mChannels != actualCh)) {
+      LOOPER_LOG("init: rebuilding Filters for negotiated config %uHz/%uch "
+                 "(requested %uHz/%uch)",
+                 actualRate, actualCh, sampleRate, channels);
+      mFilters.reset();
+      mFilters = std::make_unique<Filters>(actualRate, actualCh);
+      capture.mFilters = mFilters.get();
+    }
+  }
+
   return res;
 }
 
@@ -1395,6 +1419,23 @@ FFI_PLUGIN_EXPORT int flutter_recorder_isSlaveAudioReady() {
 
 FFI_PLUGIN_EXPORT int flutter_recorder_wasDuplexDenied() {
   return capture.wasDuplexDenied() ? 1 : 0;
+}
+
+FFI_PLUGIN_EXPORT int flutter_recorder_isSharedDuplex() {
+  return capture.isSharedDuplex() ? 1 : 0;
+}
+
+// Cumulative duplex-ring xrun count (capture overruns + playback underruns,
+// see the CLOUDLOOP PATCH counters in miniaudio.h). Each event silently
+// shifted the mic-to-AEC-reference alignment before the patch; the app polls
+// this and re-seeds the LSAEC template when it moves.
+extern volatile ma_uint64 g_ma_duplex_capture_overruns;
+extern volatile ma_uint64 g_ma_duplex_playback_underruns;
+extern volatile ma_uint64 g_ma_duplex_recenter_sheds;
+FFI_PLUGIN_EXPORT uint64_t flutter_recorder_getDuplexXruns() {
+  return (uint64_t)(g_ma_duplex_capture_overruns +
+                    g_ma_duplex_playback_underruns +
+                    g_ma_duplex_recenter_sheds);
 }
 
 /////////////////////////

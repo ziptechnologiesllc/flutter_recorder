@@ -245,7 +245,12 @@ static CalibrationResult analyzeClickCalibration(
   };
   std::vector<ClickMatch> matches;
   std::vector<int> delays;
-  size_t maxDelaySearch = sampleRate / 10;  // 100ms max delay
+  // 500ms: matches DelayEstimator's search window. The old 100ms cap made
+  // click matching structurally blind to real Android paths — on the
+  // TB330FU's shared duplex the (pre-fix) duplex-ring residency put the
+  // true echo at 372ms with correlation 0.93, and zero clicks matched, so
+  // an accurate measurement was rejected as "no echo found".
+  size_t maxDelaySearch = sampleRate / 2;
 
   for (size_t refPeak : refPeaks) {
     // Find closest mic peak after ref peak

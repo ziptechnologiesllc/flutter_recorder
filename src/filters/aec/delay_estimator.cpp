@@ -1,7 +1,10 @@
 #include "delay_estimator.h"
+#include "circular_convolution.h" // aec_conv::fftRadix2 for O(N log N) correlation
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <iostream>
+#include <vector>
 
 // External logging function defined in calibration.cpp
 extern void aecLog(const char *fmt, ...);
@@ -144,6 +147,33 @@ int DelayEstimator::estimateDelay(const std::vector<float> &ref_signal,
   // Step 4: Search BOTH positive and negative lags
   // Like Python's scipy.signal.correlate(mode='full')
   // Use ABSOLUTE correlation for peak finding (handles phase inversion)
+  //
+  // FFT-BASED: the direct per-lag loops computed n MACs for each of
+  // 2*max_lag lags — ~8e9 double MACs for a 3.5s capture with the 500ms
+  // Android search window, which measured ~60 SECONDS per call on a Helio
+  // G88 little core (and analyzeAligned calls this twice). Three FFTs of
+  // the zero-padded signals produce the IDENTICAL lag sums in O(N log N):
+  //   c[tau]   = sum_i ref[i]·mic[i+tau]        (mic delayed — positive lag)
+  //   c[N-tau] = sum_i ref[i+tau]·mic[i]        (negative lag)
+  // Zero-padding to N >= n + max_lag keeps circular wraparound out of the
+  // scanned range; per-lag 1/len normalization is applied during the scan,
+  // matching the direct code exactly.
+  size_t need = n + static_cast<size_t>(max_lag);
+  size_t N = 1;
+  while (N < need)
+    N <<= 1;
+  std::vector<std::complex<double>> fr(N), fm(N);
+  for (size_t i = 0; i < n; ++i) {
+    fr[i] = refNorm[i];
+    fm[i] = micNorm[i];
+  }
+  aec_conv::fftRadix2(fr, false);
+  aec_conv::fftRadix2(fm, false);
+  for (size_t i = 0; i < N; ++i) {
+    fr[i] = std::conj(fr[i]) * fm[i];
+  }
+  aec_conv::fftRadix2(fr, true);
+
   double maxAbsCorr = 0;
   int bestLag = 0;
   double bestCorrSigned = 0;
@@ -153,12 +183,7 @@ int DelayEstimator::estimateDelay(const std::vector<float> &ref_signal,
     size_t len = n - tau;
     if (len < 128) break;
 
-    double sum = 0;
-    for (size_t i = 0; i < len; ++i) {
-      sum += refNorm[i] * micNorm[i + tau];
-    }
-    double corr = sum / len;
-
+    double corr = fr[tau].real() / static_cast<double>(len);
     if (std::abs(corr) > maxAbsCorr) {
       maxAbsCorr = std::abs(corr);
       bestCorrSigned = corr;
@@ -171,16 +196,11 @@ int DelayEstimator::estimateDelay(const std::vector<float> &ref_signal,
     size_t len = n - tau;
     if (len < 128) break;
 
-    double sum = 0;
-    for (size_t i = 0; i < len; ++i) {
-      sum += refNorm[i + tau] * micNorm[i];
-    }
-    double corr = sum / len;
-
+    double corr = fr[N - tau].real() / static_cast<double>(len);
     if (std::abs(corr) > maxAbsCorr) {
       maxAbsCorr = std::abs(corr);
       bestCorrSigned = corr;
-      bestLag = -tau;  // Negative lag
+      bestLag = -tau; // Negative lag
     }
   }
 

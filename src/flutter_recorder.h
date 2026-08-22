@@ -540,6 +540,15 @@ FFI_PLUGIN_EXPORT void flutter_recorder_freeRecordedAudio();
 
 FFI_PLUGIN_EXPORT int flutter_recorder_wasDuplexDenied();
 
+// True when the duplex device runs SHARED (no MMAP/exclusive on this device)
+// but was kept because the HAL granted fast-path-sized bursts.
+FFI_PLUGIN_EXPORT int flutter_recorder_isSharedDuplex();
+
+// Cumulative duplex-ring xrun count (capture overruns + playback underruns).
+// Each event shifts mic-to-AEC-reference alignment; poll and re-seed LSAEC
+// when it moves.
+FFI_PLUGIN_EXPORT uint64_t flutter_recorder_getDuplexXruns();
+
 /////////////////////////
 // PHASE 2e: Ableton Link control
 /////////////////////////

@@ -20573,6 +20573,24 @@ static void ma_device__send_frames_to_client(ma_device* pDevice, ma_uint32 frame
     }
 }
 
+/* CLOUDLOOP PATCH: duplex ring xrun observability. Stock miniaudio drops
+   capture frames on overrun and break-exits playback on underrun SILENTLY —
+   each event shifts the mic-to-reference alignment by up to a burst with no
+   way for the app to notice, which corrupts loop-synchronous AEC. These
+   counters let the app detect the desync and re-seed its echo template. */
+volatile ma_uint64 g_ma_duplex_capture_overruns = 0;
+volatile ma_uint64 g_ma_duplex_playback_underruns = 0;
+/* CLOUDLOOP PATCH: cumulative client-format frames through the duplex ring —
+   writer (capture handler) vs reader (playback handler). A persistent rate
+   imbalance here is the root of time-compressed ("chipmunk") recordings. */
+volatile ma_uint64 g_ma_duplex_frames_written = 0;
+volatile ma_uint64 g_ma_duplex_frames_read = 0;
+/* CLOUDLOOP PATCH: count of latency re-centering sheds (old frames dropped
+   from the duplex ring when occupancy drifts too high). Each shed shifts
+   mic alignment like an overrun does, so the app's AEC-reseed watch sums
+   this counter too. */
+volatile ma_uint64 g_ma_duplex_recenter_sheds = 0;
+
 static ma_result ma_device__handle_duplex_callback_capture(ma_device* pDevice, ma_uint32 frameCountInDeviceFormat, const void* pFramesInDeviceFormat, ma_pcm_rb* pRB)
 {
     ma_result result;
@@ -20600,6 +20618,7 @@ static ma_result ma_device__handle_duplex_callback_capture(ma_device* pDevice, m
 
         if (framesToProcessInClientFormat == 0) {
             if (ma_pcm_rb_pointer_distance(pRB) == (ma_int32)ma_pcm_rb_get_subbuffer_size(pRB)) {
+                g_ma_duplex_capture_overruns += 1;  /* CLOUDLOOP PATCH: count the drop instead of hiding it. */
                 break;  /* Overrun. Not enough room in the ring buffer for input frame. Excess frames are dropped. */
             }
         }
@@ -20612,6 +20631,7 @@ static ma_result ma_device__handle_duplex_callback_capture(ma_device* pDevice, m
             break;
         }
 
+        g_ma_duplex_frames_written += framesProcessedInClientFormat;  /* CLOUDLOOP PATCH */
         result = ma_pcm_rb_commit_write(pRB, (ma_uint32)framesProcessedInClientFormat);  /* Safe cast. */
         if (result != MA_SUCCESS) {
             ma_log_post(ma_device_get_log(pDevice), MA_LOG_LEVEL_ERROR, "Failed to commit capture PCM frames to ring buffer.");
@@ -20648,6 +20668,26 @@ static ma_result ma_device__handle_duplex_callback_playback(ma_device* pDevice, 
     */
     MA_ZERO_MEMORY(silentInputFrames, sizeof(silentInputFrames));
 
+    /* CLOUDLOOP PATCH: bound the ring's steady-state occupancy. After a
+       capture burst (startup flush, scheduling stall) the ring gets pinned
+       near FULL and never drains — the writer keeps it topped up and the
+       reader only consumes real-time — so every queued frame becomes
+       PERMANENT mic-path latency (measured: 129ms AEC echo path and a
+       107.7ms overdub misalignment on the TB330FU, both tracking ring
+       occupancy). When occupancy exceeds ~50ms, shed the OLD frames down to
+       ~20ms (the pre-seek target): one audible mic glitch, bounded latency
+       thereafter. The shed counter feeds the AEC template re-seed watch. */
+    {
+        ma_int32 occupancy = ma_pcm_rb_pointer_distance(pRB);
+        ma_uint32 sr = pDevice->sampleRate > 0 ? pDevice->sampleRate : 48000;
+        ma_int32 shedTrigger = (ma_int32)(sr / 20);  /* 50ms */
+        ma_int32 shedTarget  = (ma_int32)(sr / 50);  /* 20ms */
+        if (occupancy > shedTrigger) {
+            ma_pcm_rb_seek_read(pRB, (ma_uint32)(occupancy - shedTarget));
+            g_ma_duplex_recenter_sheds += 1;
+        }
+    }
+
     while (totalFramesReadOut < frameCount && ma_device_is_started(pDevice)) {
         /*
         We should have a buffer allocated on the heap. Any playback frames still sitting in there
@@ -20677,7 +20717,18 @@ static ma_result ma_device__handle_duplex_callback_playback(ma_device* pDevice, 
                     ma_device__handle_data_callback(pDevice, pDevice->playback.pInputCache, pInputFrames, inputFrameCount);
                 } else {
                     if (ma_pcm_rb_pointer_distance(pRB) == 0) {
-                        break;  /* Underrun. */
+                        /* CLOUDLOOP PATCH: stock code break-exits here, leaving
+                           the tail of the device buffer UNWRITTEN — stale bytes
+                           play as static. Synthesize a silent input block so the
+                           client callback still runs and the whole buffer is
+                           written; the artifact becomes a brief dropout. */
+                        g_ma_duplex_playback_underruns += 1;
+                        ma_pcm_rb_commit_read(pRB, 0);
+                        inputFrameCount = (ma_uint32)ma_min(pDevice->playback.inputCacheCap, sizeof(silentInputFrames) / ma_get_bytes_per_frame(pDevice->capture.format, pDevice->capture.channels));
+                        ma_device__handle_data_callback(pDevice, pDevice->playback.pInputCache, silentInputFrames, inputFrameCount);
+                        pDevice->playback.inputCacheConsumed  = 0;
+                        pDevice->playback.inputCacheRemaining = inputFrameCount;
+                        continue;
                     }
                 }
             } else {
@@ -20689,6 +20740,7 @@ static ma_result ma_device__handle_duplex_callback_playback(ma_device* pDevice, 
             pDevice->playback.inputCacheConsumed  = 0;
             pDevice->playback.inputCacheRemaining = inputFrameCount;
 
+            g_ma_duplex_frames_read += inputFrameCount;  /* CLOUDLOOP PATCH */
             result = ma_pcm_rb_commit_read(pRB, inputFrameCount);
             if (result != MA_SUCCESS) {
                 return result;  /* Should never happen. */
@@ -58907,6 +58959,18 @@ MA_API ma_result ma_duplex_rb_init(ma_format captureFormat, ma_uint32 captureCha
     sizeInFrames = (ma_uint32)ma_calculate_frame_count_after_resampling(sampleRate, captureInternalSampleRate, captureInternalPeriodSizeInFrames * 5);
     if (sizeInFrames == 0) {
         return MA_INVALID_ARGS;
+    }
+
+    /* CLOUDLOOP PATCH: floor the ring at 100ms. With small fast-path bursts
+       (240 frames @ 48kHz) the stock *5 sizing leaves only 25ms of slack,
+       which scheduling jitter on Android's SHARED legacy path can blow
+       through — every blow-through silently drops frames and shifts the
+       AEC reference alignment. Memory cost of the floor is trivial. */
+    {
+        ma_uint32 minSizeInFrames = sampleRate / 10;
+        if (sizeInFrames < minSizeInFrames) {
+            sizeInFrames = minSizeInFrames;
+        }
     }
 
     result = ma_pcm_rb_init(captureFormat, captureChannels, sizeInFrames, NULL, pAllocationCallbacks, &pRB->rb);

@@ -618,12 +618,12 @@ interface class Recorder {
       _log.warning(() => 'getFft: recorder is not started.');
       return Float32List(256);
     }
-    if (_recorderFormat != PCMFormat.f32le) {
-      _log.warning(
-        () => 'getFft: FFT data can be get only using f32le format.',
-      );
-      return Float32List(256);
-    }
+    // NOTE: no f32le format guard here (upstream had one): our native
+    // data_callback converts s16/s24/s32 capture to f32 before filling the
+    // visualization buffer, so FFT/wave data is valid for every device
+    // format. The guard silently returned a ZERO-FILLED array on Android's
+    // format=unknown single-init (device negotiates s16) — dead FFT halo /
+    // waveform on every s16 Android device while capture provably worked.
     return _impl.getFft(alwaysReturnData: alwaysReturnData);
   }
 
@@ -640,12 +640,8 @@ interface class Recorder {
       _log.warning(() => 'getWave: recorder is not started.');
       return Float32List(256);
     }
-    if (_recorderFormat != PCMFormat.f32le) {
-      _log.warning(
-        () => 'getWave: wave data can be get only using f32le format.',
-      );
-      return Float32List(256);
-    }
+    // No f32le guard — see getFft: native converts every capture format to
+    // f32 before the visualization buffer, so wave data is always valid.
     return _impl.getWave(alwaysReturnData: alwaysReturnData);
   }
 
@@ -810,6 +806,19 @@ interface class Recorder {
   /// (non-slave) instead of slave mode when this is true.
   bool wasDuplexDenied() {
     return _impl.wasDuplexDenied();
+  }
+
+  /// True when duplex runs in SHARED mode (no MMAP/exclusive on the device)
+  /// but was kept because the HAL granted fast-path-sized bursts.
+  bool isSharedDuplex() {
+    return _impl.isSharedDuplex();
+  }
+
+  /// Cumulative duplex-ring xrun count. Each event shifts the mic-to-AEC-
+  /// reference alignment by up to a burst; watchers re-seed the LSAEC
+  /// template when this moves.
+  int getDuplexXruns() {
+    return _impl.getDuplexXruns();
   }
 
   // ///////////////////////

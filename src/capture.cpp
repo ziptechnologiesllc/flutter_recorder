@@ -592,26 +592,30 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
                         (const ma_int16 *)pInput, samplesCount,
                         ma_dither_mode_none);
 #ifdef _IS_ANDROID_
+      // First 10 callbacks + a ~25s heartbeat: the early callbacks read the
+      // duplex ring's silence pre-seek, so only an ONGOING zero peak means
+      // the mic path is dead (e.g. Android's record-client silencing, which
+      // keeps the stream running and zeroes frames). The xruns counters
+      // surface duplex-ring drops (time-compressed audio) in field logs.
       static int captureConvDebugCount = 0;
-      if (++captureConvDebugCount <= 10) {
-        // Check max value in converted buffer
-        float maxVal = 0.0f;
-        for (size_t i = 0; i < samplesCount && i < 100; i++) {
-          if (fabsf(userData->mConversionBuffer[i]) > maxVal)
-            maxVal = fabsf(userData->mConversionBuffer[i]);
-        }
-        // Check max value in original s16 buffer
+      ++captureConvDebugCount;
+      if (captureConvDebugCount <= 10 || captureConvDebugCount % 2500 == 0) {
+        // Peak over the WHOLE buffer (the first-100-samples scan could miss
+        // a transient at the tail).
         int16_t maxS16 = 0;
         const ma_int16 *s16Input = (const ma_int16 *)pInput;
-        for (size_t i = 0; i < samplesCount && i < 100; i++) {
+        for (size_t i = 0; i < samplesCount; i++) {
           if (abs(s16Input[i]) > maxS16)
             maxS16 = abs(s16Input[i]);
         }
-        __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
-                            "[Capture Conv #%d] samples=%zu, maxS16=%d, "
-                            "maxF32=%.6f",
-                            captureConvDebugCount, samplesCount, maxS16,
-                            maxVal);
+        extern volatile ma_uint64 g_ma_duplex_capture_overruns;
+        extern volatile ma_uint64 g_ma_duplex_playback_underruns;
+        __android_log_print(
+            ANDROID_LOG_INFO, LOG_TAG,
+            "[Capture Conv #%d] samples=%zu, maxS16=%d, xruns=o%llu/u%llu",
+            captureConvDebugCount, samplesCount, maxS16,
+            (unsigned long long)g_ma_duplex_capture_overruns,
+            (unsigned long long)g_ma_duplex_playback_underruns);
       }
 #endif
     } else if (pDevice->capture.format == ma_format_s24) {
@@ -679,6 +683,29 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     size_t captureFrameCount =
         userData->mTotalFramesCaptured.load(std::memory_order_acquire);
     userData->mFilters->setAecCaptureFrameCount(captureFrameCount);
+
+    // SHARED-duplex xrun watch: every duplex-ring overrun/underrun (counted
+    // by the CLOUDLOOP PATCH in miniaudio.h) shifts the mic-to-reference
+    // alignment by up to a burst, which the loop-synchronous template can't
+    // see — it would keep subtracting a rotated echo. Re-arm the convergence
+    // seed on each new event (internally gated; no-op while a seed is in
+    // flight, no-op when LSAEC inactive). Realtime-safe: one atomic-ish read
+    // and a flag set.
+    {
+      extern volatile ma_uint64 g_ma_duplex_capture_overruns;
+      extern volatile ma_uint64 g_ma_duplex_playback_underruns;
+      extern volatile ma_uint64 g_ma_duplex_recenter_sheds;
+      uint64_t xruns = g_ma_duplex_capture_overruns +
+                       g_ma_duplex_playback_underruns +
+                       g_ma_duplex_recenter_sheds;
+      if (xruns != userData->mLastSeenDuplexXruns) {
+        // Only mark the xrun consumed when the notify actually landed —
+        // on lock contention (filters being swapped) retry next callback.
+        if (userData->mFilters->notifyAecReferenceChanged()) {
+          userData->mLastSeenDuplexXruns = xruns;
+        }
+      }
+    }
 
     // Thread-safe filter processing (protects against concurrent
     // addFilter/removeFilter)
@@ -1386,6 +1413,18 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   // latency minimal
   deviceConfig.periodSizeInFrames = 480; // 2 x 240-frame burst = 10ms @ 48kHz
 
+  // CRITICAL for the duplex mic path: without this flag miniaudio never
+  // forwards periodSizeInFrames to AAudio (setFramesPerDataCallback is
+  // gated on aaudio.allowSetBufferCapacity, default FALSE), so its internal
+  // period falls back to the 4096-frame buffer capacity. That sized the
+  // duplex ring at 4096*5 (~427ms) with a 171ms silence pre-seek — measured
+  // as a 372ms mic->AEC-reference echo path on the TB330FU, which blew the
+  // click-calibration's match window. With the flag, the internal period is
+  // the real 480 frames: ring = the 100ms floor (see the CLOUDLOOP PATCH in
+  // ma_duplex_rb_init, which also removes the ring-smaller-than-one-burst
+  // hazard this flag used to carry), pre-seek 20ms, echo path ~40-70ms.
+  deviceConfig.aaudio.allowSetBufferCapacity = MA_TRUE;
+
   // AAudio-specific settings for FAST PATH (Mode 12):
   // VOICE_RECOGNITION preset is designed for low-latency speech recognition
   // - No AEC/NS processing (unlike VOICE_COMMUNICATION)
@@ -1402,8 +1441,9 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   deviceConfig.playback.shareMode = ma_share_mode_exclusive;
 
   __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
-                      "[Capture::init] AAudio: inputPreset=VOICE_RECOGNITION, "
-                      "usage=GAME, sharingMode=EXCLUSIVE (for Mode 12)");
+                      "[Capture::init] AAudio defaults: inputPreset=VOICE_RECOGNITION "
+                      "(Dart preset override applies later), usage=GAME, "
+                      "sharingMode=EXCLUSIVE requested");
   __android_log_print(ANDROID_LOG_INFO, LOG_TAG,
                       "[Capture::init] AAudio: periodSize=480 (2 bursts, 10ms "
                       "@ 48kHz)");
@@ -1571,6 +1611,7 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   fflush(stdout);
 
   mDuplexDenied = false; // Reset on each init
+  mSharedDuplex = false;
 
 #if defined(__APPLE__) && (TARGET_OS_IPHONE || TARGET_OS_OSX)
   // SINGLE-UNIT CoreAudio duplex (one clock → eliminates the AEC reference
@@ -1653,27 +1694,61 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
   printf("[Capture::init] Device initialized successfully\n");
 
 #ifdef _IS_ANDROID_
-  // CRITICAL: Check if duplex got exclusive mode on capture.
-  // If capture fell to SHARED mode, the buffer sizes will be mismatched
-  // (capture: 4096 frames/85ms vs playback: 512 frames/10ms) causing
-  // half-speed playback and eventual static corruption.
-  // Fix: deinit duplex, re-init as capture-only. Dart will use standard
-  // SoLoud.
+  // Duplex health check. EXCLUSIVE only exists on the MMAP path, and many
+  // devices (e.g. MediaTek tablets shipping global Dolby DAX) never enable
+  // MMAP at all — every app gets SHARED, forever. SHARED duplex is
+  // topologically identical to exclusive (two AAudio streams glued by
+  // miniaudio's duplex ring), so sharing mode itself is NOT the problem.
+  // The real pathology is BURST SIZE: a fat legacy capture burst (e.g.
+  // 4096 frames/85ms against a 10ms playback drain) oscillates the duplex
+  // ring between starved and full — half-speed audio and static.
+  //
+  // So: keep SHARED duplex when the HAL grants fast-path-sized capture
+  // bursts (the TB330FU grants 240-frame/5ms FAST bursts in shared mode);
+  // fall back to capture-only (Dart drops to standard SoLoud) only when
+  // bursts are genuinely fat.
   if (!captureOnly && device.aaudio.pStreamCapture != nullptr) {
     void *aaudioLib = context.aaudio.hAAudio;
     auto getSharingMode =
         aaudioLib
             ? (int32_t(*)(void *))dlsym(aaudioLib, "AAudioStream_getSharingMode")
             : nullptr;
+    auto getFramesPerBurst =
+        aaudioLib
+            ? (int32_t(*)(void *))dlsym(aaudioLib,
+                                        "AAudioStream_getFramesPerBurst")
+            : nullptr;
     if (getSharingMode) {
       int32_t captureShareMode = getSharingMode(device.aaudio.pStreamCapture);
-      if (captureShareMode != 0) { // 0 = EXCLUSIVE, 1 = SHARED
+      int32_t captureBurst =
+          getFramesPerBurst ? getFramesPerBurst(device.aaudio.pStreamCapture)
+                            : -1;
+      int32_t playbackBurst =
+          (getFramesPerBurst && device.aaudio.pStreamPlayback != nullptr)
+              ? getFramesPerBurst(device.aaudio.pStreamPlayback)
+              : -1;
+      // 960 frames = 20ms @ 48kHz: generous fast-path ceiling. The broken
+      // case this guards against is ~4096 frames; unknown (-1) is treated
+      // as fat, matching the old conservative behavior.
+      const int32_t kMaxAcceptableCaptureBurst = 960;
+      bool burstsOk = captureBurst > 0 &&
+                      captureBurst <= kMaxAcceptableCaptureBurst;
+
+      if (captureShareMode != 0 && burstsOk) { // 0 = EXCLUSIVE, 1 = SHARED
+        mSharedDuplex = true;
+        __android_log_print(
+            ANDROID_LOG_INFO, LOG_TAG,
+            "[Capture::init] SHARED DUPLEX accepted: capture burst=%d frames "
+            "(%.1fms), playback burst=%d frames — fast path granted without "
+            "exclusive. Slave mode + AEC stay on; duplex-ring xruns are "
+            "counted for AEC re-seed.",
+            captureBurst, captureBurst * 1000.0f / 48000.0f, playbackBurst);
+      } else if (captureShareMode != 0) {
         __android_log_print(
             ANDROID_LOG_WARN, LOG_TAG,
-            "[Capture::init] DUPLEX DENIED: capture got sharingMode=%d "
-            "(SHARED). Re-initializing as CAPTURE-ONLY for clean exclusive "
-            "fast path.",
-            captureShareMode);
+            "[Capture::init] DUPLEX DENIED: capture sharingMode=%d with fat "
+            "burst=%d frames (limit %d). Re-initializing as CAPTURE-ONLY.",
+            captureShareMode, captureBurst, kMaxAcceptableCaptureBurst);
 
         // Deinit the broken duplex device
         ma_device_uninit(&device);

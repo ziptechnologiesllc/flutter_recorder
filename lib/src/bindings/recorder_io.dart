@@ -763,6 +763,14 @@ class RecorderFfi extends RecorderImpl {
     return _bindings.flutter_recorder_wasDuplexDenied() == 1;
   }
 
+  bool isSharedDuplex() {
+    return _bindings.flutter_recorder_isSharedDuplex() == 1;
+  }
+
+  int getDuplexXruns() {
+    return _bindings.flutter_recorder_getDuplexXruns();
+  }
+
   // ── Phase 2e: Ableton Link ────────────────────────────────────────────────
   @override
   void linkSetEnabled(bool enabled) {
