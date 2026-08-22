@@ -1,4 +1,7 @@
 #include "adaptive_echo_cancellation.h"
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include "aec_test.h"
 
 #include "neural_post_filter.h"
@@ -641,6 +644,35 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     // reference + residual (wait-free ring write on the render thread; the
     // FFT/coherence math runs on the governor's worker thread).
     SpectralGovernor &gov = SpectralGovernor::instance();
+
+    // NaN CHECKPOINTS: the offline harness ran the template through 400
+    // chaos passes under UBSan with zero faults, so the on-device NaN
+    // emitter is in this WRAPPER's inputs, not the template math. Tag which
+    // input goes bad first: the reference read (ring/alignment), the
+    // governor's learning boost, or the mic block itself. Rate-limited;
+    // costs a linear scan per block, acceptable while hunting.
+#ifdef __ANDROID__
+    {
+      static int sCkGate = 0;
+      const bool logNow = (sCkGate++ % 50 == 0);
+      auto scan = [&](const float *p, size_t n, const char *tag) {
+        for (size_t i = 0; i < n; ++i)
+          if (!std::isfinite(p[i])) {
+            if (logNow)
+              __android_log_print(ANDROID_LOG_ERROR, "AECCheckpoint",
+                                  "[CK] %s non-finite at %zu/%zu", tag, i, n);
+            return false;
+          }
+        return true;
+      };
+      scan(mRefBuffer.data(), totalSamples, "REF-in");
+      scan(mLinearOutputBuffer.data(), totalSamples, "MIC-in");
+      const float lb = gov.learningBoost();
+      if (!std::isfinite(lb) && logNow)
+        __android_log_print(ANDROID_LOG_ERROR, "AECCheckpoint",
+                            "[CK] learnBoost non-finite");
+    }
+#endif
     mEchoTemplate->setLearnBoost(gov.learningBoost());
     mEchoTemplate->process(mLinearOutputBuffer.data(), mRefBuffer.data(),
                            frameCount, channels,
@@ -651,6 +683,21 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
                            // explained by the reference (no jamming /
                            // sustained room noise folding into E[phi]).
                            /*learn=*/!recordingActive && !gov.nearEndHold());
+#ifdef __ANDROID__
+    {
+      static int sCkGate2 = 0;
+      if (sCkGate2++ % 50 == 0) {
+        for (size_t i = 0; i < totalSamples; ++i)
+          if (!std::isfinite(mLinearOutputBuffer[i])) {
+            __android_log_print(ANDROID_LOG_ERROR, "AECCheckpoint",
+                                "[CK] TPL-out non-finite at %zu/%zu (inputs "
+                                "were clean => template emitted on-device)",
+                                i, totalSamples);
+            break;
+          }
+      }
+    }
+#endif
     gov.push(mRefBuffer.data(), mLinearOutputBuffer.data(), frameCount,
              channels);
     // Cheap E3 diagnostics (counter reads only): freeze climbing => near-end

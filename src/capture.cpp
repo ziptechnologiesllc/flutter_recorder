@@ -709,9 +709,23 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
 
     // Thread-safe filter processing (protects against concurrent
     // addFilter/removeFilter)
+    //
+    // FORMAT TAG MUST BE F32: `captured` is ALWAYS float here — the
+    // conversion block above rewrites s16/s24/s32 device input into
+    // mConversionBuffer before any consumer runs. Passing the DEVICE format
+    // (s16 on Android's fast path) made the filter chain dispatch
+    // processAudio<int16_t> and static_cast the float buffer to int16* —
+    // every float reinterpreted as two garbage int16s, processed
+    // "coherently", and written back as int16-domain bytes that downstream
+    // float readers see as denormals/huge values/NaN bit patterns. That was
+    // the Android brick-wall/noise takes with AEC on (iOS was immune: f32
+    // native, tag matched). Calibration still measured clean IRs through
+    // all of it because its raw ref/mic capture runs in capture.cpp's own
+    // f32 domain, never through this dispatch — which is why the corruption
+    // looked like "AEC math emitting NaN" while the offline harness proved
+    // the template IEEE-clean.
     userData->mFilters->processAllFilters(
-        captured, frameCount, captureChannels,
-        userData->deviceConfig.capture.format);
+        captured, frameCount, captureChannels, ma_format_f32);
 
     // NaN CONTAINMENT: every downstream consumer (ring buffer -> RECORDINGS,
     // streaming, viz, WAV) reads this buffer, and the first time LSAEC
