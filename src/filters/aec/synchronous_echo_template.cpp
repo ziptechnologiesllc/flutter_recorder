@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 extern void aecLog(const char *fmt, ...); // see nlms_filter.h
 
@@ -534,13 +537,39 @@ void SynchronousEchoTemplate::computeSeedConvolution(int64_t P) {
       mSeedOutput[phi] = seed[phi];
   }
 
-  float seedPeak = 0.0f;
-  for (size_t phi = 0; phi < Pu; ++phi)
-    seedPeak = std::max(seedPeak, std::fabs(mSeedOutput[phi]));
-  if (seedPeak > kMaxSeedAbs) {
-    const float scale = kMaxSeedAbs / seedPeak;
-    for (size_t phi = 0; phi < Pu; ++phi)
-      mSeedOutput[phi] *= scale;
+  // SANITIZE, then clamp. The old peak-scale pass was NaN-blind:
+  // std::max(x, NaN) keeps x (NaN comparisons are false), so non-finite
+  // taps sailed past the clamp INTO the template — the template then
+  // subtracts NaN at those phases forever, poisoning every downstream
+  // consumer (recordings included: the TB330FU "brick wall" takes, where
+  // the first loop recorded after a fresh calibration carried NaN and
+  // FLT_MAX samples). A single huge-finite tap was as bad in the other
+  // direction: scale = kMaxSeedAbs/1e38 collapsed the whole seed to zero.
+  // Per-tap: non-finite -> 0, |tap| > kMaxSeedAbs -> clamped, count+log so
+  // the upstream estimator fault (per-bin Sxy/Sxx with an empty bin is the
+  // prime suspect) stays visible instead of laundered.
+  {
+    size_t badTaps = 0;
+    for (size_t phi = 0; phi < Pu; ++phi) {
+      float v = mSeedOutput[phi];
+      if (!std::isfinite(v)) {
+        mSeedOutput[phi] = 0.0f;
+        ++badTaps;
+      } else if (std::fabs(v) > kMaxSeedAbs) {
+        mSeedOutput[phi] = v > 0 ? kMaxSeedAbs : -kMaxSeedAbs;
+        ++badTaps;
+      }
+    }
+    if (badTaps > 0) {
+      aecLog("[SEED SCRUB] %zu/%zu taps non-finite or beyond %.1f — seed "
+             "estimator emitted garbage (source=%s)\n",
+             badTaps, Pu, kMaxSeedAbs, wienerUsed ? "wiener" : "ir-conv");
+#ifdef __ANDROID__
+      __android_log_print(ANDROID_LOG_ERROR, "FlutterRecorder",
+                          "[SEED SCRUB] %zu/%zu bad taps (source=%s)",
+                          badTaps, Pu, wienerUsed ? "wiener" : "ir-conv");
+#endif
+    }
   }
 }
 

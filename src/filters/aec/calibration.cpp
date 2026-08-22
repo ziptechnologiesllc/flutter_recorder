@@ -36,6 +36,20 @@ static std::string sLogBuffer;
 static std::mutex sLogBufferMutex;  // Protects sLogBuffer for thread-safety
 static const size_t MAX_LOG_SIZE = 64 * 1024; // 64KB max
 
+// Calibration VERDICT logging: always on. aecLog is compiled out without
+// AEC_DEBUG_LOGGING (RT paths share it), which made every reject reason
+// invisible in field builds — an accept-gate flap on the TB330FU cost a
+// debugging session because the "why" never reached logcat. These few
+// call sites run on the analysis/worker thread, where a log syscall is
+// harmless.
+#ifdef __ANDROID__
+#include <android/log.h>
+#define CAL_VERDICT_LOG(...) \
+  __android_log_print(ANDROID_LOG_INFO, "AECCalibration", __VA_ARGS__)
+#else
+#define CAL_VERDICT_LOG(...) aecLog(__VA_ARGS__)
+#endif
+
 void aecLog(const char *fmt, ...) {
   // In production, just print - no buffering to avoid any locking in audio thread
 #ifndef AEC_DEBUG_LOGGING
@@ -435,13 +449,34 @@ static CalibrationResult analyzeClickCalibration(
     // deconvolution advances it by the click's group delay (~24 samples).
     // A large disagreement means the delay estimate and the IR contradict
     // each other — reject rather than "fix".
+    //
+    // Anchor on the FIRST SIGNIFICANT ARRIVAL, not the global max. A tablet
+    // speaker + resonant case answers a click with RINGING: the loudest IR
+    // lobe can land several ms AFTER the direct path, and keying this check
+    // on the max made the verdict a per-run coin flip on the TB330FU
+    // (delay 82.2±0.6ms and peakToFloor ~0.91 across four runs, yet
+    // accepted flapped false/false/true/false as the resonance lobe drifted
+    // around the 256-tap line). The check's job is delay BOOKKEEPING, and
+    // delay is defined by the direct-path onset; a dominant late lobe is a
+    // legitimate room/chassis response and subtracts fine verbatim.
     constexpr int kCausalityMarginTap = 32;
     constexpr int kMaxRecenterShift = 256;
-    const int recenter = kCausalityMarginTap - static_cast<int>(peakIdx);
+    constexpr float kArrivalFraction = 0.3f; // onset = first tap >= 30% of max
+    size_t firstArrival = peakIdx;
+    for (size_t i = 0; i < irLen; ++i) {
+      if (std::abs(avgIR[i]) >= kArrivalFraction * maxAmp) {
+        firstArrival = i;
+        break;
+      }
+    }
+    const int recenter = kCausalityMarginTap - static_cast<int>(firstArrival);
+    CAL_VERDICT_LOG("[AEC Click Calibration] IR anatomy: firstArrival tap %zu, "
+           "dominant lobe tap %zu, recenter shift %d\n",
+           firstArrival, peakIdx, recenter);
     if (std::abs(recenter) > kMaxRecenterShift) {
-      aecLog("[AEC Click Calibration] Deconvolved peak at tap %zu is "
-             "implausibly far from the causality margin (shift %d) — "
-             "rejecting calibration\n", peakIdx, recenter);
+      CAL_VERDICT_LOG("[AEC Click Calibration] Deconvolved first arrival at tap %zu "
+             "is implausibly far from the causality margin (shift %d) — "
+             "rejecting calibration\n", firstArrival, recenter);
       accepted = false;
     } else if (recenter != 0) {
       std::vector<float> shifted(irLen, 0.0f);
@@ -451,7 +486,13 @@ static CalibrationResult analyzeClickCalibration(
           shifted[j] = avgIR[i];
       }
       avgIR.swap(shifted);
-      peakIdx = static_cast<size_t>(kCausalityMarginTap);
+      // The FIRST ARRIVAL now sits on the causality margin; the dominant
+      // lobe moved by the same shift (it may legitimately sit later — see
+      // the resonance note above).
+      {
+        const int shiftedPeak = static_cast<int>(peakIdx) + recenter;
+        peakIdx = shiftedPeak > 0 ? static_cast<size_t>(shiftedPeak) : 0;
+      }
     }
 
     result.impulseResponse = avgIR;
@@ -459,12 +500,12 @@ static CalibrationResult analyzeClickCalibration(
     result.correlation = peakToFloor;
     result.success = accepted;
 
-    aecLog("[AEC Click Calibration] Averaged IR from %d/%d clicks: energy=%.4f, "
+    CAL_VERDICT_LOG("[AEC Click Calibration] Averaged IR from %d/%d clicks: energy=%.4f, "
            "peak=%.4f at idx %zu, floorRms=%.5f, peakToFloor=%.3f, success=%d\n",
            validClicks, AECCalibration::CLICK_COUNT, energy, maxAmp, peakIdx,
            floorRms, peakToFloor, result.success ? 1 : 0);
   } else {
-    aecLog("[AEC Click Calibration] Warning: only %d/%d clicks matched "
+    CAL_VERDICT_LOG("[AEC Click Calibration] Warning: only %d/%d clicks matched "
            "(need >=%d) — rejecting rather than seeding a low-confidence IR\n",
            validClicks, AECCalibration::CLICK_COUNT, minValidClicks);
     result.success = false;
@@ -475,7 +516,7 @@ static CalibrationResult analyzeClickCalibration(
     aecLog("%.4f ", result.impulseResponse[i]);
   aecLog("\n");
 
-  aecLog("[AEC Click Calibration] Result: delay=%.2fms gain=%.3f success=%d\n",
+  CAL_VERDICT_LOG("[AEC Click Calibration] Result: delay=%.2fms gain=%.3f success=%d\n",
          result.delayMs, result.echoGain, result.success);
 
   return result;

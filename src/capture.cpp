@@ -712,6 +712,47 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     userData->mFilters->processAllFilters(
         captured, frameCount, captureChannels,
         userData->deviceConfig.capture.format);
+
+    // NaN CONTAINMENT: every downstream consumer (ring buffer -> RECORDINGS,
+    // streaming, viz, WAV) reads this buffer, and the first time LSAEC
+    // engaged on Android a filter fault filled a whole take with NaN — the
+    // "brick wall" waveform. Whatever the root module, non-finite samples
+    // must never leave the callback: scrub to 0 (brief dropout, not a
+    // poisoned take) and log a rate-limited count so the fault stays
+    // visible and localizable instead of silent.
+    {
+      const size_t total = (size_t)frameCount * captureChannels;
+      unsigned int bad = 0;
+      // Clamp covers HUGE-FINITE garbage too (a poisoned template subtracts
+      // FLT_MAX-scale values that isfinite() happily passes — the second
+      // brick-wall take was 24% samples at 3.4e38 with zero NaNs).
+      constexpr float kSaneCaptureAbs = 4.0f;
+      for (size_t i = 0; i < total; ++i) {
+        const float v = captured[i];
+        if (!std::isfinite(v) || std::fabs(v) > kSaneCaptureAbs) {
+          captured[i] = 0.0f;
+          ++bad;
+        }
+      }
+      if (bad > 0) {
+        static uint64_t sNanTotal = 0;
+        static int sNanLogGate = 0;
+        sNanTotal += bad;
+        if (sNanLogGate++ % 100 == 0) {
+#ifdef _IS_ANDROID_
+          __android_log_print(
+              ANDROID_LOG_ERROR, LOG_TAG,
+              "[NaN SCRUB] %u non-finite samples in filtered capture this "
+              "block (total %llu) — AEC chain is emitting NaN; template "
+              "likely poisoned (toggle AEC off/on to rebuild it)",
+              bad, (unsigned long long)sNanTotal);
+#else
+          printf("[NaN SCRUB] %u non-finite samples (total %llu)\n", bad,
+                 (unsigned long long)sNanTotal);
+#endif
+        }
+      }
+    }
   }
   cbTimer_.markAec = std::chrono::steady_clock::now();
 #if DEBUG_CALLBACK_FILTERS
@@ -814,6 +855,37 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     // Mark slave audio as ready after first successful callback
     // This signals that the audio pipeline is flowing and calibration can start
     soloud_setSlaveAudioReady();
+
+    // NaN CONTAINMENT (playback side): a session loop whose FILE carries
+    // non-finite samples (one poisoned take got uploaded before the capture
+    // scrub existed) plays straight into (a) the speaker — undefined HW
+    // behavior — and (b) the AEC reference below, where the template LEARNS
+    // the NaN and re-poisons everything it subtracts from. Scrub the mixed
+    // playback block before either sink sees it.
+    {
+      const size_t nOut = (size_t)frameCount * playbackChannels;
+      unsigned int badOut = 0;
+      constexpr float kSanePlaybackAbs = 4.0f;
+      for (size_t i = 0; i < nOut; ++i) {
+        const float v = playbackFloat[i];
+        if (!std::isfinite(v) || std::fabs(v) > kSanePlaybackAbs) {
+          playbackFloat[i] = 0.0f;
+          ++badOut;
+        }
+      }
+      if (badOut > 0) {
+        static int sPbNanGate = 0;
+        if (sPbNanGate++ % 100 == 0) {
+#ifdef _IS_ANDROID_
+          __android_log_print(
+              ANDROID_LOG_ERROR, LOG_TAG,
+              "[NaN SCRUB pb] %u non-finite samples in PLAYBACK mix — a "
+              "session loop's audio file is poisoned; delete that loop",
+              badOut);
+#endif
+        }
+      }
+    }
 
     // Write to AEC reference buffer IN THE SAME CALLBACK - guarantees sync!
     // This is the whole point of slave mode: one callback, one clock.
