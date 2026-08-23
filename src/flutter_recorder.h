@@ -544,6 +544,13 @@ FFI_PLUGIN_EXPORT int flutter_recorder_wasDuplexDenied();
 // but was kept because the HAL granted fast-path-sized bursts.
 FFI_PLUGIN_EXPORT int flutter_recorder_isSharedDuplex();
 
+// Live duplex-ring occupancy (frames) — the variable term of mic-path
+// latency, read per take. 0 when not in duplex mode.
+FFI_PLUGIN_EXPORT int64_t flutter_recorder_getDuplexRingOccupancyFrames();
+
+// Capture stream framesPerBurst at init (0 unknown).
+FFI_PLUGIN_EXPORT int32_t flutter_recorder_getCaptureBurstFrames();
+
 // Cumulative duplex-ring xrun count (capture overruns + playback underruns).
 // Each event shifts mic-to-AEC-reference alignment; poll and re-seed LSAEC
 // when it moves.

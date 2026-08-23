@@ -2393,6 +2393,27 @@ class FlutterRecorderBindings {
   late final _flutter_recorder_isSharedDuplex =
       _flutter_recorder_isSharedDuplexPtr.asFunction<int Function()>();
 
+  int flutter_recorder_getDuplexRingOccupancyFrames() {
+    return _flutter_recorder_getDuplexRingOccupancyFrames();
+  }
+
+  late final _flutter_recorder_getDuplexRingOccupancyFramesPtr =
+      _lookup<ffi.NativeFunction<ffi.Int64 Function()>>(
+          'flutter_recorder_getDuplexRingOccupancyFrames');
+  late final _flutter_recorder_getDuplexRingOccupancyFrames =
+      _flutter_recorder_getDuplexRingOccupancyFramesPtr
+          .asFunction<int Function()>();
+
+  int flutter_recorder_getCaptureBurstFrames() {
+    return _flutter_recorder_getCaptureBurstFrames();
+  }
+
+  late final _flutter_recorder_getCaptureBurstFramesPtr =
+      _lookup<ffi.NativeFunction<ffi.Int32 Function()>>(
+          'flutter_recorder_getCaptureBurstFrames');
+  late final _flutter_recorder_getCaptureBurstFrames =
+      _flutter_recorder_getCaptureBurstFramesPtr.asFunction<int Function()>();
+
   int flutter_recorder_getDuplexXruns() {
     return _flutter_recorder_getDuplexXruns();
   }

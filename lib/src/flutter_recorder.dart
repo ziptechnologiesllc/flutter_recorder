@@ -821,6 +821,19 @@ interface class Recorder {
     return _impl.getDuplexXruns();
   }
 
+  /// Live duplex-ring occupancy in frames: the exact number of mic frames
+  /// queued between the capture stream and the client callback right now —
+  /// the dominant VARIABLE term of mic-path latency. Read at record start
+  /// for per-take placement compensation. 0 outside duplex mode.
+  int getDuplexRingOccupancyFrames() {
+    return _impl.getDuplexRingOccupancyFrames();
+  }
+
+  /// Capture stream framesPerBurst measured at init (0 unknown).
+  int getCaptureBurstFrames() {
+    return _impl.getCaptureBurstFrames();
+  }
+
   // ///////////////////////
   //   Phase 2e: Ableton Link
   // ///////////////////////

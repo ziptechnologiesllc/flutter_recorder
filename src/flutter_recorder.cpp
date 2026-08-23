@@ -1425,6 +1425,14 @@ FFI_PLUGIN_EXPORT int flutter_recorder_isSharedDuplex() {
   return capture.isSharedDuplex() ? 1 : 0;
 }
 
+FFI_PLUGIN_EXPORT int64_t flutter_recorder_getDuplexRingOccupancyFrames() {
+  return capture.getDuplexRingOccupancyFrames();
+}
+
+FFI_PLUGIN_EXPORT int32_t flutter_recorder_getCaptureBurstFrames() {
+  return capture.getCaptureBurstFrames();
+}
+
 // Cumulative duplex-ring xrun count (capture overruns + playback underruns,
 // see the CLOUDLOOP PATCH counters in miniaudio.h). Each event silently
 // shifted the mic-to-AEC-reference alignment before the patch; the app polls

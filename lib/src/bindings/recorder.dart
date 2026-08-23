@@ -596,6 +596,13 @@ abstract class RecorderImpl {
   /// alignment, so watchers should re-seed the echo template when it moves.
   int getDuplexXruns();
 
+  /// Live duplex-ring occupancy in frames — the variable term of mic-path
+  /// latency, read per take. 0 outside duplex mode.
+  int getDuplexRingOccupancyFrames();
+
+  /// Capture stream framesPerBurst measured at init (0 unknown).
+  int getCaptureBurstFrames();
+
   // ///////////////////////
   //   Phase 2e: Ableton Link
   // ///////////////////////

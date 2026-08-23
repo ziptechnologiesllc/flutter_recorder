@@ -484,6 +484,14 @@ class RecorderWeb extends RecorderImpl {
     return 0;
   }
 
+  int getDuplexRingOccupancyFrames() {
+    return 0;
+  }
+
+  int getCaptureBurstFrames() {
+    return 0;
+  }
+
   // ── Phase 2e: Ableton Link ────────────────────────────────────────────────
   // Web stubs — Ableton Link is a native-only feature (no browser API).
   @override

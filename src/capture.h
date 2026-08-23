@@ -75,6 +75,18 @@ public:
   /// re-seed triggers.
   bool isSharedDuplex() const { return mSharedDuplex; }
 
+  /// Duplex ring occupancy RIGHT NOW, in frames at the client rate — the
+  /// exact number of mic frames currently queued between the capture stream
+  /// and the client callback. This is the dominant VARIABLE term of the
+  /// mic-path latency (measured drifting 36-108ms across sessions on the
+  /// TB330FU), so record-placement compensation reads it PER TAKE instead
+  /// of trusting any stored constant. 0 in capture-only mode (no ring).
+  int64_t getDuplexRingOccupancyFrames() const;
+
+  /// Capture stream burst size in frames (AAudio getFramesPerBurst at init;
+  /// 0 when unknown/non-Android). The fixed HW-side term of the mic path.
+  int32_t getCaptureBurstFrames() const { return mCaptureBurstFrames; }
+
   CaptureErrors start();
 
   void stop();
@@ -229,6 +241,9 @@ private:
   /// true when the duplex device is running in SHARED mode with acceptable
   /// (fast-path) burst sizes — exclusive unavailable, duplex kept anyway.
   bool mSharedDuplex = false;
+
+  /// Capture stream framesPerBurst measured at init (Android duplex).
+  int32_t mCaptureBurstFrames = 0;
 
   /// true when duplex was requested but capture fell to shared mode
   /// (exclusive denied by HAL). Dart should use standard SoLoud instead of

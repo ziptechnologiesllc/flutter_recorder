@@ -1820,6 +1820,8 @@ CaptureErrors Capture::init(Filters *filters, int deviceID, PCMFormat pcmFormat,
       bool burstsOk = captureBurst > 0 &&
                       captureBurst <= kMaxAcceptableCaptureBurst;
 
+      if (captureBurst > 0)
+        mCaptureBurstFrames = captureBurst;
       if (captureShareMode != 0 && burstsOk) { // 0 = EXCLUSIVE, 1 = SHARED
         mSharedDuplex = true;
         __android_log_print(
@@ -2389,6 +2391,17 @@ float *Capture::getWave(bool *isTheSameAsBefore) {
   }
   memcpy(waveData, currentWave, sizeof(waveData));
   return waveData;
+}
+
+int64_t Capture::getDuplexRingOccupancyFrames() const {
+  // Only meaningful for a live duplex device: the ring exists solely to glue
+  // the capture and playback streams. pointer_distance is a lock-free read,
+  // safe from the FFI thread while audio runs.
+  if (!mInited || deviceConfig.deviceType != ma_device_type_duplex)
+    return 0;
+  ma_pcm_rb *rb =
+      const_cast<ma_pcm_rb *>(&device.duplexRB.rb);
+  return (int64_t)ma_pcm_rb_pointer_distance(rb);
 }
 
 float Capture::getVolumeDb() { return energy_db; }
