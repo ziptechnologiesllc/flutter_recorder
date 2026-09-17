@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "linear_echo_convolver.h"
 #include "spectral_residual_suppressor.h"
 
 /**
@@ -188,7 +189,8 @@ public:
   void process(float *micInOut, const float *alignedRef,
                unsigned int frameCount, unsigned int channels,
                int64_t blockStartFrame, int64_t loopFrames,
-               int64_t loopStartFrame, bool learn);
+               int64_t loopStartFrame, bool learn,
+               bool useLinearConvolver = false);
 
   /**
    * Enable/disable the nonlinear HF residual-echo suppressor (Stage 2). The
@@ -209,6 +211,15 @@ public:
 
   /** Mean per-phase confidence over the active period (0..1), for telemetry. */
   float meanConfidence() const;
+
+  /**
+   * True if a calibrated linear FIR convolver is armed and ready for
+   * real-time linear convolution. Provides 0-cycle instant convergence
+   * and 0-ghosting acoustic cancellation.
+   */
+  bool hasLinearConvolver() const {
+    return mHasLinearConvolver.load(std::memory_order_relaxed);
+  }
 
   /** E3 diagnostics (monotonic counters since reset). */
   uint32_t freezeCount() const { return mFreezeCount; }
@@ -301,6 +312,11 @@ private:
   // reach (see the class's own doc comment for the full rationale). Zero
   // added latency at unity gain, so it's safe in the record path.
   SpectralResidualSuppressor mSuppressor;
+
+  // Real-time linear FIR convolver stack (per-channel)
+  std::vector<LinearEchoConvolver> mConvolvers;
+  std::atomic<bool> mHasLinearConvolver{false};
+  std::atomic<bool> mPendingIRUpdate{false};
 
   size_t mCapacityFrames;          // max P we can hold (per channel)
   std::vector<float> mTemplate;    // E[phi*channels + ch] — echo estimate

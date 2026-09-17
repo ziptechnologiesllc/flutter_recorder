@@ -221,8 +221,8 @@ int DelayEstimator::estimateDelayTargeted(const std::vector<float> &ref_signal,
   if (n < 256)
     return centerLag;
 
-  // Define search range around center
-  int minLag = std::max(0, centerLag - searchWindow);
+  // Define search range around center (supports negative lags: mic ahead of ref)
+  int minLag = std::max(-static_cast<int>(n) + 128, centerLag - searchWindow);
   int maxLag = std::min(static_cast<int>(n) - 128, centerLag + searchWindow);
 
   if (minLag >= maxLag)
@@ -261,18 +261,25 @@ int DelayEstimator::estimateDelayTargeted(const std::vector<float> &ref_signal,
     micNorm[i] = (mic_signal[i] - micMean) / micStd;
   }
 
-  // Search only within window around center
+  // Search within window around center
   double maxAbsCorr = 0;
   int bestLag = centerLag;
   double bestCorrSigned = 0;
 
   for (int tau = minLag; tau <= maxLag; ++tau) {
-    size_t len = n - tau;
-    if (len < 128) continue;
+    size_t absTau = static_cast<size_t>(std::abs(tau));
+    if (absTau + 128 > n) continue;
+    size_t len = n - absTau;
 
     double sum = 0;
-    for (size_t i = 0; i < len; ++i) {
-      sum += refNorm[i] * micNorm[i + tau];
+    if (tau >= 0) {
+      for (size_t i = 0; i < len; ++i) {
+        sum += refNorm[i] * micNorm[i + tau];
+      }
+    } else {
+      for (size_t i = 0; i < len; ++i) {
+        sum += refNorm[i + absTau] * micNorm[i];
+      }
     }
     double corr = sum / len;
 
@@ -305,7 +312,7 @@ int DelayEstimator::estimateDelayTargeted(const std::vector<float> &ref_signal,
   if (n < 256)
     return centerLag;
 
-  int minLag = std::max(0, centerLag - searchWindow);
+  int minLag = std::max(-static_cast<int>(n) + 128, centerLag - searchWindow);
   int maxLag = std::min(static_cast<int>(n) - 128, centerLag + searchWindow);
   if (minLag >= maxLag)
     return centerLag;
@@ -339,14 +346,20 @@ int DelayEstimator::estimateDelayTargeted(const std::vector<float> &ref_signal,
   double maxAbs = 0;
   int bestLag = centerLag;
   for (int tau = minLag; tau <= maxLag; ++tau) {
-    size_t len = n - static_cast<size_t>(tau);
-    if (len < 128) {
+    size_t absTau = static_cast<size_t>(std::abs(tau));
+    if (absTau + 128 > n) {
       corrs[static_cast<size_t>(tau - minLag)] = 0.0;
       continue;
     }
+    size_t len = n - absTau;
     double sum = 0;
-    for (size_t i = 0; i < len; ++i)
-      sum += refNorm[i] * micNorm[i + tau];
+    if (tau >= 0) {
+      for (size_t i = 0; i < len; ++i)
+        sum += refNorm[i] * micNorm[i + tau];
+    } else {
+      for (size_t i = 0; i < len; ++i)
+        sum += refNorm[i + absTau] * micNorm[i];
+    }
     double c = sum / static_cast<double>(len);
     corrs[static_cast<size_t>(tau - minLag)] = c;
     if (std::abs(c) > maxAbs) {

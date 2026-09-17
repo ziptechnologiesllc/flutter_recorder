@@ -156,6 +156,10 @@ SynchronousEchoTemplate::SynchronousEchoTemplate(unsigned int sampleRate,
                                                  unsigned int channels)
     : mSampleRate(sampleRate), mChannels(channels),
       mSuppressor(sampleRate, channels) {
+  mConvolvers.reserve(channels);
+  for (unsigned int i = 0; i < channels; ++i) {
+    mConvolvers.emplace_back(LinearEchoConvolver::DEFAULT_MAX_TAPS);
+  }
   mCapacityFrames = static_cast<size_t>(sampleRate) * kMaxSeconds;
   mTemplate.assign(mCapacityFrames * channels, 0.0f);
   mConfidence.assign(mCapacityFrames, 0.0f);
@@ -203,6 +207,9 @@ void SynchronousEchoTemplate::setSeedImpulseResponse(const float *coeffs,
     std::lock_guard<std::mutex> lock(mSeedIRMutex);
     mSeedIR.assign(coeffs, coeffs + length);
   }
+  mPendingIRUpdate.store(true, std::memory_order_release);
+  mHasLinearConvolver.store(true, std::memory_order_release);
+
   // The IR just arrived or changed. Any track registered BEFORE now (e.g.
   // recorded before this session's live calibration) computed against an
   // empty/old IR and got no usable contribution — recompute them all
@@ -211,6 +218,9 @@ void SynchronousEchoTemplate::setSeedImpulseResponse(const float *coeffs,
 }
 
 void SynchronousEchoTemplate::reset() {
+  for (auto &conv : mConvolvers) {
+    conv.reset();
+  }
   std::fill(mTemplate.begin(), mTemplate.end(), 0.0f);
   std::fill(mConfidence.begin(), mConfidence.end(), 0.0f);
   mConfidenceSum = 0.0;
@@ -1076,9 +1086,133 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
                                       unsigned int channels,
                                       int64_t blockStartFrame,
                                       int64_t loopFrames,
-                                      int64_t loopStartFrame, bool learn) {
+                                      int64_t loopStartFrame, bool learn,
+                                      bool useLinearConvolver) {
   if (!micInOut || frameCount == 0)
     return;
+
+  // Apply any pending IR update to the linear convolvers on the audio thread
+  if (mPendingIRUpdate.load(std::memory_order_relaxed)) {
+    std::vector<float> irCopy;
+    {
+      std::unique_lock<std::mutex> lock(mSeedIRMutex, std::try_to_lock);
+      if (lock.owns_lock()) {
+        irCopy = mSeedIR;
+        mPendingIRUpdate.store(false, std::memory_order_release);
+      }
+    }
+    if (!irCopy.empty()) {
+      for (unsigned int ch = 0; ch < mChannels && ch < mConvolvers.size(); ++ch) {
+        mConvolvers[ch].setWeights(irCopy.data(), irCopy.size());
+      }
+      aecLog("[LSAEC] linear convolvers updated: %zu taps\n", irCopy.size());
+    }
+  }
+
+  // Real-time linear FIR convolution branch:
+  // Eliminates both core LSAEC flaws: instantaneous 0-pass convergence, zero ghosting.
+  if (useLinearConvolver && hasLinearConvolver()) {
+    const size_t totalSamples = static_cast<size_t>(frameCount) * channels;
+    if (mRawResidual.size() < totalSamples)
+      mRawResidual.resize(totalSamples);
+
+    const float sgAttack = mSubGateAttackRate.load(std::memory_order_relaxed);
+    const float sgRelease = mSubGateReleaseRate.load(std::memory_order_relaxed);
+    const float sgFloor = mSubGateFloorPow.load(std::memory_order_relaxed);
+
+    double blockResid = 0.0;
+    double blockMicEnergy = 0.0;
+
+    for (unsigned int f = 0; f < frameCount; ++f) {
+      float refMono = 0.0f;
+      float refGate = 1.0f;
+      if (alignedRef) {
+        if (channels == 1) {
+          refMono = alignedRef[f];
+        } else if (channels == 2) {
+          refMono = 0.5f * (alignedRef[f * 2] + alignedRef[f * 2 + 1]);
+        } else {
+          for (unsigned int ch = 0; ch < channels; ++ch) {
+            refMono += alignedRef[f * channels + ch];
+          }
+          refMono /= static_cast<float>(channels);
+        }
+
+        const float refPow = refMono * refMono;
+        const float rate = (refPow > mSubGateEnv) ? sgAttack : sgRelease;
+        mSubGateEnv += rate * (refPow - mSubGateEnv);
+        refGate = mSubGateEnv / (mSubGateEnv + sgFloor); // soft 0..1
+      }
+
+      // Convolve coherent mono reference against calibrated room IR
+      const float est = (alignedRef && !mConvolvers.empty())
+                            ? mConvolvers[0].processSample(refMono)
+                            : 0.0f;
+      const float gatedEst = refGate * est;
+
+      for (unsigned int ch = 0; ch < channels; ++ch) {
+        const size_t i = f * channels + ch;
+        const float mic = micInOut[i];
+        const float outR = mic - gatedEst;
+        mRawResidual[i] = outR;
+
+        // Stage-2 nonlinear polish: duck residual HF click/leakage
+        const float suppressed = mSuppressor.processSample(ch, gatedEst, outR);
+        micInOut[i] = suppressed;
+
+        blockResid += static_cast<double>(outR) * outR;
+        blockMicEnergy += static_cast<double>(mic) * mic;
+      }
+    }
+
+    // Pass 1b: Safety clamp to ensure output energy never exceeds mic energy
+    {
+      const float blockMs =
+          mSampleRate > 0
+              ? 1000.0f * static_cast<float>(frameCount) / static_cast<float>(mSampleRate)
+              : 0.0f;
+      const float ratioAlpha =
+          blockMs > 0.0f ? 1.0f - std::exp(-blockMs / kEnergyRatioTauMs) : 1.0f;
+      const float blockRatio = static_cast<float>(
+          (blockMicEnergy + kEps) / (blockResid + kEps));
+      mSmoothedEnergyRatio += ratioAlpha * (blockRatio - mSmoothedEnergyRatio);
+
+      const float idealGain =
+          (mSmoothedEnergyRatio < 1.0f / kOutputGateMargin)
+              ? std::sqrt(std::max(0.0f, mSmoothedEnergyRatio * kOutputGateMargin))
+              : 1.0f;
+      const float gainAlpha =
+          blockMs > 0.0f ? 1.0f - std::exp(-blockMs / kOutputGateTauMs) : 1.0f;
+      mOutputSuppressGain += gainAlpha * (idealGain - mOutputSuppressGain);
+    }
+
+    for (size_t i = 0; i < totalSamples; ++i)
+      micInOut[i] *= mOutputSuppressGain;
+
+    // Suppressor coupling update
+    {
+      constexpr float kSuppCleanRatio = 4.0f;
+      const bool farEndPresent = mSubGateEnv > sgFloor;
+      const bool nearEndAbsent =
+          mLearnedBlocks >= kSettleBlocks &&
+          blockResid <=
+              static_cast<double>(kSuppCleanRatio) *
+                  (static_cast<double>(mResidBaseline) + kEps);
+      mSuppressor.setCouplingUpdateAllowed(farEndPresent && nearEndAbsent);
+    }
+
+    const float contrib =
+        std::min(static_cast<float>(blockResid),
+                 kSpikeRatio * (mResidBaseline + static_cast<float>(kEps)));
+    mResidBaseline = (1.0f - kBaseRate) * mResidBaseline + kBaseRate * contrib;
+    ++mLearnedBlocks;
+
+    mActiveLoopFrames = (loopFrames > 0) ? loopFrames : 0;
+    mActiveLoopFramesAtomic.store(mActiveLoopFrames, std::memory_order_relaxed);
+    mRefGateSmooth = 1.0f;
+
+    return; // Pass 2 leaky mic-recording is completely bypassed! Zero ghost generation.
+  }
 
   // Apply any per-track template edits enqueued from the Dart thread (#54):
   // mTemplate and tc.active/appliedGain are audio-thread-only, so

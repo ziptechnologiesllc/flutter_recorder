@@ -287,7 +287,11 @@ enum AecMode {
   /// Loop-synchronous echo template (LSAEC): per-loop-phase echo estimate,
   /// no adaptive weights (cannot diverge). Requires slave mode + a recorded
   /// loop; until a loop exists it behaves like [algo].
-  lsaec(6);
+  lsaec(6),
+
+  /// Real-time linear FIR convolution against calibrated impulse response
+  /// with sub-sample DCRA alignment (instantaneous convergence, zero ghosting).
+  linearConvolver(7);
 
   final int value;
   const AecMode(this.value);
@@ -300,6 +304,7 @@ enum AecMode {
         4 => frozen,
         5 => frozenNeural,
         6 => lsaec,
+        7 => linearConvolver,
         _ => throw ArgumentError('Unknown value for AecMode: $value'),
       };
 }

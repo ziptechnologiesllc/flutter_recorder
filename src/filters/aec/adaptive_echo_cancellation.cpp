@@ -282,10 +282,17 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
   int64_t lsLoopFrames = 0;
   int64_t lsLoopStart = 0;
   bool useTemplate = false;
-  if (mAecMode == aecModeLsaec && soloud_isSlaveMode() && mEchoTemplate) {
-    lsLoopFrames = NativeScheduler::instance().getBaseLoopFrames();
-    lsLoopStart = NativeScheduler::instance().getBaseLoopStartFrame();
-    useTemplate = (lsLoopFrames > 0);
+  bool useLinearConvolver = false;
+  if (soloud_isSlaveMode() && mEchoTemplate) {
+    if (mAecMode == aecModeLinearConvolver) {
+      useLinearConvolver = mEchoTemplate->hasLinearConvolver();
+      useTemplate = useLinearConvolver;
+    } else if (mAecMode == aecModeLsaec) {
+      lsLoopFrames = NativeScheduler::instance().getBaseLoopFrames();
+      lsLoopStart = NativeScheduler::instance().getBaseLoopStartFrame();
+      useTemplate = (lsLoopFrames > 0);
+      useLinearConvolver = false;
+    }
   }
 
   if (soloud_isSlaveMode()) {
@@ -319,50 +326,48 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
             mRefBuffer.data(), frameCount, totalWritten - frameCount);
       }
     } else if (useTemplate) {
-      // LSAEC E1 — DETERMINISTIC reference read. In slave mode the reference
-      // was written in THIS callback (same clock), so the echo-aligned
-      // reference is just a fixed integer offset back by the acoustic delay —
-      // NO drift estimation, no cross-correlation. This reference is used only
-      // for far-end gating of the template (it learns the echo from the mic).
-      // Publish the OUTPUT-clock -> alignedRef time shift so per-track
-      // contribution jobs can rotate registered (output-clock) audio onto
-      // the template's mic-phase index. alignedRef(t) = out(t - LAMBDA)
-      // with LAMBDA = effectiveDelay + frameCount, exactly the offset of
-      // the read below. Without this rotation every exact-subtraction
-      // contribution landed ~LAMBDA (~60 ms) EARLY — a wrong-phase
-      // subtraction that ADDS energy: the "cancelled my own sounds, kept
-      // the bleed" regression once per-track went live with a real IR.
-      // Closed-loop alignment auto-correction measured by the seed's
-      // GCC-PHAT (template worker). Applied HERE, before both the LAMBDA
-      // publication and the read below, so they stay consistent. Template
-      // branch only — calibration and legacy-NLMS reads are untouched, and
-      // the neural post-filter (which consumes this same mRefBuffer in
-      // template mode) inherits the corrected alignment. Kill switch for
-      // the concurrent neural-AEC bring-up: set false to freeze the read
-      // at the raw calibrated delay.
-      static constexpr bool kAlignAutoCorrect = true;
-      if (kAlignAutoCorrect) {
-        const int64_t corr = mEchoTemplate->alignLagCorrection();
-        int64_t d = static_cast<int64_t>(effectiveDelay) + corr;
-        if (d < 0) d = 0;
-        effectiveDelay = static_cast<size_t>(d);
-      }
-      mEchoTemplate->setReferenceShiftFrames(
-          static_cast<int64_t>(effectiveDelay) + frameCount);
-      if (totalWritten >= frameCount + effectiveDelay) {
-        framesRead = g_aecReferenceBuffer->readFramesAtPosition(
-            mRefBuffer.data(), frameCount,
-            totalWritten - frameCount - effectiveDelay);
+      if (useLinearConvolver) {
+        // LINEAR CONVOLVER AEC: Drift and lag compensated reference read via DCRA.
+        // A true FIR convolver requires sample-accurate alignment between reference and mic.
+        // The calibrated IR has its peak at tap 32 (causality margin).
+        // Target residual = 32 samples aligns the acoustic echo peak precisely to tap 32!
+        mDriftAligner->setTargetResidual(32.0);
+        framesRead = mDriftAligner->produceAligned(
+            g_aecReferenceBuffer, mRefBuffer.data(), frameCount, effectiveDelay);
+        dcraActive = (framesRead > 0);
+        mEchoTemplate->setReferenceShiftFrames(
+            static_cast<int64_t>(effectiveDelay) + frameCount);
       } else {
-        // Not enough history yet: present silence to the gate (no learning)
-        // but still let the template run (passthrough output while E is empty).
-        std::fill(mRefBuffer.begin(), mRefBuffer.begin() + totalSamples, 0.0f);
-        framesRead = frameCount;
+        // LEGACY LSAEC E1 — DETERMINISTIC reference read. In slave mode the reference
+        // was written in THIS callback (same clock), so the echo-aligned
+        // reference is just a fixed integer offset back by the acoustic delay —
+        // NO drift estimation, no cross-correlation. This reference is used only
+        // for far-end gating of the template (it learns the echo from the mic).
+        static constexpr bool kAlignAutoCorrect = true;
+        if (kAlignAutoCorrect) {
+          const int64_t corr = mEchoTemplate->alignLagCorrection();
+          int64_t d = static_cast<int64_t>(effectiveDelay) + corr;
+          if (d < 0) d = 0;
+          effectiveDelay = static_cast<size_t>(d);
+        }
+        mEchoTemplate->setReferenceShiftFrames(
+            static_cast<int64_t>(effectiveDelay) + frameCount);
+        if (totalWritten >= frameCount + effectiveDelay) {
+          framesRead = g_aecReferenceBuffer->readFramesAtPosition(
+              mRefBuffer.data(), frameCount,
+              totalWritten - frameCount - effectiveDelay);
+        } else {
+          // Not enough history yet: present silence to the gate (no learning)
+          // but still let the template run (passthrough output while E is empty).
+          std::fill(mRefBuffer.begin(), mRefBuffer.begin() + totalSamples, 0.0f);
+          framesRead = frameCount;
+        }
       }
     } else {
       // LEGACY NORMAL AEC PATH — DRIFT-COMPENSATED reference read for the NLMS
       // stack (used when there is no known loop period). The DriftAligner
       // advances a fractional read pointer at the clock-drift-corrected rate.
+      mDriftAligner->setTargetResidual(static_cast<double>(mSampleRate) * 0.002);
       framesRead = mDriftAligner->produceAligned(
           g_aecReferenceBuffer, mRefBuffer.data(), frameCount, effectiveDelay);
       dcraActive = (framesRead > 0);
@@ -610,11 +615,6 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       }
 
       mLinearOutputBuffer[idx] = error;
-
-      // Capture samples for AEC test (channel 0 only to avoid duplicates)
-      if (ch == 0 && AECTest::isCapturing()) {
-        AECTest::captureSample(micSample, error, refSample);
-      }
     }
   }
 
@@ -682,7 +682,8 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
                            // (b) the correlation DTD says the residual is
                            // explained by the reference (no jamming /
                            // sustained room noise folding into E[phi]).
-                           /*learn=*/!recordingActive && !gov.nearEndHold());
+                           /*learn=*/!recordingActive && !gov.nearEndHold(),
+                           useLinearConvolver);
 #ifdef __ANDROID__
     {
       static int sCkGate2 = 0;
@@ -876,6 +877,11 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       }
       ++mTwTotal;
       input[i] = denormalizeSample<T>(outS);
+
+      // Capture samples for AEC test (channel 0 only to avoid duplicates)
+      if ((i % channels == 0) && AECTest::isCapturing()) {
+        AECTest::captureSample(micS, outS, refS);
+      }
     }
     if (mTwTotal >= kTelemetryWindow) {
       AecTelemetrySnapshot snap;
@@ -1329,8 +1335,8 @@ void AdaptiveEchoCancellation::setAecMode(AecMode mode) {
 
   // Mode names for logging
   const char *modeNames[] = {"Bypass", "Algo(Adaptive)", "Neural", "Hybrid(Adaptive+Neural)",
-                              "Frozen(FIR)", "FrozenNeural(FIR+Neural)"};
-  const char *modeName = (mode >= 0 && mode <= 5) ? modeNames[mode] : "Unknown";
+                             "Frozen(FIR)", "FrozenNeural(FIR+Neural)", "LSAEC", "LinearConvolver"};
+  const char *modeName = (mode >= 0 && mode <= 7) ? modeNames[mode] : "Unknown";
   aecLog("[AEC] Mode set to %d (%s)\n", static_cast<int>(mode), modeName);
 
   // Update VSS filter frozen state

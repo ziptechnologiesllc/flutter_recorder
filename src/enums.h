@@ -49,8 +49,9 @@ typedef enum AecMode {
   aecModeHybrid = 3,     // Adaptive NLMS + Neural
   aecModeFrozen = 4,      // Frozen FIR (pure calibrated IR, no adaptation)
   aecModeFrozenNeural = 5, // Frozen FIR + Neural post-filter
-  aecModeLsaec = 6         // Loop-synchronous echo template (slave mode + known
+  aecModeLsaec = 6,        // Loop-synchronous echo template (slave mode + known
                            // loop period; falls back to NLMS until a loop exists)
+  aecModeLinearConvolver = 7 // Real-time linear FIR convolution + DCRA alignment
 } AecMode_t;
 
 typedef struct {

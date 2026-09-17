@@ -23,6 +23,7 @@ constexpr int kWatchdogGrow = 4;      // consecutive growing estimates -> reset
 
 DriftAligner::DriftAligner(unsigned int sampleRate, unsigned int channels)
     : mSampleRate(sampleRate), mChannels(channels) {
+  mTargetResidual = static_cast<double>(mSampleRate) * 0.002; // default ~2 ms (96 samples)
   mHistSize = static_cast<size_t>(sampleRate) * 3 / 2; // ~1.5s mono history
   if (mHistSize < kEstWindow * 2)
     mHistSize = kEstWindow * 2;
@@ -30,16 +31,15 @@ DriftAligner::DriftAligner(unsigned int sampleRate, unsigned int channels)
   mMicHist.assign(mHistSize, 0.0f);
   mRefWin.assign(kEstWindow, 0.0f);
   mMicWin.assign(kEstWindow, 0.0f);
-  // Operate at a small positive residual so the (causal, tau>=0) estimator can
-  // always see the peak and the FIR has pre-margin for the direct path.
-  mLastResidual = static_cast<double>(mSampleRate) * 0.002; // ~2 ms
+  // Operate at target residual so the estimator can always see the peak
+  mLastResidual = mTargetResidual;
 }
 
 void DriftAligner::reset() {
   mRefReadPos = 0.0;
   mBulkDelay = 0.0;
   mDriftRatio = 0.0;
-  mLastResidual = static_cast<double>(mSampleRate) * 0.002;
+  mLastResidual = mTargetResidual;
   mPrimed = false;
   mLocked = false;
   mGrowCount = 0;
@@ -118,7 +118,9 @@ void DriftAligner::appendHistory(float alignedRefMono, float micMono) {
   if (mHistFilled < mHistSize)
     ++mHistFilled;
 
-  if (++mFramesSinceEstimate >= static_cast<size_t>(mSampleRate) / 3) {
+  // Rapid cold acquisition: run first estimate as soon as kEstWindow samples are buffered (~43ms)
+  size_t interval = mLocked ? (static_cast<size_t>(mSampleRate) / 3) : kEstWindow;
+  if (++mFramesSinceEstimate >= interval && mHistFilled >= kEstWindow) {
     mFramesSinceEstimate = 0;
     maybeEstimate();
   }
@@ -135,13 +137,11 @@ void DriftAligner::maybeEstimate() {
     mMicWin[i] = mMicHist[idx];
   }
 
-  // Wide-ish one-time acquisition, then VERY narrow steady-state tracking. The
-  // narrow locked search keeps the per-estimate CPU spike tiny (RT-safe on
-  // small mobile buffers): drift between estimates is only a few frames, so
-  // ±1 ms is ample once locked.
+  // Wide acquisition when cold (±25ms / ±1200 samples) to catch multi-buffer
+  // offsets; narrow steady-state tracking (±4ms) once locked.
   int center = static_cast<int>(std::lround(mLastResidual));
-  int search = mLocked ? static_cast<int>(mSampleRate * 0.004)  // ±4 ms locked
-                       : static_cast<int>(mSampleRate * 0.01);  // ±10 ms cold
+  int search = mLocked ? static_cast<int>(mSampleRate * 0.004)   // ±4 ms locked
+                       : static_cast<int>(mSampleRate * 0.025);  // ±25 ms cold
   double fracLag = 0.0, peak = 0.0;
   DelayEstimator::estimateDelayTargeted(mRefWin, mMicWin, center, search,
                                         &fracLag, &peak);
@@ -149,7 +149,7 @@ void DriftAligner::maybeEstimate() {
     return; // double-talk / silence -> hold last-good
 
   double residual = fracLag;
-  if (std::fabs(residual) > search * 0.95)
+  if (std::fabs(residual - center) > search * 0.95)
     return; // ran into the search edge -> untrustworthy, hold
 
   // PHYSICAL RATE LIMIT (the key stability gate). True clock drift is bounded
@@ -189,11 +189,16 @@ void DriftAligner::maybeEstimate() {
     mGrowCount = 0;
   }
 
-  // PI control toward a small positive target residual (keeps it findable).
-  double target = static_cast<double>(mSampleRate) * 0.002; // ~2 ms
+  // PI control toward target residual.
+  double target = mTargetResidual;
   double err = residual - target;
+
+  // On cold acquisition with a confident peak, snap 100% of the offset error!
+  // In steady-state, use conservative kP = 0.25 to smoothly reject noise.
+  double pGain = (mLocked || peak < 0.35) ? kP : 1.0;
   // residual>target => aligned-ref too recent => read older => decrease pos.
-  mRefReadPos -= kP * err;
+  mRefReadPos -= pGain * err;
+  mBulkDelay += pGain * err;
 
   bool wasLocked = mLocked;
   // Only integrate drift on a STEADY-STATE lock. On cold acquisition the offset
@@ -216,10 +221,10 @@ void DriftAligner::maybeEstimate() {
   // Re-center the next search on the POST-snap expected residual, not the raw
   // measured one — otherwise the ±4 ms locked window points at where the echo
   // *was* before the P-snap and we lose lock after one correction.
-  mLastResidual = target + (residual - target) * (1.0 - kP);
+  mLastResidual = target + (residual - target) * (1.0 - pGain);
   mLocked = true;
 
-  aecLog("[AEC DCRA] residual=%.2f peak=%.2f drift=%.0fppm locked=%d bulk=%.0f pos=%.0f\n",
-         residual, peak, mDriftRatio * 1e6, wasLocked ? 1 : 0, mBulkDelay,
+  aecLog("[AEC DCRA] residual=%.2f target=%.1f peak=%.2f drift=%.0fppm locked=%d bulk=%.0f pos=%.0f\n",
+         residual, target, peak, mDriftRatio * 1e6, wasLocked ? 1 : 0, mBulkDelay,
          mRefReadPos);
 }

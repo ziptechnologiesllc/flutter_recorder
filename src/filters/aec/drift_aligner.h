@@ -57,17 +57,26 @@ public:
   /** Reset all state (on enable/disable/recalibration/filter-length change). */
   void reset();
 
+  /** Set target residual in samples (e.g. 96 for legacy NLMS, 32 for LinearEchoConvolver tap-32 IR). */
+  void setTargetResidual(double targetSamples) {
+    mTargetResidual = targetSamples;
+    mLastResidual = targetSamples;
+  }
+  double targetResidual() const { return mTargetResidual; }
+
   // Telemetry (read on the audio thread for the [AEC] logs).
   double driftPpm() const { return mDriftRatio * 1e6; }
   double bulkDelayFrames() const { return mBulkDelay; }
   double residual() const { return mLastResidual; }
   bool primed() const { return mPrimed; }
+  bool locked() const { return mLocked; }
 
 private:
   void maybeEstimate();
 
   unsigned int mSampleRate;
   unsigned int mChannels;
+  double mTargetResidual = 96.0;
 
   // --- delay-locked-loop state ---
   double mRefReadPos = 0.0;   // fractional absolute output-frame read position
