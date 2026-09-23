@@ -38,7 +38,11 @@ constexpr float kRefEnvRate = 0.014f;    // per-sample EMA, tau ~1.5 ms @ 48 kHz
 // setSubGateTuning in the header). Defaults preserve the old constants:
 // fast attack so cancellation re-engages the instant the speaker starts;
 // slow release (~reverb time) so the echo tail keeps cancelling as the
-// reference decays; refGate = env/(env+floor), a soft 0..1 knee.
+// reference decays; refGate = env/(env+floor), a soft 0..1 knee. The gate
+// multiplies the estimate only on the legacy per-phase template path; the
+// linear-convolver path subtracts the FIR output ungated (a FIR of silence is
+// already ~0, and modulating it caused breathing) and uses the envelope only
+// for the far-end-present flag.
 
 constexpr float kConfMax = 4096.0f; // confidence saturates (~enough passes)
 

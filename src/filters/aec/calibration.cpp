@@ -492,13 +492,15 @@ static CalibrationResult analyzeClickCalibration(
         const int shiftedPeak = static_cast<int>(peakIdx) + recenter;
         peakIdx = shiftedPeak > 0 ? static_cast<size_t>(shiftedPeak) : 0;
       }
-      // Re-center alignment lock:
-      // avgIR shifted right by recenter taps -> delaySamples must decrease by recenter
-      // so that (delaySamples + tapIndex) remains exactly invariant to the room echo!
-      result.delaySamples = std::max(0, result.delaySamples - recenter);
-      result.delayMs = (float)(result.delaySamples * 1000) / (float)sampleRate;
-      aecLog("[AEC Click Calibration] Adjusted delaySamples by %+d -> %d samples (%.2fms) for IR recenter\n",
-             -recenter, result.delaySamples, result.delayMs);
+      // delaySamples is deliberately NOT adjusted here. The recenter undoes a
+      // bookkeeping artifact, not a real time shift: peak matching measured
+      // the true onset delay D, the window anchored the (IR ⊛ click) lobe at
+      // tap 32, and the onset-referenced deconvolution kernel then advanced
+      // the arrival by ~half a click. The runtime convolver reads the
+      // reference at E = D − 32 and needs the arrival at tap 32 — exactly
+      // what this shift restores. Subtracting `recenter` from E as well made
+      // the estimate land `recenter` samples EARLY (synthetic click train:
+      // E+tap = D−22, ERLE −2 dB vs +3 dB with E untouched).
     }
 
     result.impulseResponse = avgIR;

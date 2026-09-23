@@ -381,11 +381,19 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
     static int slaveReadDebugCount = 0;
     if (++slaveReadDebugCount % 500 == 0 ||
         (isCalibrating && slaveReadDebugCount <= 10)) {
-      aecLog("[AEC Slave] totalWritten=%zu effDelay=%zu read=%zu calib=%d | "
-             "DCRA drift=%.0fppm resid=%.1f bulk=%.0f\n",
-             totalWritten, effectiveDelay, framesRead, isCalibrating ? 1 : 0,
-             mDriftAligner->driftPpm(), mDriftAligner->residual(),
-             mDriftAligner->bulkDelayFrames());
+      if (dcraActive) {
+        aecLog("[AEC Slave] totalWritten=%zu effDelay=%zu read=%zu calib=%d | "
+               "DCRA drift=%.0fppm resid=%.1f bulk=%.0f\n",
+               totalWritten, effectiveDelay, framesRead, isCalibrating ? 1 : 0,
+               mDriftAligner->driftPpm(), mDriftAligner->residual(),
+               mDriftAligner->bulkDelayFrames());
+      } else {
+        // Deterministic integer read (LSAEC / linear convolver / calibrating):
+        // the DriftAligner is idle, its stats would be stale.
+        aecLog("[AEC Slave] totalWritten=%zu effDelay=%zu read=%zu calib=%d | "
+               "deterministic read\n",
+               totalWritten, effectiveDelay, framesRead, isCalibrating ? 1 : 0);
+      }
     }
   } else if (mUsePositionSync && mCalibratedOffset != 0) {
     // NON-SLAVE MODE: Position-based sync using frame counters
