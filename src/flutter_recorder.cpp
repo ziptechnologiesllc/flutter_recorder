@@ -285,9 +285,17 @@ static void relayPunchTakeOntoLoopTrack() {
   };
   const int64_t a0 = g_punchCapture0Frame - (rtl > 0 ? rtl : 0);  // loop time of frame 0
   const int64_t a1 = a0 + segFrames;                               // one past the last frame
+  // Track length. The LENGTH selector (scheduler record-cycles: 1/2/4/8,
+  // 0 = ∞) decides it, exactly as it does for a quantized overdub, so a punch
+  // take is never a surprise length: ×1 is the hardware-looper overdub — the
+  // capture wraps and SUMS onto a single loop cycle at the phase it was
+  // played, however long the pedal was held. Only ∞ sizes the track to the
+  // cycles the capture touched (capped; beyond the cap it folds).
+  const int32_t recordCycles = NativeScheduler::instance().getRecordCycles();
   const int64_t startCycle = floorDiv(a0 - loopStart, L);
   const int64_t endCycle = floorDiv(a1 - 1 - loopStart, L);
-  int64_t cycles = endCycle - startCycle + 1;
+  const int64_t touched = endCycle - startCycle + 1;
+  int64_t cycles = recordCycles > 0 ? (int64_t)recordCycles : touched;
   const bool folded = cycles > kMaxPunchCycles;
   if (cycles < 1) cycles = 1;
   if (folded) cycles = kMaxPunchCycles;
@@ -310,9 +318,11 @@ static void relayPunchTakeOntoLoopTrack() {
       g_punchTrack[dst + c] += src[si + c];
     }
   }
-  LOOPER_LOG("Punch relay: %lld frames onto a %lld-cycle track (%lld frames), "
-             "offset %lld%s (capture0=%lld rtl=%lld loopStart=%lld L=%lld)",
+  LOOPER_LOG("Punch relay: %lld frames onto a %lld-cycle track (%lld frames, "
+             "touched %lld, LENGTH %s), offset %lld%s "
+             "(capture0=%lld rtl=%lld loopStart=%lld L=%lld)",
              (long long)segFrames, (long long)cycles, (long long)trackFrames,
+             (long long)touched, recordCycles > 0 ? "fixed" : "inf",
              (long long)offset, folded ? " — FOLDED past the cycle cap" : "",
              (long long)g_punchCapture0Frame, (long long)rtl,
              (long long)loopStart, (long long)L);
