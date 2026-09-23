@@ -327,16 +327,21 @@ void AdaptiveEchoCancellation::processAudio(void *pInput, ma_uint32 frameCount,
       }
     } else if (useTemplate) {
       if (useLinearConvolver) {
-        // LINEAR CONVOLVER AEC: Drift and lag compensated reference read via DCRA.
-        // A true FIR convolver requires sample-accurate alignment between reference and mic.
-        // The calibrated IR has its peak at tap 32 (causality margin).
-        // Target residual = 32 samples aligns the acoustic echo peak precisely to tap 32!
-        mDriftAligner->setTargetResidual(32.0);
-        framesRead = mDriftAligner->produceAligned(
-            g_aecReferenceBuffer, mRefBuffer.data(), frameCount, effectiveDelay);
-        dcraActive = (framesRead > 0);
+        // LINEAR CONVOLVER AEC: DETERMINISTIC reference read in slave mode.
+        // In slave mode, playback and capture share the exact same hardware clock (0 ppm drift).
+        // A true FIR convolver requires a rock-solid, jitter-free integer reference read
+        // without running DCRA cross-correlation hunting on live music.
         mEchoTemplate->setReferenceShiftFrames(
             static_cast<int64_t>(effectiveDelay) + frameCount);
+        if (totalWritten >= frameCount + effectiveDelay) {
+          framesRead = g_aecReferenceBuffer->readFramesAtPosition(
+              mRefBuffer.data(), frameCount,
+              totalWritten - frameCount - effectiveDelay);
+        } else {
+          std::fill(mRefBuffer.begin(), mRefBuffer.begin() + totalSamples, 0.0f);
+          framesRead = frameCount;
+        }
+        dcraActive = false;
       } else {
         // LEGACY LSAEC E1 — DETERMINISTIC reference read. In slave mode the reference
         // was written in THIS callback (same clock), so the echo-aligned

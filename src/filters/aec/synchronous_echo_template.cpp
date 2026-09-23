@@ -1125,7 +1125,6 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
 
     for (unsigned int f = 0; f < frameCount; ++f) {
       float refMono = 0.0f;
-      float refGate = 1.0f;
       if (alignedRef) {
         if (channels == 1) {
           refMono = alignedRef[f];
@@ -1141,23 +1140,23 @@ void SynchronousEchoTemplate::process(float *micInOut, const float *alignedRef,
         const float refPow = refMono * refMono;
         const float rate = (refPow > mSubGateEnv) ? sgAttack : sgRelease;
         mSubGateEnv += rate * (refPow - mSubGateEnv);
-        refGate = mSubGateEnv / (mSubGateEnv + sgFloor); // soft 0..1
       }
 
-      // Convolve coherent mono reference against calibrated room IR
+      // Convolve coherent mono reference against calibrated room IR.
+      // Pure linear prediction: do NOT amplitude-modulate with a dynamic envelope,
+      // which distorts transient response and creates breathing/flutter artifacts.
       const float est = (alignedRef && !mConvolvers.empty())
                             ? mConvolvers[0].processSample(refMono)
                             : 0.0f;
-      const float gatedEst = refGate * est;
 
       for (unsigned int ch = 0; ch < channels; ++ch) {
         const size_t i = f * channels + ch;
         const float mic = micInOut[i];
-        const float outR = mic - gatedEst;
+        const float outR = mic - est;
         mRawResidual[i] = outR;
 
         // Stage-2 nonlinear polish: duck residual HF click/leakage
-        const float suppressed = mSuppressor.processSample(ch, gatedEst, outR);
+        const float suppressed = mSuppressor.processSample(ch, est, outR);
         micInOut[i] = suppressed;
 
         blockResid += static_cast<double>(outR) * outR;

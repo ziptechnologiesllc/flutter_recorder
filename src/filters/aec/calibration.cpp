@@ -298,9 +298,8 @@ static CalibrationResult analyzeClickCalibration(
     crossCorrDelay = DelayEstimator::estimateDelay(alignedRef, alignedMic);
     aecLog("[AEC Click Calibration] Cross-correlation found delay: %d samples (%.2fms)\n",
            crossCorrDelay, crossCorrDelay * 1000.0f / sampleRate);
-    // Store the raw delay (without causality offset) for reporting
-    // The causality margin is applied internally during IR extraction
-    result.delaySamples = std::max(0, crossCorrDelay);
+    // Store the delay minus causality margin (matching the median branch and IR start offset)
+    result.delaySamples = std::max(0, crossCorrDelay - 32);
     usedCrossCorrelation = true;
   } else {
     // Use median delay (robust to outliers)
@@ -493,6 +492,13 @@ static CalibrationResult analyzeClickCalibration(
         const int shiftedPeak = static_cast<int>(peakIdx) + recenter;
         peakIdx = shiftedPeak > 0 ? static_cast<size_t>(shiftedPeak) : 0;
       }
+      // Re-center alignment lock:
+      // avgIR shifted right by recenter taps -> delaySamples must decrease by recenter
+      // so that (delaySamples + tapIndex) remains exactly invariant to the room echo!
+      result.delaySamples = std::max(0, result.delaySamples - recenter);
+      result.delayMs = (float)(result.delaySamples * 1000) / (float)sampleRate;
+      aecLog("[AEC Click Calibration] Adjusted delaySamples by %+d -> %d samples (%.2fms) for IR recenter\n",
+             -recenter, result.delaySamples, result.delayMs);
     }
 
     result.impulseResponse = avgIR;
