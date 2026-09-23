@@ -1600,6 +1600,11 @@ class RecorderFfi extends RecorderImpl {
     _bindings.flutter_recorder_scheduler_setFreeLengthTake(enabled ? 1 : 0);
   }
 
+  @override
+  void schedulerSetFreeLengthTakeAt(int tapGlobalFrame) {
+    _bindings.flutter_recorder_scheduler_setFreeLengthTakeAt(tapGlobalFrame);
+  }
+
   // ==================== AUTO-RECORD ====================
 
   @override

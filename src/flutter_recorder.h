@@ -435,6 +435,11 @@ FFI_PLUGIN_EXPORT int32_t flutter_recorder_scheduler_getRecordCycles();
 // start) and stopRecording() extracts the raw captured frames (no loop-multiple
 // rounding). Dart re-lays the take onto the loop grid. Consulted at start only.
 FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setFreeLengthTake(int enabled);
+// Same, plus the engine-global frame the punch was tapped at: the ring
+// pre-rolls back to it so the capture starts at the tap regardless of how
+// long the Dart-side prepare took (otherwise that delay lands the dub late by
+// a variable 1-4 buffers).
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setFreeLengthTakeAt(int64_t tapGlobalFrame);
 
 /////////////////////////
 /// Auto-Record (hands-free first-loop capture)

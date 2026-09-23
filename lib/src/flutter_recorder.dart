@@ -1427,6 +1427,14 @@ interface class Recorder {
     _impl.schedulerSetFreeLengthTake(enabled);
   }
 
+  /// [schedulerSetFreeLengthTake] (true) plus the engine-global frame the
+  /// punch was tapped at (read BEFORE preparing resources): native pre-rolls
+  /// the ring back to it so capture frame 0 is the tap, not "whenever prep
+  /// finished". Clear with [schedulerSetFreeLengthTake] (false) after start.
+  void schedulerSetFreeLengthTakeAt(int tapGlobalFrame) {
+    _impl.schedulerSetFreeLengthTakeAt(tapGlobalFrame);
+  }
+
   // ==================== AUTO-RECORD ====================
   // Hands-free first-loop capture: long-press to arm, the first detected onset
   // becomes the loop downbeat (lead-in silence trimmed via the ring buffer).

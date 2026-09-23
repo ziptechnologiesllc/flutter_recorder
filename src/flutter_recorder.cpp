@@ -1122,6 +1122,7 @@ flutter_recorder_startRecording(const char *path) {
   // raw frame count instead of rounding to a loop multiple.
   int64_t baseLoopFrames = NativeScheduler::instance().getBaseLoopFrames();
   const bool freeLengthTake = NativeScheduler::instance().isFreeLengthTake();
+  const int64_t punchTapFrame = NativeScheduler::instance().takePunchTapFrame();
   // Consume-once: the flag applies to THIS start only. The worker-side punch
   // marker is cleared on EVERY start too, so a punch whose stop never
   // reached the worker (no audio extracted, reset mid-take) cannot relay a
@@ -1166,7 +1167,20 @@ flutter_recorder_startRecording(const char *path) {
     // Start ring buffer recording with latency compensation
     if (g_nativeRingBuffer) {
       int64_t latencyFrames = NativeScheduler::instance().getLatencyCompensationFrames();
-      g_nativeRingBuffer->startRecording(latencyFrames);
+      int64_t preRoll = latencyFrames;
+      if (punchTake && punchTapFrame >= 0) {
+        // Anchor the capture at the TAP, not at "now": Dart's prepare step
+        // between the tap and this call is variable (stream + sink + file),
+        // and a fixed pre-roll left that delay as 1-4 buffers of lateness.
+        const int64_t elapsed = NativeScheduler::instance().getGlobalFrame() - punchTapFrame;
+        const int64_t cap = (int64_t)g_nativeRingBuffer->capacityInFrames() - 4096;
+        if (elapsed > 0 && cap > latencyFrames) {
+          preRoll = latencyFrames + std::min(elapsed, cap - latencyFrames);
+        }
+        printf("[Recorder] Punch pre-roll: %lld frames (latency %lld + tap→start %lld)\n",
+               (long long)preRoll, (long long)latencyFrames, (long long)elapsed);
+      }
+      g_nativeRingBuffer->startRecording(preRoll);
       g_recordingScheduledOrActive.store(true, std::memory_order_release);
       if (punchTake) {
         // WAV frame 0 in the RING's frame domain, straight from the ring
@@ -2579,6 +2593,13 @@ FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setFreeLengthTake(int enabled)
   NativeScheduler::instance().setFreeLengthTake(enabled != 0);
   fprintf(stderr, "[Recorder] Free-length (punch) take %s\n",
           enabled ? "ARMED for next start" : "cleared");
+}
+
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setFreeLengthTakeAt(int64_t tapGlobalFrame) {
+  NativeScheduler::instance().setPunchTapFrame(tapGlobalFrame);
+  NativeScheduler::instance().setFreeLengthTake(true);
+  fprintf(stderr, "[Recorder] Free-length (punch) take ARMED at tap frame %lld\n",
+          (long long)tapGlobalFrame);
 }
 
 // Get auto-stop enabled state

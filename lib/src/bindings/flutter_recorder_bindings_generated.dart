@@ -2083,6 +2083,21 @@ class FlutterRecorderBindings {
       _flutter_recorder_scheduler_setFreeLengthTakePtr
           .asFunction<void Function(int)>();
 
+  void flutter_recorder_scheduler_setFreeLengthTakeAt(
+    int tapGlobalFrame,
+  ) {
+    return _flutter_recorder_scheduler_setFreeLengthTakeAt(
+      tapGlobalFrame,
+    );
+  }
+
+  late final _flutter_recorder_scheduler_setFreeLengthTakeAtPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int64)>>(
+          'flutter_recorder_scheduler_setFreeLengthTakeAt');
+  late final _flutter_recorder_scheduler_setFreeLengthTakeAt =
+      _flutter_recorder_scheduler_setFreeLengthTakeAtPtr
+          .asFunction<void Function(int)>();
+
   /// Arm auto-record.
   /// wavPath        : where the take is written on stop
   /// barCount       : preset phrase length in bars; <= 0 = no preset length

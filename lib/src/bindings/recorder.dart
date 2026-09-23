@@ -1071,6 +1071,12 @@ abstract class RecorderImpl {
   @mustBeOverridden
   void schedulerSetFreeLengthTake(bool enabled);
 
+  /// [schedulerSetFreeLengthTake] (true) plus the engine-global frame the
+  /// punch was tapped at: native pre-rolls the ring back to it so capture
+  /// frame 0 is the tap however long resource prep took.
+  @mustBeOverridden
+  void schedulerSetFreeLengthTakeAt(int tapGlobalFrame);
+
   // ==================== AUTO-RECORD ====================
   // Hands-free first-loop capture: long-press to arm, the first detected onset
   // becomes the loop downbeat (lead-in silence trimmed via the ring buffer).

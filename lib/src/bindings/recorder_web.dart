@@ -918,6 +918,9 @@ class RecorderWeb extends RecorderImpl {
     // No-op on web (no native scheduler / ring buffer)
   }
 
+  @override
+  void schedulerSetFreeLengthTakeAt(int tapGlobalFrame) {}
+
   // ==================== AUTO-RECORD ====================
   // Stubs for web - hands-free first-loop capture not supported
 

@@ -113,6 +113,17 @@ public:
         return mFreeLengthTake.load(std::memory_order_acquire);
     }
 
+    /// Engine-global frame at which the punch was TAPPED (Dart reads it
+    /// before preparing resources). startRecording() pre-rolls the ring back
+    /// to it, so however long prepare took, capture frame 0 is the tap.
+    /// -1 = unknown (fixed latency pre-roll only). Consumed once.
+    void setPunchTapFrame(int64_t frame) {
+        mPunchTapFrame.store(frame, std::memory_order_release);
+    }
+    int64_t takePunchTapFrame() {
+        return mPunchTapFrame.exchange(-1, std::memory_order_acq_rel);
+    }
+
     /// Reset all state (call on session end)
     void reset();
 
@@ -227,6 +238,7 @@ private:
     // start, immediate stop, raw frame extraction (no loop-multiple rounding).
     // Dart re-lays the captured audio onto the loop grid afterwards.
     std::atomic<bool> mFreeLengthTake{false};
+    std::atomic<int64_t> mPunchTapFrame{-1};
 
     // ===================== NOTIFICATION QUEUE (SPSC) =====================
     // Single-Producer (audio thread) / Single-Consumer (Dart poll)
