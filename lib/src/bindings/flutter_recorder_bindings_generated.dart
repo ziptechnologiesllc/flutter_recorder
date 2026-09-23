@@ -2065,6 +2065,24 @@ class FlutterRecorderBindings {
       _flutter_recorder_scheduler_getRecordCyclesPtr
           .asFunction<int Function()>();
 
+  /// Punch-in (free-length) take flag: the next startRecording() starts
+  /// immediately via the ring buffer even with a base loop set, and the stop
+  /// extracts the raw captured frames. Consulted at start only.
+  void flutter_recorder_scheduler_setFreeLengthTake(
+    int enabled,
+  ) {
+    return _flutter_recorder_scheduler_setFreeLengthTake(
+      enabled,
+    );
+  }
+
+  late final _flutter_recorder_scheduler_setFreeLengthTakePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int)>>(
+          'flutter_recorder_scheduler_setFreeLengthTake');
+  late final _flutter_recorder_scheduler_setFreeLengthTake =
+      _flutter_recorder_scheduler_setFreeLengthTakePtr
+          .asFunction<void Function(int)>();
+
   /// Arm auto-record.
   /// wavPath        : where the take is written on stop
   /// barCount       : preset phrase length in bars; <= 0 = no preset length

@@ -1063,6 +1063,14 @@ abstract class RecorderImpl {
   @mustBeOverridden
   int schedulerGetRecordCycles();
 
+  /// Punch-in (free-length) take: when true, the NEXT [startRecording] starts
+  /// immediately via the ring buffer even though a base loop is set, and the
+  /// stop extracts exactly the captured frames (no loop-multiple rounding).
+  /// The app relays the take onto the loop grid. Consulted at start only —
+  /// clear it right after starting.
+  @mustBeOverridden
+  void schedulerSetFreeLengthTake(bool enabled);
+
   // ==================== AUTO-RECORD ====================
   // Hands-free first-loop capture: long-press to arm, the first detected onset
   // becomes the loop downbeat (lead-in silence trimmed via the ring buffer).

@@ -1417,6 +1417,16 @@ interface class Recorder {
     return _impl.schedulerGetRecordCycles();
   }
 
+  /// Punch-in (free-length) take: when true, the NEXT [startRecording] starts
+  /// immediately via the ring buffer even though a base loop is set (no
+  /// quantized start), and [stopRecording] extracts exactly the frames
+  /// captured (no loop-multiple rounding). The app re-lays the take onto the
+  /// loop grid at the phase it was played. Consulted at start only — set it
+  /// just before [startRecording] and clear it right after.
+  void schedulerSetFreeLengthTake(bool enabled) {
+    _impl.schedulerSetFreeLengthTake(enabled);
+  }
+
   // ==================== AUTO-RECORD ====================
   // Hands-free first-loop capture: long-press to arm, the first detected onset
   // becomes the loop downbeat (lead-in silence trimmed via the ring buffer).

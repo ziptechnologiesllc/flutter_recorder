@@ -913,6 +913,11 @@ class RecorderWeb extends RecorderImpl {
     return 1; // Default: one cycle on web
   }
 
+  @override
+  void schedulerSetFreeLengthTake(bool enabled) {
+    // No-op on web (no native scheduler / ring buffer)
+  }
+
   // ==================== AUTO-RECORD ====================
   // Stubs for web - hands-free first-loop capture not supported
 

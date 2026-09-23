@@ -99,6 +99,20 @@ public:
         return mRecordCycles.load(std::memory_order_acquire);
     }
 
+    /// Punch-in (free-length) take: when true, startRecording() ignores the
+    /// base loop and starts immediately via the ring buffer (free mode), so
+    /// the take begins at the tapped loop phase and stopRecording() extracts
+    /// exactly the frames captured — no quantized start, no loop-multiple
+    /// rounding. The Dart recorder relays the audio onto the loop grid.
+    /// Consulted only at start; Dart clears it right after.
+    void setFreeLengthTake(bool enabled) {
+        mFreeLengthTake.store(enabled, std::memory_order_release);
+    }
+
+    bool isFreeLengthTake() const {
+        return mFreeLengthTake.load(std::memory_order_acquire);
+    }
+
     /// Reset all state (call on session end)
     void reset();
 
@@ -208,6 +222,11 @@ private:
     std::atomic<int64_t> mLatencyCompensationFrames{0};  // Frames to rewind at recording start
     std::atomic<bool> mAutoStopEnabled{false};  // When true, auto-schedule STOP with START
     std::atomic<int32_t> mRecordCycles{1};      // Loop cycles per overdub take (0 = manual stop)
+    // Punch-in takes (toe mode): when set, the NEXT startRecording() takes the
+    // free-mode branch even though a base loop exists — immediate ring-buffer
+    // start, immediate stop, raw frame extraction (no loop-multiple rounding).
+    // Dart re-lays the captured audio onto the loop grid afterwards.
+    std::atomic<bool> mFreeLengthTake{false};
 
     // ===================== NOTIFICATION QUEUE (SPSC) =====================
     // Single-Producer (audio thread) / Single-Consumer (Dart poll)

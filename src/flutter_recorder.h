@@ -430,6 +430,12 @@ FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setRecordCycles(int32_t cycles
 // Get the configured record-cycles multiplier
 FFI_PLUGIN_EXPORT int32_t flutter_recorder_scheduler_getRecordCycles();
 
+// Punch-in (free-length) take: when enabled, the next startRecording() starts
+// immediately via the ring buffer even with a base loop set (no quantized
+// start) and stopRecording() extracts the raw captured frames (no loop-multiple
+// rounding). Dart re-lays the take onto the loop grid. Consulted at start only.
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setFreeLengthTake(int enabled);
+
 /////////////////////////
 /// Auto-Record (hands-free first-loop capture)
 /// Long-press to arm; the first detected onset becomes the loop downbeat (the

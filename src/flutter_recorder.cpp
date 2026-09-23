@@ -21,6 +21,7 @@
 #include "soloud_slave_bridge.h"
 
 #include <algorithm>
+#include <climits>
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
@@ -91,6 +92,31 @@ static std::atomic<bool> g_looperWorkPending{false};
 char g_pendingWavPath[512] = {0};
 std::atomic<bool> g_pendingWavWrite{false};
 
+// ── Punch-in (free-length) take relay ──────────────────────────────────────
+// Set on the main thread by flutter_recorder_startRecording when the take
+// takes the FREE branch despite a base loop (NativeScheduler::isFreeLengthTake),
+// consumed by the looper worker at stop. The raw capture — started the
+// instant the pedal went down, wherever the loop was, stopped the instant it
+// went down again — is laid onto a silent track of exactly one base-loop
+// length at the loop phase it was played (wrapping and summing past the
+// seam, RC-style), BEFORE the WAV is written and the looper bridge launches
+// it. Every consumer (bridge playback + its phase-align seek, the WAV on
+// disk, getRecordedWav, LSAEC registration) therefore sees an ordinary
+// base-loop-locked take.
+static std::atomic<bool> g_punchTake{false};
+// Engine-global frame of the take's WAV frame 0 (pre-roll included — derived
+// from the ring's own recording-start frame, so it reflects the pre-roll the
+// ring ACTUALLY applied, which is 0 when it had too little history).
+static int64_t g_punchCapture0Frame = 0;
+static std::vector<float> g_punchTrack;   // relaid track storage, reused across takes
+// Relaid frame count for the stopped event (0 = not a punch). The audio
+// thread queues the event with the RAW count, possibly after the worker has
+// already woken for the audio; dispatch overrides it from here instead.
+static int64_t g_punchRelaidFrames = 0;
+// Cap on the loop multiple a punch track may span; a longer hold folds
+// (sums) onto the capped track rather than allocating without bound.
+static constexpr int64_t kMaxPunchCycles = 16;
+
 // ── Queued recording started/stopped Dart events (audio thread -> worker) ──
 // The Dart NativeCallable.listener trampoline is NOT RT-safe: it enters a
 // temporary isolate and takes the port-map lock (allocation + kernel lock on
@@ -141,8 +167,13 @@ static void dispatchPendingRecordingStarted() {
 static void dispatchPendingRecordingStopped() {
   if (!g_pendingStopEvent.load(std::memory_order_acquire)) return;
   g_pendingStopEvent.store(false, std::memory_order_release);
+  int64_t frames = g_pendingStopEventFrames;
+  if (g_punchRelaidFrames > 0) {
+    frames = g_punchRelaidFrames;  // punch take: report the relaid track length
+    g_punchRelaidFrames = 0;
+  }
   if (dartRecordingStoppedCallback != nullptr && g_pendingStopEventPath[0] != '\0') {
-    dartRecordingStoppedCallback(g_pendingStopEventFrames, g_pendingStopEventPath);
+    dartRecordingStoppedCallback(frames, g_pendingStopEventPath);
   }
 }
 
@@ -214,6 +245,85 @@ static void writeWavToFile(const char* path, const float* samples,
 }
 
 // Worker thread function - waits for async notification, processes work
+// Lay the raw punch capture onto a silent track of N whole base loops at the
+// loop phase it was played. Worker thread only (allocates; touches the
+// recorded-audio globals the worker owns at this point).
+//
+// Phase convention — the one quantized overdubs already use: the scheduler
+// starts a quantized take at (loop boundary + RTL) and that capture frame is
+// WAV frame 0, played at the boundary; so capture frame F carries loop time
+// (F − RTL). RTL is the scheduler's latency-compensation figure.
+//
+// Length: N = the number of loop cycles the (RTL-shifted) capture touches,
+// so the take is always an exact loop multiple (the base-loop length lock
+// every consumer relies on) and silence fills everything outside the punch
+// points. Capped at kMaxPunchCycles; beyond that the overrun folds (sums).
+//
+// Anchoring: the track sits on the ABSOLUTE loop grid — track frame t is
+// loop time (loopStart + t) mod N·L — so a playback position is a pure
+// function of the global clock: (G − loopStart) mod N·L. The looper bridge's
+// launch seek only knows the base loop's phase (< L, i.e. cycle 0), which is
+// exact for N = 1; the Dart launch callback re-seeks multi-cycle tracks onto
+// the grid (AudioRecorderBlocV2._punchSeekFrames). The segment already
+// carries the ring extraction's 2.5 ms edge fades, so punch points don't
+// click.
+static void relayPunchTakeOntoLoopTrack() {
+  const int64_t L = NativeScheduler::instance().getBaseLoopFrames();
+  const int64_t loopStart = NativeScheduler::instance().getBaseLoopStartFrame();
+  const int64_t rtl = NativeScheduler::instance().getLatencyCompensationFrames();
+  const unsigned int ch = g_lastRecordedChannels;
+  const int64_t segFrames = (int64_t)g_lastRecordedFrameCount;
+  if (L <= 0 || ch == 0 || segFrames <= 0 || g_lastRecordedAudio == nullptr) {
+    LOOPER_LOG("Punch relay skipped: L=%lld ch=%u frames=%lld",
+               (long long)L, ch, (long long)segFrames);
+    return;
+  }
+  auto floorDiv = [](int64_t a, int64_t b) {
+    int64_t q = a / b;
+    if ((a % b != 0) && ((a < 0) != (b < 0))) --q;
+    return q;
+  };
+  const int64_t a0 = g_punchCapture0Frame - (rtl > 0 ? rtl : 0);  // loop time of frame 0
+  const int64_t a1 = a0 + segFrames;                               // one past the last frame
+  const int64_t startCycle = floorDiv(a0 - loopStart, L);
+  const int64_t endCycle = floorDiv(a1 - 1 - loopStart, L);
+  int64_t cycles = endCycle - startCycle + 1;
+  const bool folded = cycles > kMaxPunchCycles;
+  if (cycles < 1) cycles = 1;
+  if (folded) cycles = kMaxPunchCycles;
+  const int64_t trackFrames = cycles * L;
+  int64_t offset = (a0 - loopStart) % trackFrames;
+  if (offset < 0) offset += trackFrames;
+
+  try {
+    g_punchTrack.assign((size_t)trackFrames * ch, 0.0f);
+  } catch (...) {
+    LOOPER_LOG("Punch relay: allocation of %lld frames failed — raw segment kept",
+               (long long)trackFrames);
+    return;
+  }
+  const float* src = g_lastRecordedAudio;
+  for (int64_t k = 0; k < segFrames; ++k) {
+    const size_t dst = (size_t)((offset + k) % trackFrames) * ch;
+    const size_t si = (size_t)k * ch;
+    for (unsigned int c = 0; c < ch; ++c) {
+      g_punchTrack[dst + c] += src[si + c];
+    }
+  }
+  LOOPER_LOG("Punch relay: %lld frames onto a %lld-cycle track (%lld frames), "
+             "offset %lld%s (capture0=%lld rtl=%lld loopStart=%lld L=%lld)",
+             (long long)segFrames, (long long)cycles, (long long)trackFrames,
+             (long long)offset, folded ? " — FOLDED past the cycle cap" : "",
+             (long long)g_punchCapture0Frame, (long long)rtl,
+             (long long)loopStart, (long long)L);
+
+  // Point the take at the track. Like the ring's mOutputBuffer this storage
+  // is reused across takes and never delete[]'d by freeRecordedAudio.
+  g_lastRecordedAudio = g_punchTrack.data();
+  g_lastRecordedFrameCount = (size_t)trackFrames;
+  g_punchRelaidFrames = trackFrames;
+}
+
 static void looperWorkerThreadFunc() {
   LOOPER_LOG("Thread started");
 
@@ -241,6 +351,10 @@ static void looperWorkerThreadFunc() {
 
     // Do the actual work - this can block, we're not on audio thread
     if (g_lastRecordedAudio != nullptr && g_lastRecordedFrameCount > 0) {
+      // STEP 0: punch-in relay (see g_punchTake). Must precede the WAV write
+      // and the bridge launch — both consume g_lastRecordedAudio.
+      const bool wasPunch = g_punchTake.exchange(false, std::memory_order_acq_rel);
+      if (wasPunch) relayPunchTakeOntoLoopTrack();
       unsigned int numSamples = g_lastRecordedFrameCount * g_lastRecordedChannels;
       LOOPER_LOG("Processing: %u samples (%zu frames, %u ch @ %u Hz)",
               numSamples, g_lastRecordedFrameCount, g_lastRecordedChannels, g_lastRecordedSampleRate);
@@ -334,7 +448,10 @@ static void looperWorkerThreadFunc() {
                     static_cast<std::int64_t>(g_lastRecordedFrameCount),
                     g_lastRecordedChannels,
                     g_lastRecordedSampleRate);
-            if (tempo.bpm > 0.0 && tempo.quantum > 0 &&
+            // Never for a punch take: its audio is mostly silence around a
+            // few punched bars, and it launches MID-loop — anchoring the
+            // clock at (now − length) would shift the grid off the loop.
+            if (!wasPunch && tempo.bpm > 0.0 && tempo.quantum > 0 &&
                 tempo.confidence >= 0.20f) {
               LOOPER_LOG("Tempo inferred: bpm=%.2f q=%u conf=%.2f",
                          tempo.bpm, tempo.quantum, tempo.confidence);
@@ -987,10 +1104,29 @@ flutter_recorder_startRecording(const char *path) {
     return captureNoError;
   }
 
-  // Check if we have a base loop (loop mode) - use native scheduler
+  // Check if we have a base loop (loop mode) - use native scheduler.
+  // A punch-in (free-length) take deliberately skips loop mode: it starts
+  // NOW at whatever phase the loop is at and stops NOW on the next tap; the
+  // Dart recorder relays it onto the loop grid afterwards. Free mode also
+  // leaves mRecordingStartTotalFrame at 0, so the stop extraction takes the
+  // raw frame count instead of rounding to a loop multiple.
   int64_t baseLoopFrames = NativeScheduler::instance().getBaseLoopFrames();
+  const bool freeLengthTake = NativeScheduler::instance().isFreeLengthTake();
+  // Consume-once: the flag applies to THIS start only. The worker-side punch
+  // marker is cleared on EVERY start too, so a punch whose stop never
+  // reached the worker (no audio extracted, reset mid-take) cannot relay a
+  // later, unrelated take with a stale start frame.
+  NativeScheduler::instance().setFreeLengthTake(false);
+  g_punchTake.store(false, std::memory_order_release);
+  g_punchRelaidFrames = 0;
+  const bool punchTake = freeLengthTake && baseLoopFrames > 0;
+  if (punchTake) {
+    printf("[Recorder] Punch-in take: base loop present (%lld frames) but "
+           "taking the FREE branch (immediate start, raw-length stop)\n",
+           (long long)baseLoopFrames);
+  }
 
-  if (baseLoopFrames > 0) {
+  if (baseLoopFrames > 0 && !freeLengthTake) {
     // LOOP MODE: Schedule recording start for next loop boundary
     printf("[Recorder] Loop mode detected (baseLoop=%lld frames) - scheduling quantized start\n",
            (long long)baseLoopFrames);
@@ -1022,6 +1158,28 @@ flutter_recorder_startRecording(const char *path) {
       int64_t latencyFrames = NativeScheduler::instance().getLatencyCompensationFrames();
       g_nativeRingBuffer->startRecording(latencyFrames);
       g_recordingScheduledOrActive.store(true, std::memory_order_release);
+      if (punchTake) {
+        // WAV frame 0 in the RING's frame domain, straight from the ring
+        // (it already accounts for the pre-roll actually applied). Convert
+        // to the engine's global domain with the ring→global offset. The
+        // audio callback writes the ring BEFORE the engine publishes its
+        // frame, so a read that lands between the two sees the offset one
+        // buffer too large; that window is microseconds wide, so the
+        // minimum over a few spaced reads is the steady-state offset.
+        const int64_t ring0 = (int64_t)g_nativeRingBuffer->getRecordingStartFrame();
+        int64_t offset = LLONG_MAX;
+        for (int i = 0; i < 3; ++i) {
+          const int64_t d = (int64_t)g_nativeRingBuffer->getTotalFramesWritten() -
+                            NativeScheduler::instance().getGlobalFrame();
+          if (d < offset) offset = d;
+          if (i < 2) std::this_thread::sleep_for(std::chrono::microseconds(700));
+        }
+        g_punchCapture0Frame = ring0 - offset;
+        g_punchTake.store(true, std::memory_order_release);
+        printf("[Recorder] Punch-in context: capture0=%lld (ring0=%lld, "
+               "ring-global=%lld)\n", (long long)g_punchCapture0Frame,
+               (long long)ring0, (long long)offset);
+      }
       printf("[Recorder] Ring buffer recording started, latencyComp=%lld frames\n",
              (long long)latencyFrames);
       return captureNoError;
@@ -2404,6 +2562,13 @@ FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setRecordCycles(int32_t cycles
 // Get the configured record-cycles multiplier
 FFI_PLUGIN_EXPORT int32_t flutter_recorder_scheduler_getRecordCycles() {
   return NativeScheduler::instance().getRecordCycles();
+}
+
+// Punch-in (free-length) take flag — see NativeScheduler::setFreeLengthTake.
+FFI_PLUGIN_EXPORT void flutter_recorder_scheduler_setFreeLengthTake(int enabled) {
+  NativeScheduler::instance().setFreeLengthTake(enabled != 0);
+  fprintf(stderr, "[Recorder] Free-length (punch) take %s\n",
+          enabled ? "ARMED for next start" : "cleared");
 }
 
 // Get auto-stop enabled state
