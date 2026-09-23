@@ -650,6 +650,42 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
 #endif
 
   // ==========================================================================
+  // INPUT CHANNEL ROUTING (the "track" input config): on a 2ch capture device
+  // fold the pair down to what the player actually plugged in — Left only,
+  // Right only, or an L+R mono sum — and write it to BOTH channels in place.
+  // This runs FIRST so every consumer agrees: the filter chain (AEC), the
+  // native ring buffer (recordings!), onset detection, viz, streaming and both
+  // monitoring paths. Historically this transform sat AFTER the ring-buffer
+  // write, so a guitar on input 1 of an interface monitored fine but every
+  // recorded loop was hard-left. `monitoringMode` is a plain int poked from
+  // the Dart thread; snapshot it once per callback. 0 = stereo passthrough.
+  // ==========================================================================
+  const int inputChannelMode = userData->monitoringMode;
+  if (captured != nullptr && captureChannels == 2 && inputChannelMode != 0) {
+    switch (inputChannelMode) {
+    case 1: // Left to both channels
+      for (ma_uint32 i = 0; i < frameCount; i++) {
+        captured[i * 2 + 1] = captured[i * 2];
+      }
+      break;
+    case 2: // Right to both channels
+      for (ma_uint32 i = 0; i < frameCount; i++) {
+        captured[i * 2] = captured[i * 2 + 1];
+      }
+      break;
+    case 3: // Mono sum (-6dB per side) to both channels
+      for (ma_uint32 i = 0; i < frameCount; i++) {
+        float monoSample = captured[i * 2] * 0.5f + captured[i * 2 + 1] * 0.5f;
+        captured[i * 2] = monoSample;
+        captured[i * 2 + 1] = monoSample;
+      }
+      break;
+    default:
+      break;
+    }
+  }
+
+  // ==========================================================================
   // FILTERS FIRST (AEC included): cancel at the front of the chain so EVERY
   // downstream consumer — the ring buffer (recordings!), auto-record onset
   // detection, visualization, energy metering, streaming — sees the cleaned
@@ -1059,73 +1095,12 @@ void data_callback(ma_device *pDevice, void *pOutput, const void *pInput,
     // Use actual device capture channels for consistency
     // (captureChannels is already defined at top of function)
 
-    if (captureChannels == 2) {
-      // Stereo input - apply monitoring mode
-      switch (userData->monitoringMode) {
-      case 0: // Stereo - normal passthrough at 100%
-      {
-        int channelsToCopy = std::min(captureChannels, playbackChannels);
-        for (ma_uint32 i = 0; i < frameCount * channelsToCopy; i++) {
-          outputFloat[i] = inputFloat[i];
-        }
-      } break;
-      case 1: // LM - Left channel at 100% to both outputs
-        for (ma_uint32 i = 0; i < frameCount; i++) {
-          float leftSample = inputFloat[i * 2];
-          outputFloat[i * 2] = leftSample;     // Left output
-          outputFloat[i * 2 + 1] = leftSample; // Right output
-        }
-        break;
-      case 2: // RM - Right channel at 100% to both outputs
-        for (ma_uint32 i = 0; i < frameCount; i++) {
-          float rightSample = inputFloat[i * 2 + 1];
-          outputFloat[i * 2] = rightSample;     // Left output
-          outputFloat[i * 2 + 1] = rightSample; // Right output
-        }
-        break;
-      case 3: // M - Mono mix at 50% per channel to both outputs
-        for (ma_uint32 i = 0; i < frameCount; i++) {
-          float monoSample =
-              inputFloat[i * 2] * 0.5f + inputFloat[i * 2 + 1] * 0.5f;
-          outputFloat[i * 2] = monoSample;     // Left output
-          outputFloat[i * 2 + 1] = monoSample; // Right output
-        }
-        break;
-      }
-    } else {
-      // Mono input or channel count mismatch - just copy first matching
-      // channels
-      int channelsToCopy = std::min(captureChannels, playbackChannels);
-      for (ma_uint32 i = 0; i < frameCount * channelsToCopy; i++) {
-        outputFloat[i] = inputFloat[i];
-      }
-    }
-  }
-
-  // TRANSFORM CAPTURED BUFFER in-place to match monitoring mode
-  // This ensures recordings, visualizations, and filters all use the same
-  // transformed audio
-  // Note: captureChannels is already defined at top of function using actual
-  // device value
-  if (captureChannels == 2 && userData->monitoringMode != 0) {
-    switch (userData->monitoringMode) {
-    case 1: // LM - Left to both channels
-      for (ma_uint32 i = 0; i < frameCount; i++) {
-        captured[i * 2 + 1] = captured[i * 2]; // Copy left to right
-      }
-      break;
-    case 2: // RM - Right to both channels
-      for (ma_uint32 i = 0; i < frameCount; i++) {
-        captured[i * 2] = captured[i * 2 + 1]; // Copy right to left
-      }
-      break;
-    case 3: // M - Mono mix to both channels
-      for (ma_uint32 i = 0; i < frameCount; i++) {
-        float monoSample = captured[i * 2] * 0.5f + captured[i * 2 + 1] * 0.5f;
-        captured[i * 2] = monoSample;
-        captured[i * 2 + 1] = monoSample;
-      }
-      break;
+    // `captured` is already channel-routed (see INPUT CHANNEL ROUTING at the
+    // top of the callback), so passthrough is a plain copy of the matching
+    // channels.
+    int channelsToCopy = std::min(captureChannels, playbackChannels);
+    for (ma_uint32 i = 0; i < frameCount * channelsToCopy; i++) {
+      outputFloat[i] = inputFloat[i];
     }
   }
 
